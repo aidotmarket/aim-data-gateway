@@ -1,0 +1,14 @@
+{
+  "label": "TEST ONLY - synthetic golden vector",
+  "test_only_seed_hex": "4242424242424242424242424242424242424242424242424242424242424242",
+  "test_only_public_hex": "2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12",
+  "input": {
+    "fid": "0123456789abcdef0123456789abcdef",
+    "iid": "44444444-4444-4444-8444-444444444444",
+    "ready": true,
+    "refusal": null
+  },
+  "canonical": "{\"fid\":\"0123456789abcdef0123456789abcdef\",\"iid\":\"44444444-4444-4444-8444-444444444444\",\"ready\":true,\"refusal\":null}",
+  "token": "eyJhbGciOiJFZERTQSIsImtpZCI6InRlc3Qtb25seS1raWQiLCJ0eXAiOiJhaW0tb2ZmZXJfYWNrK2p3dCJ9.eyJmaWQiOiIwMTIzNDU2Nzg5YWJjZGVmMDEyMzQ1Njc4OWFiY2RlZiIsImlpZCI6IjQ0NDQ0NDQ0LTQ0NDQtNDQ0NC04NDQ0LTQ0NDQ0NDQ0NDQ0NCIsInJlYWR5Ijp0cnVlLCJyZWZ1c2FsIjpudWxsfQ.7A3JntJgTRCBns6mgv0A0pdwpS5ZKRXU7YVw_MhJIvQZYFYdrGmQGYYCJFwOupszhokOP27Uot4dq9-aRr7iBA",
+  "expected_verdict": "valid"
+}

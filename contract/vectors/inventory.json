@@ -1,0 +1,23 @@
+{
+  "label": "TEST ONLY - synthetic golden vector",
+  "test_only_seed_hex": "4242424242424242424242424242424242424242424242424242424242424242",
+  "test_only_public_hex": "2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12",
+  "input": {
+    "files": [
+      {
+        "changed_at": "2026-01-01T00:00:00Z",
+        "content_commitment": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "display_name": "file-01234567.csv",
+        "file_id": "0123456789abcdef0123456789abcdef",
+        "first_seen_at": "2026-01-01T00:00:00Z",
+        "media_type": "text/csv",
+        "present": true,
+        "size_bytes": 2
+      }
+    ],
+    "generation": 1
+  },
+  "canonical": "{\"files\":[{\"changed_at\":\"2026-01-01T00:00:00Z\",\"content_commitment\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"display_name\":\"file-01234567.csv\",\"file_id\":\"0123456789abcdef0123456789abcdef\",\"first_seen_at\":\"2026-01-01T00:00:00Z\",\"media_type\":\"text/csv\",\"present\":true,\"size_bytes\":2}],\"generation\":1}",
+  "token": "eyJhbGciOiJFZERTQSIsImtpZCI6InRlc3Qtb25seS1raWQiLCJ0eXAiOiJhaW0taW52ZW50b3J5K2p3dCJ9.eyJmaWxlcyI6W3siY2hhbmdlZF9hdCI6IjIwMjYtMDEtMDFUMDA6MDA6MDBaIiwiY29udGVudF9jb21taXRtZW50IjoiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYiIsImRpc3BsYXlfbmFtZSI6ImZpbGUtMDEyMzQ1NjcuY3N2IiwiZmlsZV9pZCI6IjAxMjM0NTY3ODlhYmNkZWYwMTIzNDU2Nzg5YWJjZGVmIiwiZmlyc3Rfc2Vlbl9hdCI6IjIwMjYtMDEtMDFUMDA6MDA6MDBaIiwibWVkaWFfdHlwZSI6InRleHQvY3N2IiwicHJlc2VudCI6dHJ1ZSwic2l6ZV9ieXRlcyI6Mn1dLCJnZW5lcmF0aW9uIjoxfQ.nt5wLCU8cfFjvddVgpnRPkVU-0w_lPufqUe-yMvvmqs_JedWWIoZC876Rf_JRAszUolAhWcGj8Pa-9x-WtiSAQ",
+  "expected_verdict": "valid"
+}

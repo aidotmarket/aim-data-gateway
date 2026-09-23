@@ -1,0 +1,16 @@
+{
+  "label": "TEST ONLY - synthetic golden vector",
+  "test_only_seed_hex": "4242424242424242424242424242424242424242424242424242424242424242",
+  "test_only_public_hex": "2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12",
+  "input": {
+    "at": "2026-01-01T00:00:00Z",
+    "dns": "closed",
+    "label": "test-only",
+    "proxy": "closed",
+    "state": "closed",
+    "tcp": "closed"
+  },
+  "canonical": "{\"at\":\"2026-01-01T00:00:00Z\",\"dns\":\"closed\",\"label\":\"test-only\",\"proxy\":\"closed\",\"state\":\"closed\",\"tcp\":\"closed\"}",
+  "token": "eyJhbGciOiJFZERTQSIsImtpZCI6InRlc3Qtb25seS1raWQiLCJ0eXAiOiJhaW0tY2FuYXJ5X3Jlc3VsdCtqd3QifQ.eyJhdCI6IjIwMjYtMDEtMDFUMDA6MDA6MDBaIiwiZG5zIjoiY2xvc2VkIiwibGFiZWwiOiJ0ZXN0LW9ubHkiLCJwcm94eSI6ImNsb3NlZCIsInN0YXRlIjoiY2xvc2VkIiwidGNwIjoiY2xvc2VkIn0.VPbRQndH4IjVVuCUERaOH3M8YXmVHk1p3PLWa2yWdtm_9aOS4MbLQQCsDLxDZ5rZlaCdCyp_lf8GEDTNA-77CQ",
+  "expected_verdict": "valid"
+}

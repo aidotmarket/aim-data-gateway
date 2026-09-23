@@ -1,0 +1,23 @@
+name: CI
+on:
+  push:
+  pull_request:
+jobs:
+  foundation:
+    runs-on: ubuntu-latest
+    env:
+      CGO_ENABLED: '0'
+      GOFLAGS: -mod=readonly
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - run: go vet ./...
+      - run: go test ./...
+      - run: go mod verify
+      - run: python3 scripts/check-module-budget.py
+      - run: python3 scripts/count-lines.py
+      - run: python3 scripts/check-vector-digest.py
+      - run: python3 scripts/check-module-budget.py --self-check && python3 scripts/count-lines.py --self-check

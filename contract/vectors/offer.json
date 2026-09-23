@@ -1,0 +1,17 @@
+{
+  "label": "TEST ONLY - synthetic golden vector",
+  "test_only_seed_hex": "4242424242424242424242424242424242424242424242424242424242424242",
+  "test_only_public_hex": "2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12",
+  "input": {
+    "aud": "11111111-1111-4111-8111-111111111111",
+    "fid": "0123456789abcdef0123456789abcdef",
+    "iat": 1767225600,
+    "iid": "44444444-4444-4444-8444-444444444444",
+    "lvid": "33333333-3333-4333-8333-333333333333",
+    "op": "offer",
+    "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  "canonical": "{\"aud\":\"11111111-1111-4111-8111-111111111111\",\"fid\":\"0123456789abcdef0123456789abcdef\",\"iat\":1767225600,\"iid\":\"44444444-4444-4444-8444-444444444444\",\"lvid\":\"33333333-3333-4333-8333-333333333333\",\"op\":\"offer\",\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}",
+  "token": "eyJhbGciOiJFZERTQSIsImtpZCI6InRlc3Qtb25seS1raWQiLCJ0eXAiOiJhaW0tb2ZmZXIrand0In0.eyJhdWQiOiIxMTExMTExMS0xMTExLTQxMTEtODExMS0xMTExMTExMTExMTEiLCJmaWQiOiIwMTIzNDU2Nzg5YWJjZGVmMDEyMzQ1Njc4OWFiY2RlZiIsImlhdCI6MTc2NzIyNTYwMCwiaWlkIjoiNDQ0NDQ0NDQtNDQ0NC00NDQ0LTg0NDQtNDQ0NDQ0NDQ0NDQ0IiwibHZpZCI6IjMzMzMzMzMzLTMzMzMtNDMzMy04MzMzLTMzMzMzMzMzMzMzMyIsIm9wIjoib2ZmZXIiLCJzaGEyNTYiOiJhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhIn0.zB0LxG3YDjAsvjAemw5T0zNy2YbyDkZgaBVrG2Zu_wwDbuF6W67TAJhzCBpuSyoARJKWbOgUTQk8OyE-K2T_Aw",
+  "expected_verdict": "valid"
+}
