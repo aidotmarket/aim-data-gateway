@@ -1,6 +1,7 @@
 package profile
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -24,6 +25,30 @@ func TestDistinctBuckets(t *testing.T) {
 		if got := a.bucket(); got != tc.bucket {
 			t.Fatalf("%d distinct: %s want %s", tc.count, got, tc.bucket)
 		}
+	}
+}
+func TestAllNullAndDeadline(t *testing.T) {
+	root := t.TempDir()
+	os.WriteFile(filepath.Join(root, "empty.csv"), []byte("a,b\n,\n"), 0600)
+	c := config.Config{Sources: []config.Source{{Name: "a", Path: root}}}
+	k, _ := ids.Derive(make([]byte, 32))
+	records, e := inventory.Scan(c, k)
+	if e != nil {
+		t.Fatal(e)
+	}
+	d, e := File(records[0], config.Columns{})
+	if e != nil {
+		t.Fatal(e)
+	}
+	for _, col := range d.Columns {
+		if col.Type != "string" {
+			t.Fatal(col)
+		}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, e := FileContext(ctx, records[0], config.Columns{}); e == nil || e.Error() != "gateway_timeout" {
+		t.Fatal(e)
 	}
 }
 

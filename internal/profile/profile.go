@@ -2,6 +2,7 @@ package profile
 
 import (
 	"bufio"
+	"context"
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/csv"
@@ -144,31 +145,47 @@ func describe(acc []*accumulator, rows int64, rule config.Columns, sha string) D
 		}
 		kind := a.kind
 		if kind == "" {
-			kind = "other"
+			kind = "string"
 		}
 		d.Columns = append(d.Columns, Column{name, kind, NullRate(a.nulls, rows), a.bucket()})
 	}
 	return d
 }
 func File(r inventory.Record, rule config.Columns) (Description, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+	defer cancel()
+	return FileContext(ctx, r, rule)
+}
+func FileContext(ctx context.Context, r inventory.Record, rule config.Columns) (Description, error) {
+	if e := checkDeadline(ctx); e != nil {
+		return Description{}, e
+	}
 	sha := hex.EncodeToString(r.SHA256[:])
 	switch r.Phase1.MediaType {
 	case "text/csv", "text/tab-separated-values":
-		return delimited(r, rule, sha)
+		return delimited(ctx, r, rule, sha)
 	case "application/x-ndjson":
-		return jsonLines(r, rule, sha)
+		return jsonLines(ctx, r, rule, sha)
 	case "application/vnd.apache.parquet":
-		return parquetFile(r, rule, sha)
+		return parquetFile(ctx, r, rule, sha)
 	default:
 		return Description{}, errors.New("unsupported_format")
 	}
 }
-func delimited(r inventory.Record, rule config.Columns, sha string) (Description, error) {
+func checkDeadline(ctx context.Context) error {
+	if ctx.Err() != nil {
+		return errors.New("gateway_timeout")
+	}
+	return nil
+}
+func delimited(ctx context.Context, r inventory.Record, rule config.Columns, sha string) (Description, error) {
 	f, e := r.Open()
 	if e != nil {
 		return Description{}, e
 	}
 	defer f.Close()
+	stop := context.AfterFunc(ctx, func() { f.Close() })
+	defer stop()
 	cr := csv.NewReader(f)
 	if r.Phase1.MediaType == "text/tab-separated-values" {
 		cr.Comma = '\t'
@@ -186,11 +203,17 @@ func delimited(r inventory.Record, rule config.Columns, sha string) (Description
 	}
 	var rows int64
 	for {
+		if e := checkDeadline(ctx); e != nil {
+			return Description{}, e
+		}
 		values, e := cr.Read()
 		if e == io.EOF {
 			break
 		}
 		if e != nil {
+			if timeout := checkDeadline(ctx); timeout != nil {
+				return Description{}, timeout
+			}
 			return Description{}, e
 		}
 		rows++
@@ -207,18 +230,23 @@ func delimited(r inventory.Record, rule config.Columns, sha string) (Description
 	}
 	return describe(acc, rows, rule, sha), nil
 }
-func jsonLines(r inventory.Record, rule config.Columns, sha string) (Description, error) {
+func jsonLines(ctx context.Context, r inventory.Record, rule config.Columns, sha string) (Description, error) {
 	f, e := r.Open()
 	if e != nil {
 		return Description{}, e
 	}
 	defer f.Close()
+	stop := context.AfterFunc(ctx, func() { f.Close() })
+	defer stop()
 	sc := bufio.NewScanner(f)
 	sc.Buffer(make([]byte, 64*1024), 16<<20)
 	acc := map[string]*accumulator{}
 	order := []string{}
 	var rows int64
 	for sc.Scan() {
+		if e := checkDeadline(ctx); e != nil {
+			return Description{}, e
+		}
 		var obj map[string]json.RawMessage
 		if e := json.Unmarshal(sc.Bytes(), &obj); e != nil {
 			return Description{}, e
@@ -254,6 +282,9 @@ func jsonLines(r inventory.Record, rule config.Columns, sha string) (Description
 		}
 	}
 	if e := sc.Err(); e != nil {
+		if timeout := checkDeadline(ctx); timeout != nil {
+			return Description{}, timeout
+		}
 		return Description{}, e
 	}
 	cols := make([]*accumulator, 0, len(order))
@@ -263,12 +294,14 @@ func jsonLines(r inventory.Record, rule config.Columns, sha string) (Description
 	}
 	return describe(cols, rows, rule, sha), nil
 }
-func parquetFile(r inventory.Record, rule config.Columns, sha string) (Description, error) {
+func parquetFile(ctx context.Context, r inventory.Record, rule config.Columns, sha string) (Description, error) {
 	f, e := r.Open()
 	if e != nil {
 		return Description{}, e
 	}
 	defer f.Close()
+	stop := context.AfterFunc(ctx, func() { f.Close() })
+	defer stop()
 	pf, e := file.NewParquetReader(f)
 	if e != nil {
 		return Description{}, e
@@ -291,6 +324,9 @@ func parquetFile(r inventory.Record, rule config.Columns, sha string) (Descripti
 		acc[i] = &accumulator{name: sch.Column(i).Name(), kind: kind}
 	}
 	for rg := 0; rg < pf.NumRowGroups(); rg++ {
+		if e := checkDeadline(ctx); e != nil {
+			return Description{}, e
+		}
 		group := pf.RowGroup(rg)
 		for i, a := range acc {
 			if a == nil {
@@ -300,7 +336,7 @@ func parquetFile(r inventory.Record, rule config.Columns, sha string) (Descripti
 			if e != nil {
 				return Description{}, e
 			}
-			if e := readParquetColumn(col, group.NumRows(), a); e != nil {
+			if e := readParquetColumn(ctx, col, group.NumRows(), a); e != nil {
 				return Description{}, fmt.Errorf("parquet column %d: %w", i, e)
 			}
 		}
@@ -350,7 +386,7 @@ func parquetType(t parquet.Type) string {
 		return "string"
 	}
 }
-func readParquetColumn(c file.ColumnChunkReader, rows int64, a *accumulator) error {
+func readParquetColumn(ctx context.Context, c file.ColumnChunkReader, rows int64, a *accumulator) error {
 	// Flat columns have at most one value per row; nested columns are rejected until a flattening rule is specified.
 	if c.Descriptor().MaxRepetitionLevel() > 0 {
 		return errors.New("nested parquet column unsupported")
@@ -359,6 +395,9 @@ func readParquetColumn(c file.ColumnChunkReader, rows int64, a *accumulator) err
 	reps := make([]int16, 1024)
 	remaining := rows
 	for remaining > 0 {
+		if e := checkDeadline(ctx); e != nil {
+			return e
+		}
 		n := min(remaining, 1024)
 		var total int64
 		var read int
