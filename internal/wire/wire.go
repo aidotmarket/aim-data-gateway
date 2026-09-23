@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -281,6 +282,17 @@ var hex32 = regexp.MustCompile(`^[0-9a-f]{32}$`)
 var hex64 = regexp.MustCompile(`^[0-9a-f]{64}$`)
 var uuid = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 
+var revokeStates = []string{"active", "expired", "closed", "unknown"}
+var refusalCodes = []string{"not_offered", "outside_ceiling", "awaiting_local_approval", "file_changed", "file_missing", "coverage_exhausted", "complete"}
+var receiptOutcomes = []string{"in_progress", "complete", "aborted_block_mismatch", "aborted_deadline"}
+
+func validReadiness(ready bool, refusal *string) bool {
+	if ready {
+		return refusal == nil
+	}
+	return refusal != nil && slices.Contains(refusalCodes, *refusal)
+}
+
 func required(token string, names ...string) error {
 	parts := strings.Split(token, ".")
 	if len(parts) != 3 {
@@ -399,19 +411,19 @@ func VerifyGatewayAnswer(token, name string, keys map[string]ed25519.PublicKey, 
 	switch name {
 	case "revoke_ack":
 		v, ok := out.(*RevokeAck)
-		if !ok || v.Op != name || !uuid.MatchString(v.JTI) {
+		if !ok || v.Op != name || !uuid.MatchString(v.JTI) || !slices.Contains(revokeStates, v.StateBefore) {
 			return errors.New("invalid revoke ack")
 		}
 		return required(token, "op", "jti", "state_before")
 	case "prepare_ack":
 		v, ok := out.(*PrepareAck)
-		if !ok || v.Op != name || !uuid.MatchString(v.IID) || !uuid.MatchString(v.OrderID) || !hex32.MatchString(v.FileID) || (!v.Ready && v.Refusal == nil) {
+		if !ok || v.Op != name || !uuid.MatchString(v.IID) || !uuid.MatchString(v.OrderID) || !hex32.MatchString(v.FileID) || !validReadiness(v.Ready, v.Refusal) {
 			return errors.New("invalid prepare ack")
 		}
 		return required(token, "op", "iid", "oid", "fid", "ready", "refusal", "resume_offset", "transmitted_bytes", "interval_count", "max_serve_count")
 	case "receipt":
 		v, ok := out.(*Receipt)
-		if !ok || v.Op != name || !uuid.MatchString(v.OrderID) || !hex32.MatchString(v.FileID) || !hex64.MatchString(v.SHA256) {
+		if !ok || v.Op != name || !uuid.MatchString(v.OrderID) || !hex32.MatchString(v.FileID) || !hex64.MatchString(v.SHA256) || !slices.Contains(receiptOutcomes, v.Outcome) {
 			return errors.New("invalid receipt")
 		}
 		return required(token, "op", "oid", "fid", "sha256", "size_bytes", "jtis", "transmitted", "transmitted_bytes", "max_serves_reached_bytes", "outcome", "blocks_verified", "first_byte_at", "last_byte_at", "seq")
@@ -446,7 +458,7 @@ func VerifyGatewayAnswer(token, name string, keys map[string]ed25519.PublicKey, 
 		return required(token, "state", "dns", "tcp", "proxy", "label", "at")
 	case "offer_ack":
 		v, ok := out.(*OfferAck)
-		if !ok || !uuid.MatchString(v.IID) || !hex32.MatchString(v.FileID) || (!v.Ready && v.Refusal == nil) {
+		if !ok || !uuid.MatchString(v.IID) || !hex32.MatchString(v.FileID) || !validReadiness(v.Ready, v.Refusal) {
 			return errors.New("invalid offer ack")
 		}
 		return required(token, "iid", "fid", "ready", "refusal")

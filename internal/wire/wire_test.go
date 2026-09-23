@@ -107,6 +107,62 @@ func TestStrictVerifiers(t *testing.T) {
 	check(t, "instruction", sign(t, "aim-describe+jwt", "kid", expired), false)
 }
 
+func TestGatewayAnswerVocabulary(t *testing.T) {
+	priv := ed25519.NewKeyFromSeed(make([]byte, 32))
+	keys := map[string]ed25519.PublicKey{"kid": priv.Public().(ed25519.PublicKey)}
+	id := "22222222-2222-4222-8222-222222222222"
+	fid := "0123456789abcdef0123456789abcdef"
+	sha := strings.Repeat("a", 64)
+	unknown := "not_a_refusal"
+	valid := "file_changed"
+	revoke := RevokeAck{Op: "revoke_ack", JTI: id, StateBefore: "active"}
+	prepare := PrepareAck{Op: "prepare_ack", IID: id, OrderID: id, FileID: fid, Ready: true}
+	offer := OfferAck{IID: id, FileID: fid, Ready: true}
+	receipt := Receipt{Op: "receipt", OrderID: id, FileID: fid, SHA256: sha, JTIs: []string{}, Transmitted: []Interval{}, Outcome: "complete"}
+	for _, tc := range []struct {
+		name, answer string
+		body         any
+		valid        bool
+	}{
+		{"valid revoke", "revoke_ack", revoke, true},
+		{"unknown state_before", "revoke_ack", RevokeAck{Op: "revoke_ack", JTI: id, StateBefore: "not_a_state"}, false},
+		{"valid prepare", "prepare_ack", prepare, true},
+		{"prepare refusal", "prepare_ack", PrepareAck{Op: "prepare_ack", IID: id, OrderID: id, FileID: fid, Refusal: &valid}, true},
+		{"prepare unknown refusal", "prepare_ack", PrepareAck{Op: "prepare_ack", IID: id, OrderID: id, FileID: fid, Refusal: &unknown}, false},
+		{"prepare ready with refusal", "prepare_ack", PrepareAck{Op: "prepare_ack", IID: id, OrderID: id, FileID: fid, Ready: true, Refusal: &valid}, false},
+		{"prepare not ready without refusal", "prepare_ack", PrepareAck{Op: "prepare_ack", IID: id, OrderID: id, FileID: fid}, false},
+		{"valid offer", "offer_ack", offer, true},
+		{"offer refusal", "offer_ack", OfferAck{IID: id, FileID: fid, Refusal: &valid}, true},
+		{"offer unknown refusal", "offer_ack", OfferAck{IID: id, FileID: fid, Refusal: &unknown}, false},
+		{"offer ready with refusal", "offer_ack", OfferAck{IID: id, FileID: fid, Ready: true, Refusal: &valid}, false},
+		{"offer not ready without refusal", "offer_ack", OfferAck{IID: id, FileID: fid}, false},
+		{"valid receipt", "receipt", receipt, true},
+		{"unknown outcome", "receipt", Receipt{Op: "receipt", OrderID: id, FileID: fid, SHA256: sha, JTIs: []string{}, Transmitted: []Interval{}, Outcome: "not_an_outcome"}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			token, err := Sign("aim-"+tc.answer+"+jwt", "kid", tc.body, priv)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var out any
+			switch tc.answer {
+			case "revoke_ack":
+				out = new(RevokeAck)
+			case "prepare_ack":
+				out = new(PrepareAck)
+			case "offer_ack":
+				out = new(OfferAck)
+			case "receipt":
+				out = new(Receipt)
+			}
+			err = VerifyGatewayAnswer(token, tc.answer, keys, out)
+			if (err == nil) != tc.valid {
+				t.Fatalf("valid=%v error=%v", tc.valid, err)
+			}
+		})
+	}
+}
+
 func jsonBody(t *testing.T, v any) string {
 	t.Helper()
 	b, err := json.Marshal(v)
