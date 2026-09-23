@@ -1,0 +1,12 @@
+{
+  "label": "TEST ONLY - synthetic golden vector",
+  "test_only_seed_hex": "4242424242424242424242424242424242424242424242424242424242424242",
+  "test_only_public_hex": "2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12",
+  "input": {
+    "jti": "jti-test",
+    "op": "revoke_ack",
+    "state_before": "unknown"
+  },
+  "canonical": "{\"jti\":\"jti-test\",\"op\":\"revoke_ack\",\"state_before\":\"unknown\"}",
+  "expected_verdict": "valid"
+}

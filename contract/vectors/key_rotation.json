@@ -1,0 +1,21 @@
+{
+  "label": "TEST ONLY - synthetic golden vector",
+  "test_only_seed_hex": "4242424242424242424242424242424242424242424242424242424242424242",
+  "test_only_public_hex": "2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12",
+  "input": {
+    "aud": "gateway-test",
+    "iat": 100,
+    "iid": "iid-test",
+    "keys": [
+      {
+        "alg": "EdDSA",
+        "key": "public-test",
+        "kid": "next-test"
+      }
+    ],
+    "op": "key_rotation"
+  },
+  "canonical": "{\"aud\":\"gateway-test\",\"iat\":100,\"iid\":\"iid-test\",\"keys\":[{\"alg\":\"EdDSA\",\"key\":\"public-test\",\"kid\":\"next-test\"}],\"op\":\"key_rotation\"}",
+  "token": "eyJhbGciOiJFZERTQSIsImtpZCI6InRlc3Qtb25seS1raWQiLCJ0eXAiOiJhaW0ta2V5cytqd3QifQ.eyJhdWQiOiJnYXRld2F5LXRlc3QiLCJpYXQiOjEwMCwiaWlkIjoiaWlkLXRlc3QiLCJrZXlzIjpbeyJhbGciOiJFZERTQSIsImtleSI6InB1YmxpYy10ZXN0Iiwia2lkIjoibmV4dC10ZXN0In1dLCJvcCI6ImtleV9yb3RhdGlvbiJ9.V_cik4R8-8lQwK2UtuiF5YYM4UjUgHGKCiz0YKdctjCkmxH-GScnD3J6e2_GfNuAVCCBHyTn2fbHbXl3J3d-CQ",
+  "expected_verdict": "valid"
+}

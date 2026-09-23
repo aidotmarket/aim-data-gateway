@@ -1,0 +1,20 @@
+{
+  "label": "TEST ONLY - synthetic golden vector",
+  "test_only_seed_hex": "4242424242424242424242424242424242424242424242424242424242424242",
+  "test_only_public_hex": "2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12",
+  "input": {
+    "aud": "gateway-test",
+    "fid": "0123456789abcdef0123456789abcdef",
+    "iat": 100,
+    "jti": "jti-test",
+    "lvid": "listing-test",
+    "oid": "order-test",
+    "ro": 0,
+    "sd": 1000,
+    "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "td": 2000
+  },
+  "canonical": "{\"aud\":\"gateway-test\",\"fid\":\"0123456789abcdef0123456789abcdef\",\"iat\":100,\"jti\":\"jti-test\",\"lvid\":\"listing-test\",\"oid\":\"order-test\",\"ro\":0,\"sd\":1000,\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"td\":2000}",
+  "token": "eyJhbGciOiJFZERTQSIsImtpZCI6InRlc3Qtb25seS1raWQiLCJ0eXAiOiJhaW0tcGVybWlzc2lvbitqd3QifQ.eyJhdWQiOiJnYXRld2F5LXRlc3QiLCJmaWQiOiIwMTIzNDU2Nzg5YWJjZGVmMDEyMzQ1Njc4OWFiY2RlZiIsImlhdCI6MTAwLCJqdGkiOiJqdGktdGVzdCIsImx2aWQiOiJsaXN0aW5nLXRlc3QiLCJvaWQiOiJvcmRlci10ZXN0Iiwicm8iOjAsInNkIjoxMDAwLCJzaGEyNTYiOiJhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhIiwidGQiOjIwMDB9.CplZO7-zaZgKgD89yx3W3er8S3K_tZExD57MvuDmzN5gK2RVrVFcrTi6PIaP0HGpzjYZSG6LCUS-BQ4zYQ5QAg",
+  "expected_verdict": "valid"
+}

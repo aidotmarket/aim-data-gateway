@@ -1,0 +1,15 @@
+{
+  "label": "TEST ONLY - synthetic golden vector",
+  "test_only_seed_hex": "4242424242424242424242424242424242424242424242424242424242424242",
+  "test_only_public_hex": "2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12",
+  "input": {
+    "aud": "gateway-test",
+    "iat": 100,
+    "iid": "iid-test",
+    "jti": "jti-test",
+    "op": "revoke"
+  },
+  "canonical": "{\"aud\":\"gateway-test\",\"iat\":100,\"iid\":\"iid-test\",\"jti\":\"jti-test\",\"op\":\"revoke\"}",
+  "token": "eyJhbGciOiJFZERTQSIsImtpZCI6InRlc3Qtb25seS1raWQiLCJ0eXAiOiJhaW0tcmV2b2tlK2p3dCJ9.eyJhdWQiOiJnYXRld2F5LXRlc3QiLCJpYXQiOjEwMCwiaWlkIjoiaWlkLXRlc3QiLCJqdGkiOiJqdGktdGVzdCIsIm9wIjoicmV2b2tlIn0.kehrHO1i_S_sAUAZ8K2jCyamW7463sj8GW73MRXFdRmgSKCIx8hz4dIGjWKDdKXd5m_qHZ_js-1ypj_qiw9bAA",
+  "expected_verdict": "valid"
+}

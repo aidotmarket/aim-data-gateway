@@ -1,0 +1,24 @@
+{
+  "label": "TEST ONLY - synthetic golden vector",
+  "test_only_seed_hex": "4242424242424242424242424242424242424242424242424242424242424242",
+  "test_only_public_hex": "2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12",
+  "input": {
+    "default_display_name": "file-01234567.csv",
+    "inclusive_intervals": {
+      "byte_one": 1,
+      "byte_zero": 1,
+      "last_byte": 1,
+      "open_ended_from_10_of_100": 90,
+      "suffix_10_of_100": 10
+    },
+    "null_rate_boundaries": {
+      "249_of_10000": 0,
+      "250_of_10000": 5,
+      "9749_of_10000": 95,
+      "9750_of_10000": 100,
+      "zero_rows": null
+    }
+  },
+  "canonical": "{\"default_display_name\":\"file-01234567.csv\",\"inclusive_intervals\":{\"byte_one\":1,\"byte_zero\":1,\"last_byte\":1,\"open_ended_from_10_of_100\":90,\"suffix_10_of_100\":10},\"null_rate_boundaries\":{\"249_of_10000\":0,\"250_of_10000\":5,\"9749_of_10000\":95,\"9750_of_10000\":100,\"zero_rows\":null}}",
+  "expected_verdict": "valid"
+}

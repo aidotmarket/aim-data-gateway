@@ -1,0 +1,20 @@
+{
+  "label": "TEST ONLY - synthetic golden vector",
+  "test_only_seed_hex": "4242424242424242424242424242424242424242424242424242424242424242",
+  "test_only_public_hex": "2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12",
+  "input": {
+    "files": [
+      {
+        "content_commitment": "commitment-test",
+        "display_name": "file-01234567.csv",
+        "file_id": "fid-test",
+        "media_type": "text/csv",
+        "present": true,
+        "size_bytes": 2
+      }
+    ],
+    "generation": 1
+  },
+  "canonical": "{\"files\":[{\"content_commitment\":\"commitment-test\",\"display_name\":\"file-01234567.csv\",\"file_id\":\"fid-test\",\"media_type\":\"text/csv\",\"present\":true,\"size_bytes\":2}],\"generation\":1}",
+  "expected_verdict": "valid"
+}

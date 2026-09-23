@@ -1,0 +1,30 @@
+{
+  "label": "TEST ONLY - synthetic golden vector",
+  "test_only_seed_hex": "4242424242424242424242424242424242424242424242424242424242424242",
+  "test_only_public_hex": "2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12",
+  "input": {
+    "blocks_verified": true,
+    "fid": "fid-test",
+    "first_byte_at": "2026-01-01T00:00:00Z",
+    "jtis": [
+      "jti-test"
+    ],
+    "last_byte_at": "2026-01-01T00:00:01Z",
+    "max_serves_reached_bytes": 0,
+    "oid": "order-test",
+    "op": "receipt",
+    "outcome": "complete",
+    "seq": 1,
+    "sha256": "sha-test",
+    "size_bytes": 2,
+    "transmitted": [
+      [
+        0,
+        1
+      ]
+    ],
+    "transmitted_bytes": 2
+  },
+  "canonical": "{\"blocks_verified\":true,\"fid\":\"fid-test\",\"first_byte_at\":\"2026-01-01T00:00:00Z\",\"jtis\":[\"jti-test\"],\"last_byte_at\":\"2026-01-01T00:00:01Z\",\"max_serves_reached_bytes\":0,\"oid\":\"order-test\",\"op\":\"receipt\",\"outcome\":\"complete\",\"seq\":1,\"sha256\":\"sha-test\",\"size_bytes\":2,\"transmitted\":[[0,1]],\"transmitted_bytes\":2}",
+  "expected_verdict": "valid"
+}
