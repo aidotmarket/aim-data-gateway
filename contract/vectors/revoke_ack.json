@@ -3,10 +3,11 @@
   "test_only_seed_hex": "4242424242424242424242424242424242424242424242424242424242424242",
   "test_only_public_hex": "2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12",
   "input": {
-    "jti": "jti-test",
+    "jti": "44444444-4444-4444-8444-444444444444",
     "op": "revoke_ack",
     "state_before": "unknown"
   },
-  "canonical": "{\"jti\":\"jti-test\",\"op\":\"revoke_ack\",\"state_before\":\"unknown\"}",
+  "canonical": "{\"jti\":\"44444444-4444-4444-8444-444444444444\",\"op\":\"revoke_ack\",\"state_before\":\"unknown\"}",
+  "token": "eyJhbGciOiJFZERTQSIsImtpZCI6InRlc3Qtb25seS1raWQiLCJ0eXAiOiJhaW0tcmV2b2tlX2Fjaytqd3QifQ.eyJqdGkiOiI0NDQ0NDQ0NC00NDQ0LTQ0NDQtODQ0NC00NDQ0NDQ0NDQ0NDQiLCJvcCI6InJldm9rZV9hY2siLCJzdGF0ZV9iZWZvcmUiOiJ1bmtub3duIn0.6j0f0ZP-cyWsKU6cCL9J3-mQw7nDHeyyNXZ-vrFmWd3spivHdfjG9xm850lnYBQ9kp05sKmNZ9-nM98M03d_Dw",
   "expected_verdict": "valid"
 }

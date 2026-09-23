@@ -7,5 +7,6 @@
     "message": "test only"
   },
   "canonical": "{\"code\":\"read_error\",\"message\":\"test only\"}",
+  "token": "eyJhbGciOiJFZERTQSIsImtpZCI6InRlc3Qtb25seS1raWQiLCJ0eXAiOiJhaW0tZXJyb3Irand0In0.eyJjb2RlIjoicmVhZF9lcnJvciIsIm1lc3NhZ2UiOiJ0ZXN0IG9ubHkifQ.RKzCb5PFc7dHHVTikeriB8xGiqET6ms1gciXDuq8Jsnvyzp-g1Psi_OIUfgl5HkzFBsbpC_O_2no-M-2HAEwCA",
   "expected_verdict": "valid"
 }

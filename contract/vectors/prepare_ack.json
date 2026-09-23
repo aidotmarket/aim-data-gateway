@@ -3,17 +3,18 @@
   "test_only_seed_hex": "4242424242424242424242424242424242424242424242424242424242424242",
   "test_only_public_hex": "2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12",
   "input": {
-    "fid": "fid-test",
-    "iid": "iid-test",
+    "fid": "0123456789abcdef0123456789abcdef",
+    "iid": "44444444-4444-4444-8444-444444444444",
     "interval_count": 0,
     "max_serve_count": 0,
-    "oid": "order-test",
+    "oid": "22222222-2222-4222-8222-222222222222",
     "op": "prepare_ack",
     "ready": true,
     "refusal": null,
     "resume_offset": 0,
     "transmitted_bytes": 0
   },
-  "canonical": "{\"fid\":\"fid-test\",\"iid\":\"iid-test\",\"interval_count\":0,\"max_serve_count\":0,\"oid\":\"order-test\",\"op\":\"prepare_ack\",\"ready\":true,\"refusal\":null,\"resume_offset\":0,\"transmitted_bytes\":0}",
+  "canonical": "{\"fid\":\"0123456789abcdef0123456789abcdef\",\"iid\":\"44444444-4444-4444-8444-444444444444\",\"interval_count\":0,\"max_serve_count\":0,\"oid\":\"22222222-2222-4222-8222-222222222222\",\"op\":\"prepare_ack\",\"ready\":true,\"refusal\":null,\"resume_offset\":0,\"transmitted_bytes\":0}",
+  "token": "eyJhbGciOiJFZERTQSIsImtpZCI6InRlc3Qtb25seS1raWQiLCJ0eXAiOiJhaW0tcHJlcGFyZV9hY2srand0In0.eyJmaWQiOiIwMTIzNDU2Nzg5YWJjZGVmMDEyMzQ1Njc4OWFiY2RlZiIsImlpZCI6IjQ0NDQ0NDQ0LTQ0NDQtNDQ0NC04NDQ0LTQ0NDQ0NDQ0NDQ0NCIsImludGVydmFsX2NvdW50IjowLCJtYXhfc2VydmVfY291bnQiOjAsIm9pZCI6IjIyMjIyMjIyLTIyMjItNDIyMi04MjIyLTIyMjIyMjIyMjIyMiIsIm9wIjoicHJlcGFyZV9hY2siLCJyZWFkeSI6dHJ1ZSwicmVmdXNhbCI6bnVsbCwicmVzdW1lX29mZnNldCI6MCwidHJhbnNtaXR0ZWRfYnl0ZXMiOjB9.TzO0mFoZcHktUHy6fL_gMcELg7VcBnZWbSPzZaBtAjSjW-E3Z1hkHHSLM0saCtFK6R2JODNza955kiA8GR1SDQ",
   "expected_verdict": "valid"
 }

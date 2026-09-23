@@ -3,13 +3,18 @@ package contract
 import (
 	"bytes"
 	"crypto/ed25519"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/aidotmarket/aim-data-gateway/internal/ids"
+	"github.com/aidotmarket/aim-data-gateway/internal/inventory"
 	"github.com/aidotmarket/aim-data-gateway/internal/profile"
 	"github.com/aidotmarket/aim-data-gateway/internal/wire"
 )
@@ -23,91 +28,210 @@ type vector struct {
 	Token             string          `json:"token,omitempty"`
 	ExpectedVerdict   string          `json:"expected_verdict"`
 }
+type fixture struct {
+	typ  string
+	body any
+	kind string
+}
+
+const (
+	gate       = "11111111-1111-4111-8111-111111111111"
+	order      = "22222222-2222-4222-8222-222222222222"
+	listing    = "33333333-3333-4333-8333-333333333333"
+	request    = "44444444-4444-4444-8444-444444444444"
+	confirm    = "55555555-5555-4555-8555-555555555555"
+	fileID     = "0123456789abcdef0123456789abcdef"
+	sha        = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	commitment = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+)
 
 func TestGoldenVectors(t *testing.T) {
 	seed := bytes.Repeat([]byte{0x42}, 32)
 	priv := ed25519.NewKeyFromSeed(seed)
 	pub := priv.Public().(ed25519.PublicKey)
-	fixtures := map[string]struct {
-		typ  string
-		body any
-	}{
-		"permission":      {typ: "aim-permission+jwt", body: wire.Permission{Audience: "gateway-test", OrderID: "order-test", ListingVersionID: "listing-test", FileID: "0123456789abcdef0123456789abcdef", SHA256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", JTI: "jti-test", IssuedAt: 100, StartDeadline: 1000, TransferDeadline: 2000, ResumeOffset: 0}},
-		"offer":           {typ: "aim-offer+jwt", body: wire.Instruction{Op: "offer", Audience: "gateway-test", IID: "iid-test", IssuedAt: 100, FileID: "fid-test", SHA256: "sha-test", ListingVersionID: "lvid-test"}},
-		"unoffer":         {typ: "aim-offer+jwt", body: wire.Instruction{Op: "unoffer", Audience: "gateway-test", IID: "iid-test", IssuedAt: 100, FileID: "fid-test", SHA256: "sha-test", ListingVersionID: "lvid-test"}},
-		"describe":        {typ: "aim-describe+jwt", body: wire.Instruction{Op: "describe", Audience: "gateway-test", IID: "iid-test", IssuedAt: 100, FileID: "fid-test", ConfirmationID: "cid-test", ExpiresAt: 1000}},
-		"revoke":          {typ: "aim-revoke+jwt", body: wire.Instruction{Op: "revoke", Audience: "gateway-test", IID: "iid-test", IssuedAt: 100, JTI: "jti-test"}},
-		"prepare":         {typ: "aim-prepare+jwt", body: wire.Instruction{Op: "prepare", Audience: "gateway-test", IID: "iid-test", IssuedAt: 100, OrderID: "order-test", FileID: "fid-test", SHA256: "sha-test"}},
-		"key_rotation":    {typ: "aim-keys+jwt", body: wire.Instruction{Op: "key_rotation", Audience: "gateway-test", IID: "iid-test", IssuedAt: 100, Keys: []wire.Key{{KID: "next-test", Alg: "EdDSA", Key: "public-test"}}}},
-		"minimum_version": {typ: "aim-minver+jwt", body: wire.Instruction{Op: "minimum_version", Audience: "gateway-test", IID: "iid-test", IssuedAt: 100, Version: "1.2.3"}},
-		"revoke_ack":      {body: wire.RevokeAck{Op: "revoke_ack", JTI: "jti-test", StateBefore: "unknown"}},
-		"prepare_ack":     {body: wire.PrepareAck{Op: "prepare_ack", IID: "iid-test", OrderID: "order-test", FileID: "fid-test", Ready: true, ResumeOffset: 0, TransmittedBytes: 0, IntervalCount: 0, MaxServeCount: 0}},
-		"receipt":         {body: wire.Receipt{Op: "receipt", OrderID: "order-test", FileID: "fid-test", SHA256: "sha-test", SizeBytes: 2, JTIs: []string{"jti-test"}, Transmitted: []wire.Interval{{0, 1}}, TransmittedBytes: 2, MaxServesReachedBytes: 0, Outcome: "complete", BlocksVerified: true, FirstByteAt: "2026-01-01T00:00:00Z", LastByteAt: "2026-01-01T00:00:01Z", Seq: 1}},
-		"hello":           {body: map[string]any{"gid": "gateway-test", "nonce": "nonce-test", "version": "1.0.0", "ts": "2026-01-01T00:00:00Z"}},
-		"inventory":       {body: map[string]any{"generation": 1, "files": []any{map[string]any{"file_id": "fid-test", "display_name": "file-01234567.csv", "size_bytes": 2, "media_type": "text/csv", "content_commitment": "commitment-test", "present": true}}}},
-		"description":     {body: map[string]any{"file_id": "fid-test", "sha256": "sha-test", "row_count": 2, "columns": []any{map[string]any{"name": "safe", "type": "integer", "null_rate_pct": 0, "distinct_bucket": "2-10"}}}},
-		"canary_result":   {body: map[string]any{"state": "closed", "dns": "closed", "tcp": "closed", "proxy": "closed", "label": "test-only", "at": "2026-01-01T00:00:00Z"}},
-		"revocation_ack":  {body: wire.RevokeAck{Op: "revoke_ack", JTI: "jti-test", StateBefore: "active"}},
-		"offer_ack":       {body: map[string]any{"iid": "iid-test", "fid": "fid-test", "ready": true}},
-		"error":           {body: map[string]any{"code": "read_error", "message": "test only"}},
+	keys := map[string]ed25519.PublicKey{"test-only-kid": pub}
+	base := wire.Instruction{Audience: gate, IID: request, IssuedAt: 1767225600}
+	inst := func(op string) wire.Instruction { i := base; i.Op = op; return i }
+	offer := inst("offer")
+	offer.FileID = fileID
+	offer.SHA256 = sha
+	offer.ListingVersionID = listing
+	unoffer := offer
+	unoffer.Op = "unoffer"
+	describe := inst("describe")
+	describe.IssuedAt = 4102443900 // Exactly 15 minutes before the synthetic expiry.
+	describe.FileID = fileID
+	describe.ConfirmationID = confirm
+	describe.ExpiresAt = 4102444800
+	revoke := inst("revoke")
+	revoke.JTI = request
+	prepare := inst("prepare")
+	prepare.OrderID = order
+	prepare.FileID = fileID
+	prepare.SHA256 = sha
+	rotation := inst("key_rotation")
+	rotation.Keys = []wire.Key{{KID: "next-test-only-kid", Alg: "EdDSA", Key: base64.RawURLEncoding.EncodeToString(pub)}}
+	minver := inst("minimum_version")
+	minver.Version = "1.2.3"
+	refusal := "file_changed"
+	prepareRefusal := "coverage_exhausted"
+	zero := 0
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	fs := map[string]fixture{
+		"permission": {"aim-permission+jwt", wire.Permission{Audience: gate, OrderID: order, ListingVersionID: listing, FileID: fileID, SHA256: sha, JTI: request, IssuedAt: 1767225600, StartDeadline: 1767226500, TransferDeadline: 1767226600}, "permission"},
+		"offer":      {"aim-offer+jwt", offer, "instruction"}, "unoffer": {"aim-offer+jwt", unoffer, "instruction"},
+		"describe": {"aim-describe+jwt", describe, "instruction"}, "revoke": {"aim-revoke+jwt", revoke, "instruction"},
+		"prepare": {"aim-prepare+jwt", prepare, "instruction"}, "key_rotation": {"aim-keys+jwt", rotation, "instruction"},
+		"minimum_version":     {"aim-minver+jwt", minver, "instruction"},
+		"revoke_ack":          {"aim-revoke_ack+jwt", wire.RevokeAck{Op: "revoke_ack", JTI: request, StateBefore: "unknown"}, "revoke_ack"},
+		"revocation_ack":      {"aim-revoke_ack+jwt", wire.RevokeAck{Op: "revoke_ack", JTI: request, StateBefore: "active"}, "revoke_ack"},
+		"prepare_ack":         {"aim-prepare_ack+jwt", wire.PrepareAck{Op: "prepare_ack", IID: request, OrderID: order, FileID: fileID, Ready: true}, "prepare_ack"},
+		"prepare_ack_refusal": {"aim-prepare_ack+jwt", wire.PrepareAck{Op: "prepare_ack", IID: request, OrderID: order, FileID: fileID, Refusal: &prepareRefusal}, "prepare_ack"},
+		"receipt":             {"aim-receipt+jwt", wire.Receipt{Op: "receipt", OrderID: order, FileID: fileID, SHA256: sha, SizeBytes: 2, JTIs: []string{request}, Transmitted: []wire.Interval{{0, 1}}, TransmittedBytes: 2, Outcome: "complete", BlocksVerified: true, FirstByteAt: now.Format(time.RFC3339), LastByteAt: now.Add(time.Second).Format(time.RFC3339), Seq: 1}, "receipt"},
+		"hello":               {"aim-hello+jwt", wire.Hello{GatewayID: gate, Nonce: "test-only-nonce", Version: "1.0.0", Time: now.Format(time.RFC3339)}, "hello"},
+		"inventory":           {"aim-inventory+jwt", inventory.Batch{Generation: 1, Files: []inventory.Phase1{{FileID: fileID, DisplayName: "file-01234567.csv", SizeBytes: 2, MediaType: "text/csv", ContentCommitment: commitment, FirstSeenAt: now, ChangedAt: now, Present: true}}}, "inventory"},
+		"description":         {"aim-description+jwt", wire.Description{FileID: fileID, SHA256: sha, RowCount: 2, Columns: []wire.Column{{Name: "safe", Type: "integer", NullRatePct: &zero, DistinctBucket: "2-10"}}}, "description"},
+		"canary_result":       {"aim-canary_result+jwt", wire.CanaryResult{State: "closed", DNS: "closed", TCP: "closed", Proxy: "closed", Label: "test-only", At: now.Format(time.RFC3339)}, "canary_result"},
+		"offer_ack":           {"aim-offer_ack+jwt", wire.OfferAck{IID: request, FileID: fileID, Ready: true}, "offer_ack"},
+		"offer_ack_refusal":   {"aim-offer_ack+jwt", wire.OfferAck{IID: request, FileID: fileID, Refusal: &refusal}, "offer_ack"},
+		"error":               {"aim-error+jwt", wire.GatewayError{Code: "read_error", Message: "test only"}, "error"},
 	}
-	for name, item := range fixtures {
+	fs["permission_wrong_key"] = fs["permission"]
+	fs["offer_wrong_typ"] = fs["offer"]
+	fs["hello_tampered"] = fs["hello"]
+	names := make([]string, 0, len(fs))
+	for n := range fs {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	for _, name := range names {
 		t.Run(name, func(t *testing.T) {
-			canonical, e := wire.Canonical(item.body)
-			if e != nil {
-				t.Fatal(e)
+			f := fs[name]
+			canonical, err := wire.Canonical(f.body)
+			if err != nil {
+				t.Fatal(err)
 			}
 			v := vector{Label: "TEST ONLY - synthetic golden vector", TestOnlySeedHex: hex.EncodeToString(seed), TestOnlyPublicHex: hex.EncodeToString(pub), Input: canonical, Canonical: string(canonical), ExpectedVerdict: "valid"}
-			if item.typ != "" {
-				v.Token, e = wire.Sign(item.typ, "test-only-kid", item.body, priv)
-				if e != nil {
-					t.Fatal(e)
-				}
+			v.Token, err = wire.Sign(f.typ, "test-only-kid", f.body, priv)
+			if err != nil {
+				t.Fatal(err)
 			}
-			data, e := json.MarshalIndent(v, "", "  ")
-			if e != nil {
-				t.Fatal(e)
+			verifyKeys := keys
+			switch name {
+			case "permission_wrong_key":
+				v.ExpectedVerdict = "invalid"
+				v.Token, err = wire.Sign(f.typ, "test-only-kid", f.body, ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0x43}, 32)))
+				if err != nil {
+					t.Fatal(err)
+				}
+			case "offer_wrong_typ":
+				v.ExpectedVerdict = "invalid"
+				v.Token, err = wire.Sign("aim-describe+jwt", "test-only-kid", f.body, priv)
+				if err != nil {
+					t.Fatal(err)
+				}
+			case "hello_tampered":
+				v.ExpectedVerdict = "invalid"
+				parts := strings.Split(v.Token, ".")
+				parts[1] = strings.Repeat("A", len(parts[1]))
+				v.Token = strings.Join(parts, ".")
+			}
+			data, err := json.MarshalIndent(v, "", "  ")
+			if err != nil {
+				t.Fatal(err)
 			}
 			data = append(data, '\n')
 			path := filepath.Join("vectors", name+".json")
 			if os.Getenv("UPDATE_VECTORS") == "1" {
-				if e = os.WriteFile(path, data, 0600); e != nil {
-					t.Fatal(e)
+				if err := os.WriteFile(path, data, 0600); err != nil {
+					t.Fatal(err)
 				}
-			} else {
-				got, e := os.ReadFile(path)
-				if e != nil {
-					t.Fatal(e)
-				}
-				if !bytes.Equal(got, data) {
-					t.Fatal("golden vector drift")
-				}
+			}
+			got, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(got, data) {
+				t.Fatal("golden vector byte drift")
+			}
+			var committed vector
+			if err := json.Unmarshal(got, &committed); err != nil {
+				t.Fatal(err)
+			}
+			input, err := wire.Canonical(committed.Input)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if committed.ExpectedVerdict != v.ExpectedVerdict || committed.Canonical != string(canonical) || !bytes.Equal(input, canonical) {
+				t.Fatal("vector metadata drift")
+			}
+			err = verify(f.kind, committed.Token, verifyKeys)
+			if (err == nil) != (committed.ExpectedVerdict == "valid") {
+				t.Fatalf("expected %s, got %v", committed.ExpectedVerdict, err)
 			}
 		})
 	}
-	extras := map[string]any{"null_rate_boundaries": map[string]any{"249_of_10000": profile.NullRate(249, 10000), "250_of_10000": profile.NullRate(250, 10000), "9749_of_10000": profile.NullRate(9749, 10000), "9750_of_10000": profile.NullRate(9750, 10000), "zero_rows": profile.NullRate(0, 0)}, "default_display_name": ids.DisplayName("0123456789abcdef0123456789abcdef", "text/csv"), "inclusive_intervals": map[string]int64{"byte_zero": (wire.Interval{0, 0}).Length(), "byte_one": (wire.Interval{1, 1}).Length(), "last_byte": (wire.Interval{99, 99}).Length(), "suffix_10_of_100": (wire.Interval{90, 99}).Length(), "open_ended_from_10_of_100": (wire.Interval{10, 99}).Length()}}
-	canonical, e := wire.Canonical(extras)
-	if e != nil {
-		t.Fatal(e)
+	extras := struct {
+		NullRateBoundaries map[string]*int  `json:"null_rate_boundaries"`
+		DefaultDisplayName string           `json:"default_display_name"`
+		InclusiveIntervals map[string]int64 `json:"inclusive_intervals"`
+	}{map[string]*int{"249_of_10000": profile.NullRate(249, 10000), "250_of_10000": profile.NullRate(250, 10000), "9749_of_10000": profile.NullRate(9749, 10000), "9750_of_10000": profile.NullRate(9750, 10000), "zero_rows": profile.NullRate(0, 0)}, ids.DisplayName(fileID, "text/csv"), map[string]int64{"byte_zero": (wire.Interval{0, 0}).Length(), "byte_one": (wire.Interval{1, 1}).Length(), "last_byte": (wire.Interval{99, 99}).Length(), "suffix_10_of_100": (wire.Interval{90, 99}).Length(), "open_ended_from_10_of_100": (wire.Interval{10, 99}).Length()}}
+	canonical, err := wire.Canonical(extras)
+	if err != nil {
+		t.Fatal(err)
 	}
 	v := vector{Label: "TEST ONLY - synthetic golden vector", TestOnlySeedHex: hex.EncodeToString(seed), TestOnlyPublicHex: hex.EncodeToString(pub), Input: canonical, Canonical: string(canonical), ExpectedVerdict: "valid"}
-	data, e := json.MarshalIndent(v, "", "  ")
-	if e != nil {
-		t.Fatal(e)
+	data, err := json.MarshalIndent(v, "", "  ")
+	if err != nil {
+		t.Fatal(err)
 	}
 	data = append(data, '\n')
 	path := filepath.Join("vectors", "boundaries.json")
 	if os.Getenv("UPDATE_VECTORS") == "1" {
-		if e = os.WriteFile(path, data, 0600); e != nil {
-			t.Fatal(e)
+		if err := os.WriteFile(path, data, 0600); err != nil {
+			t.Fatal(err)
 		}
-	} else {
-		got, e := os.ReadFile(path)
-		if e != nil {
-			t.Fatal(e)
-		}
-		if !bytes.Equal(got, data) {
-			t.Fatal("boundary vector drift")
-		}
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, data) {
+		t.Fatal("boundary vector drift")
+	}
+}
+
+func verify(kind, token string, keys map[string]ed25519.PublicKey) error {
+	switch kind {
+	case "permission":
+		_, err := wire.VerifyPermission(token, keys)
+		return err
+	case "instruction":
+		_, err := wire.VerifyInstruction(token, keys)
+		return err
+	default:
+		return wire.VerifyGatewayAnswer(token, kind, keys, newAnswer(kind))
+	}
+}
+func newAnswer(kind string) any {
+	switch kind {
+	case "revoke_ack":
+		return new(wire.RevokeAck)
+	case "prepare_ack":
+		return new(wire.PrepareAck)
+	case "receipt":
+		return new(wire.Receipt)
+	case "hello":
+		return new(wire.Hello)
+	case "inventory":
+		return new(inventory.Batch)
+	case "description":
+		return new(wire.Description)
+	case "canary_result":
+		return new(wire.CanaryResult)
+	case "offer_ack":
+		return new(wire.OfferAck)
+	default:
+		return new(wire.GatewayError)
 	}
 }

@@ -8,8 +8,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"regexp"
 	"sort"
 	"strings"
+	"time"
+
+	"github.com/aidotmarket/aim-data-gateway/internal/inventory"
 )
 
 type Permission struct {
@@ -85,6 +89,44 @@ type Receipt struct {
 	FirstByteAt           string     `json:"first_byte_at"`
 	LastByteAt            string     `json:"last_byte_at"`
 	Seq                   uint64     `json:"seq"`
+}
+
+// Gateway answers use aim-<message name>+jwt as their JWS type.
+type Hello struct {
+	GatewayID string `json:"gid"`
+	Nonce     string `json:"nonce"`
+	Version   string `json:"version"`
+	Time      string `json:"ts"`
+}
+type Description struct {
+	FileID   string   `json:"file_id"`
+	SHA256   string   `json:"sha256"`
+	RowCount int64    `json:"row_count"`
+	Columns  []Column `json:"columns"`
+}
+type Column struct {
+	Name           string `json:"name"`
+	Type           string `json:"type"`
+	NullRatePct    *int   `json:"null_rate_pct"`
+	DistinctBucket string `json:"distinct_bucket"`
+}
+type CanaryResult struct {
+	State string `json:"state"`
+	DNS   string `json:"dns"`
+	TCP   string `json:"tcp"`
+	Proxy string `json:"proxy"`
+	Label string `json:"label"`
+	At    string `json:"at"`
+}
+type OfferAck struct {
+	IID     string  `json:"iid"`
+	FileID  string  `json:"fid"`
+	Ready   bool    `json:"ready"`
+	Refusal *string `json:"refusal"`
+}
+type GatewayError struct {
+	Code    string `json:"code"`
+	Message string `json:"message"`
 }
 
 func (i Instruction) Kind() (typ, keyClass string, err error) {
@@ -199,7 +241,7 @@ func Verify(token, typ string, keys map[string]ed25519.PublicKey, out any) error
 		return e
 	}
 	var header Header
-	if e = json.Unmarshal(h, &header); e != nil {
+	if e = strict(h, &header); e != nil {
 		return e
 	}
 	if header.Algorithm != "EdDSA" || header.Type != typ {
@@ -220,13 +262,201 @@ func Verify(token, typ string, keys map[string]ed25519.PublicKey, out any) error
 	if e != nil {
 		return e
 	}
-	dec := json.NewDecoder(bytes.NewReader(p))
+	return strict(p, out)
+}
+
+func strict(data []byte, out any) error {
+	dec := json.NewDecoder(bytes.NewReader(data))
 	dec.DisallowUnknownFields()
-	if e = dec.Decode(out); e != nil {
-		return e
+	if err := dec.Decode(out); err != nil {
+		return err
 	}
 	if dec.Decode(new(any)) != io.EOF {
-		return errors.New("trailing claims")
+		return errors.New("trailing JSON data")
 	}
 	return nil
+}
+
+var hex32 = regexp.MustCompile(`^[0-9a-f]{32}$`)
+var hex64 = regexp.MustCompile(`^[0-9a-f]{64}$`)
+var uuid = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
+
+func required(token string, names ...string) error {
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 {
+		return errors.New("invalid compact JWS")
+	}
+	p, err := b64.DecodeString(parts[1])
+	if err != nil {
+		return err
+	}
+	var fields map[string]json.RawMessage
+	if err := strict(p, &fields); err != nil {
+		return err
+	}
+	for _, name := range names {
+		value, ok := fields[name]
+		if !ok || (string(value) == "null" && name != "refusal") {
+			return fmt.Errorf("missing claim %s", name)
+		}
+	}
+	return nil
+}
+
+func VerifyPermission(token string, keys map[string]ed25519.PublicKey) (Permission, error) {
+	var p Permission
+	if err := Verify(token, "aim-permission+jwt", keys, &p); err != nil {
+		return p, err
+	}
+	if err := required(token, "aud", "oid", "lvid", "fid", "sha256", "jti", "iat", "sd", "td", "ro"); err != nil {
+		return p, err
+	}
+	if !uuid.MatchString(p.Audience) || !uuid.MatchString(p.OrderID) || !uuid.MatchString(p.ListingVersionID) || !hex32.MatchString(p.FileID) || !hex64.MatchString(p.SHA256) || !uuid.MatchString(p.JTI) || p.IssuedAt <= 0 || p.StartDeadline <= p.IssuedAt || p.TransferDeadline < p.StartDeadline || p.ResumeOffset < 0 {
+		return p, errors.New("invalid permission claims")
+	}
+	return p, nil
+}
+
+func VerifyInstruction(token string, keys map[string]ed25519.PublicKey) (Instruction, error) {
+	var i Instruction
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 {
+		return i, errors.New("invalid compact JWS")
+	}
+	p, err := b64.DecodeString(parts[1])
+	if err != nil {
+		return i, err
+	}
+	if err := strict(p, &i); err != nil {
+		return i, err
+	}
+	typ, _, err := i.Kind()
+	if err != nil {
+		return i, err
+	}
+	if err := Verify(token, typ, keys, &i); err != nil {
+		return i, err
+	}
+	if err := required(token, "op", "aud", "iid", "iat"); err != nil {
+		return i, err
+	}
+	if !uuid.MatchString(i.Audience) || !uuid.MatchString(i.IID) || i.IssuedAt <= 0 {
+		return i, errors.New("invalid instruction claims")
+	}
+	if i.ExpiresAt != 0 && i.ExpiresAt <= time.Now().Unix() {
+		return i, errors.New("expired instruction")
+	}
+	var extra []string
+	switch i.Op {
+	case "offer", "unoffer":
+		extra = []string{"fid", "sha256", "lvid"}
+		if !hex32.MatchString(i.FileID) || !hex64.MatchString(i.SHA256) || !uuid.MatchString(i.ListingVersionID) {
+			return i, errors.New("invalid offer claims")
+		}
+	case "describe":
+		extra = []string{"fid", "cid", "exp"}
+		if !hex32.MatchString(i.FileID) || !uuid.MatchString(i.ConfirmationID) || i.ExpiresAt != i.IssuedAt+900 {
+			return i, errors.New("invalid describe claims")
+		}
+	case "revoke":
+		extra = []string{"jti"}
+		if !uuid.MatchString(i.JTI) {
+			return i, errors.New("invalid revoke claims")
+		}
+	case "prepare":
+		extra = []string{"oid", "fid", "sha256"}
+		if !uuid.MatchString(i.OrderID) || !hex32.MatchString(i.FileID) || !hex64.MatchString(i.SHA256) {
+			return i, errors.New("invalid prepare claims")
+		}
+	case "key_rotation":
+		extra = []string{"keys"}
+		if len(i.Keys) == 0 {
+			return i, errors.New("missing keys")
+		}
+		for _, k := range i.Keys {
+			raw, err := b64.DecodeString(k.Key)
+			if k.KID == "" || k.Alg != "EdDSA" || err != nil || len(raw) != ed25519.PublicKeySize {
+				return i, errors.New("invalid rotation key")
+			}
+		}
+	case "minimum_version":
+		extra = []string{"version"}
+		if i.Version == "" {
+			return i, errors.New("missing version")
+		}
+	}
+	if err := required(token, extra...); err != nil {
+		return i, err
+	}
+	return i, nil
+}
+
+// VerifyGatewayAnswer verifies the gateway signature and the declared answer type.
+func VerifyGatewayAnswer(token, name string, keys map[string]ed25519.PublicKey, out any) error {
+	if err := Verify(token, "aim-"+name+"+jwt", keys, out); err != nil {
+		return err
+	}
+	switch name {
+	case "revoke_ack":
+		v, ok := out.(*RevokeAck)
+		if !ok || v.Op != name || !uuid.MatchString(v.JTI) {
+			return errors.New("invalid revoke ack")
+		}
+		return required(token, "op", "jti", "state_before")
+	case "prepare_ack":
+		v, ok := out.(*PrepareAck)
+		if !ok || v.Op != name || !uuid.MatchString(v.IID) || !uuid.MatchString(v.OrderID) || !hex32.MatchString(v.FileID) || (!v.Ready && v.Refusal == nil) {
+			return errors.New("invalid prepare ack")
+		}
+		return required(token, "op", "iid", "oid", "fid", "ready", "refusal", "resume_offset", "transmitted_bytes", "interval_count", "max_serve_count")
+	case "receipt":
+		v, ok := out.(*Receipt)
+		if !ok || v.Op != name || !uuid.MatchString(v.OrderID) || !hex32.MatchString(v.FileID) || !hex64.MatchString(v.SHA256) {
+			return errors.New("invalid receipt")
+		}
+		return required(token, "op", "oid", "fid", "sha256", "size_bytes", "jtis", "transmitted", "transmitted_bytes", "max_serves_reached_bytes", "outcome", "blocks_verified", "first_byte_at", "last_byte_at", "seq")
+	case "hello":
+		v, ok := out.(*Hello)
+		if !ok || !uuid.MatchString(v.GatewayID) || v.Nonce == "" || v.Version == "" || v.Time == "" {
+			return errors.New("invalid hello")
+		}
+		return required(token, "gid", "nonce", "version", "ts")
+	case "inventory":
+		v, ok := out.(*inventory.Batch)
+		if !ok || v.Files == nil {
+			return errors.New("invalid inventory")
+		}
+		for _, f := range v.Files {
+			if !hex32.MatchString(f.FileID) || !hex64.MatchString(f.ContentCommitment) || f.DisplayName == "" || f.MediaType == "" || f.FirstSeenAt.IsZero() || f.ChangedAt.IsZero() {
+				return errors.New("invalid inventory file")
+			}
+		}
+		return required(token, "generation", "files")
+	case "description":
+		v, ok := out.(*Description)
+		if !ok || !hex32.MatchString(v.FileID) || !hex64.MatchString(v.SHA256) || v.Columns == nil {
+			return errors.New("invalid description")
+		}
+		return required(token, "file_id", "sha256", "row_count", "columns")
+	case "canary_result":
+		v, ok := out.(*CanaryResult)
+		if !ok || v.State == "" || v.DNS == "" || v.TCP == "" || v.Proxy == "" || v.Label == "" || v.At == "" {
+			return errors.New("invalid canary result")
+		}
+		return required(token, "state", "dns", "tcp", "proxy", "label", "at")
+	case "offer_ack":
+		v, ok := out.(*OfferAck)
+		if !ok || !uuid.MatchString(v.IID) || !hex32.MatchString(v.FileID) || (!v.Ready && v.Refusal == nil) {
+			return errors.New("invalid offer ack")
+		}
+		return required(token, "iid", "fid", "ready", "refusal")
+	case "error":
+		v, ok := out.(*GatewayError)
+		if !ok || v.Code == "" || v.Message == "" {
+			return errors.New("invalid gateway error")
+		}
+		return required(token, "code", "message")
+	default:
+		return errors.New("unknown gateway answer")
+	}
 }

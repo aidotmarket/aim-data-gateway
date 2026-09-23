@@ -11,5 +11,6 @@
     "tcp": "closed"
   },
   "canonical": "{\"at\":\"2026-01-01T00:00:00Z\",\"dns\":\"closed\",\"label\":\"test-only\",\"proxy\":\"closed\",\"state\":\"closed\",\"tcp\":\"closed\"}",
+  "token": "eyJhbGciOiJFZERTQSIsImtpZCI6InRlc3Qtb25seS1raWQiLCJ0eXAiOiJhaW0tY2FuYXJ5X3Jlc3VsdCtqd3QifQ.eyJhdCI6IjIwMjYtMDEtMDFUMDA6MDA6MDBaIiwiZG5zIjoiY2xvc2VkIiwibGFiZWwiOiJ0ZXN0LW9ubHkiLCJwcm94eSI6ImNsb3NlZCIsInN0YXRlIjoiY2xvc2VkIiwidGNwIjoiY2xvc2VkIn0.VPbRQndH4IjVVuCUERaOH3M8YXmVHk1p3PLWa2yWdtm_9aOS4MbLQQCsDLxDZ5rZlaCdCyp_lf8GEDTNA-77CQ",
   "expected_verdict": "valid"
 }
