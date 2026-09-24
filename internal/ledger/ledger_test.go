@@ -110,6 +110,9 @@ func TestReservationProgressSettleAndRestart(t *testing.T) {
 	if _, e = l.Reserve(ctx, p, 0, 0); !errors.Is(e, ErrClosed) {
 		t.Fatalf("closed jti: %v", e)
 	}
+	if _, e = l.Reserve(ctx, p, 10, 10); !errors.Is(e, ErrClosed) {
+		t.Fatalf("closed jti for once-served range: %v", e)
+	}
 	var n int
 	must(t, l.DB.QueryRow(`SELECT count(*) FROM receipts_outbox`).Scan(&n))
 	if n != 4 {
@@ -330,5 +333,38 @@ func TestConcurrentFragmentationBoundary(t *testing.T) {
 	}
 	if accepted.Load() != 1 {
 		t.Fatalf("accepted %d isolated requests", accepted.Load())
+	}
+}
+
+func TestExtendingShortWriteCapsAt1025(t *testing.T) {
+	ctx := context.Background()
+	l, p, _ := fixture(t, 5000)
+	for i := int64(0); i < 1024; i++ {
+		_, e := l.DB.Exec(`INSERT INTO transmitted(oid,fid,start,end) VALUES(?,?,?,?)`, oid, fid, 2*i+3, 2*i+3)
+		must(t, e)
+	}
+	r, e := l.Reserve(ctx, p, 0, 2)
+	must(t, e)
+	must(t, l.Progress(ctx, r.ID, 0))
+	must(t, l.Settle(ctx, r.ID))
+	var n int
+	must(t, l.DB.QueryRow(`SELECT count(*) FROM transmitted`).Scan(&n))
+	if n != 1025 {
+		t.Fatalf("interval count after short write: %d", n)
+	}
+	if _, e = l.Reserve(ctx, p, 3000, 3000); !errors.Is(e, ErrFragmented) {
+		t.Fatalf("isolated boundary: %v", e)
+	}
+}
+
+func TestPrepareCoverageExhausted(t *testing.T) {
+	ctx := context.Background()
+	l, p, _ := fixture(t, 20)
+	_, e := l.DB.Exec(`INSERT INTO serves(oid,fid,start,end,count) VALUES(?,?,?,?,2)`, oid, fid, 0, 0)
+	must(t, e)
+	a, e := l.Prepare(ctx, wire.Instruction{IID: oid, OrderID: oid, FileID: fid, SHA256: p.SHA256}, config.Config{})
+	must(t, e)
+	if a.Refusal == nil || *a.Refusal != "coverage_exhausted" || a.MaxServeCount != 2 {
+		t.Fatalf("prepare %+v", a)
 	}
 }

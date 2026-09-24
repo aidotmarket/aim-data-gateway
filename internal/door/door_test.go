@@ -198,6 +198,24 @@ func TestUnofferAfterBindAndWrongKey(t *testing.T) {
 	}
 }
 
+func TestUnofferedAndWrongOfferKeyClass(t *testing.T) {
+	d, p, key, _ := setup(t)
+	h := d.Handler()
+	_, e := d.Ledger.DB.Exec(`DELETE FROM offers`)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if w := call(t, h, p, key, "GET", "bytes=0-0", "header"); w.Code != 403 {
+		t.Fatalf("unoffered: %d", w.Code)
+	}
+	if e = d.Ledger.PutOffer(t.Context(), ledger.Offer{FileID: fileID, SHA256: p.SHA256, ListingVersionID: listingID, IID: orderID, State: "offered", KeyClass: "permission"}); e != nil {
+		t.Fatal(e)
+	}
+	if w := call(t, h, p, key, "GET", "bytes=0-0", "header"); w.Code != 403 {
+		t.Fatalf("wrong offer key class: %d", w.Code)
+	}
+}
+
 func TestDisconnectedResponsesDoNotComplete(t *testing.T) {
 	d, p, key, _ := setup(t)
 	h := d.Handler()
