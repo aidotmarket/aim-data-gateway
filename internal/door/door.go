@@ -297,6 +297,9 @@ func (d *Door) download(w http.ResponseWriter, r *http.Request, fid string) {
 		case ledger.ErrClosed:
 			code = "permission_closed"
 			status = 403
+		case ledger.ErrDeadline:
+			code = "permission_expired"
+			status = 403
 		}
 		fail(w, status, code)
 		return

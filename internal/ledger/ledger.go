@@ -27,11 +27,50 @@ var ErrProgress = errors.New("progress_not_recorded")
 const window = int64(inventory.BlockSize)
 
 type Ledger struct {
-	DB      *sql.DB
-	Key     ed25519.PrivateKey
-	KID     string
-	writeMu sync.Mutex
+	DB    *sql.DB
+	Key   ed25519.PrivateKey
+	KID   string
+	mu    sync.Mutex
+	locks map[transferKey]*transferLock
 }
+type transferKey struct{ oid, fid string }
+type transferLock struct {
+	mu   sync.Mutex
+	refs int
+}
+
+// transferLock keeps an entry alive while any caller holds or waits for it.
+func (l *Ledger) transferLock(oid, fid string) (*transferLock, func()) {
+	k := transferKey{oid, fid}
+	l.mu.Lock()
+	if l.locks == nil {
+		l.locks = make(map[transferKey]*transferLock)
+	}
+	b := l.locks[k]
+	if b == nil {
+		b = &transferLock{}
+		l.locks[k] = b
+	}
+	b.refs++
+	l.mu.Unlock()
+	b.mu.Lock()
+	return b, func() {
+		b.mu.Unlock()
+		l.mu.Lock()
+		b.refs--
+		if b.refs == 0 {
+			delete(l.locks, k)
+		}
+		l.mu.Unlock()
+	}
+}
+
+func (l *Ledger) requestKey(ctx context.Context, id int64) (string, string, error) {
+	var oid, fid string
+	e := l.DB.QueryRowContext(ctx, `SELECT p.oid,p.fid FROM requests r JOIN permissions p ON p.jti=r.jti WHERE r.id=?`, id).Scan(&oid, &fid)
+	return oid, fid, e
+}
+
 type File struct {
 	ID, Source, RelativePath, SHA256, DisplayName, Root string
 	Size                                                int64
@@ -316,13 +355,20 @@ func (l *Ledger) Reserve(ctx context.Context, p wire.Permission, start, end int6
 			return ErrClosed
 		}
 		if time.Now().Unix() >= p.TransferDeadline || (state != "bound" && time.Now().Unix() >= p.StartDeadline) {
-			return ErrClosed
+			return ErrDeadline
 		}
 		var revoked int
 		if qerr := t.QueryRowContext(ctx, `SELECT count(*) FROM revocations WHERE jti=?`, p.JTI).Scan(&revoked); qerr != nil {
 			return qerr
 		}
 		if revoked != 0 {
+			return ErrClosed
+		}
+		var complete int
+		if e := t.QueryRowContext(ctx, `SELECT count(*) FROM completed WHERE oid=? AND fid=?`, p.OrderID, p.FileID).Scan(&complete); e != nil {
+			return e
+		}
+		if complete != 0 {
 			return ErrClosed
 		}
 		ss, e := segments(ctx, t, "serves", p.OrderID, p.FileID)
@@ -397,8 +443,8 @@ func (l *Ledger) Reserve(ctx context.Context, p wire.Permission, start, end int6
 
 // FinishEmpty closes an empty file without creating a fictitious byte range.
 func (l *Ledger) FinishEmpty(ctx context.Context, p wire.Permission) error {
-	l.writeMu.Lock()
-	defer l.writeMu.Unlock()
+	_, unlock := l.transferLock(p.OrderID, p.FileID)
+	defer unlock()
 	return tx(ctx, l.DB, func(t *sql.Tx) error {
 		var size int64
 		var sha string
@@ -485,15 +531,19 @@ func (l *Ledger) Progress(ctx context.Context, id, writtenThrough int64) error {
 	})
 }
 
-// WriteChunk serializes the closure check, network write, and durable progress.
+// WriteChunk serializes the closure check, network write, and durable progress per order/file.
 // A response reserved before completion cannot write after another response closes it.
 func (l *Ledger) WriteChunk(ctx context.Context, id int64, data []byte, write func([]byte) (int, error)) (int, error) {
-	l.writeMu.Lock()
-	defer l.writeMu.Unlock()
+	keyOID, keyFID, e := l.requestKey(ctx, id)
+	if e != nil {
+		return 0, e
+	}
+	_, unlock := l.transferLock(keyOID, keyFID)
+	defer unlock()
 	var oid, fid, state string
 	var td, old, end, size int64
 	var open int
-	e := l.DB.QueryRowContext(ctx, `SELECT p.oid,p.fid,p.state,p.td,r.written_through,r.end,r.open,f.size FROM requests r JOIN permissions p ON p.jti=r.jti JOIN files f ON f.fid=p.fid WHERE r.id=?`, id).Scan(&oid, &fid, &state, &td, &old, &end, &open, &size)
+	e = l.DB.QueryRowContext(ctx, `SELECT p.oid,p.fid,p.state,p.td,r.written_through,r.end,r.open,f.size FROM requests r JOIN permissions p ON p.jti=r.jti JOIN files f ON f.fid=p.fid WHERE r.id=?`, id).Scan(&oid, &fid, &state, &td, &old, &end, &open, &size)
 	if e != nil {
 		return 0, e
 	}
@@ -523,22 +573,45 @@ func (l *Ledger) WriteChunk(ctx context.Context, id int64, data []byte, write fu
 	if len(data) == 0 || old+int64(len(data)) > end {
 		return 0, errors.New("invalid write chunk")
 	}
-	n, writeErr := write(data)
-	if n < 0 || n > len(data) {
-		return 0, errors.New("invalid write result")
+	// Successful short writes stay in this call. Checkpoint each 8 MiB window
+	// and when the response ends, including a partial write followed by error.
+	written := 0
+	checkpoint := 0
+	var writeErr error
+	for written < len(data) {
+		if time.Now().Unix() >= td {
+			writeErr = ErrDeadline
+			break
+		}
+		limit := min(len(data), checkpoint+int(window))
+		n, err := write(data[written:limit])
+		if n < 0 || n > limit-written {
+			return written, errors.New("invalid write result")
+		}
+		written += n
+		if written == limit && limit < len(data) {
+			if e = l.Progress(context.Background(), id, old+int64(written)); e != nil {
+				return written, errors.Join(ErrProgress, e)
+			}
+			checkpoint = written
+		}
+		if err != nil || n == 0 {
+			writeErr = err
+			break
+		}
 	}
-	if n > 0 {
-		if e = l.Progress(context.Background(), id, old+int64(n)); e != nil {
-			return n, errors.Join(ErrProgress, e)
+	if written > checkpoint {
+		if e = l.Progress(context.Background(), id, old+int64(written)); e != nil {
+			return written, errors.Join(ErrProgress, e)
 		}
 	}
 	if time.Now().Unix() >= td {
 		if e = l.CloseExpired(context.Background(), time.Now().Unix()); e != nil {
-			return n, e
+			return written, e
 		}
-		return n, ErrDeadline
+		return written, ErrDeadline
 	}
-	return n, writeErr
+	return written, writeErr
 }
 func (l *Ledger) transmitted(ctx context.Context, oid, fid string) ([]segment, error) {
 	var out []segment
@@ -549,8 +622,12 @@ func (l *Ledger) Settle(ctx context.Context, id int64) error {
 	return l.SettleOutcome(ctx, id, "")
 }
 func (l *Ledger) SettleOutcome(ctx context.Context, id int64, outcome string) error {
-	l.writeMu.Lock()
-	defer l.writeMu.Unlock()
+	oid, fid, e := l.requestKey(ctx, id)
+	if e != nil {
+		return e
+	}
+	_, unlock := l.transferLock(oid, fid)
+	defer unlock()
 	return tx(ctx, l.DB, func(t *sql.Tx) error { return l.settle(ctx, t, id, false, outcome) })
 }
 func (l *Ledger) settle(ctx context.Context, t *sql.Tx, id int64, crash bool, outcome string) error {
@@ -594,33 +671,44 @@ func (l *Ledger) settle(ctx context.Context, t *sql.Tx, id int64, crash bool, ou
 			return e
 		}
 	}
-	if complete || (!crash && (outcome != "" || (written >= start && written < end))) {
+	if complete || (!crash && outcome != "") {
 		return l.queueTx(ctx, t, p.OrderID, p.FileID, outcome, complete)
 	}
 	return nil
 }
 func (l *Ledger) Recover(ctx context.Context) error {
+	// Acquire closure barriers before the recovery transaction. Open normally
+	// calls this before serving, but explicit recovery uses the same barrier.
+	rows, e := l.DB.QueryContext(ctx, `SELECT r.id,p.oid,p.fid FROM requests r JOIN permissions p ON p.jti=r.jti WHERE r.open=1 ORDER BY p.oid,p.fid,r.id`)
+	if e != nil {
+		return e
+	}
+	var keys []transferKey
+	var ids []int64
+	for rows.Next() {
+		var k transferKey
+		var id int64
+		if e = rows.Scan(&id, &k.oid, &k.fid); e != nil {
+			rows.Close()
+			return e
+		}
+		ids = append(ids, id)
+		if len(keys) == 0 || keys[len(keys)-1] != k {
+			keys = append(keys, k)
+		}
+	}
+	e = rows.Err()
+	rows.Close()
+	if e != nil {
+		return e
+	}
+	for _, k := range keys {
+		_, unlock := l.transferLock(k.oid, k.fid)
+		defer unlock()
+	}
 	return tx(ctx, l.DB, func(t *sql.Tx) error {
-		rows, e := t.QueryContext(ctx, `SELECT id FROM requests WHERE open=1`)
-		if e != nil {
-			return e
-		}
-		var ids []int64
-		for rows.Next() {
-			var id int64
-			if e = rows.Scan(&id); e != nil {
-				rows.Close()
-				return e
-			}
-			ids = append(ids, id)
-		}
-		e = rows.Err()
-		rows.Close()
-		if e != nil {
-			return e
-		}
 		for _, id := range ids {
-			if e = l.settle(ctx, t, id, true, ""); e != nil {
+			if e := l.settle(ctx, t, id, true, ""); e != nil {
 				return e
 			}
 		}

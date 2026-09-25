@@ -233,7 +233,7 @@ func TestDisconnectedResponsesDoNotComplete(t *testing.T) {
 		if e = d.Ledger.DB.QueryRow(`SELECT count(*) FROM receipts_outbox`).Scan(&n); e != nil {
 			t.Fatal(e)
 		}
-		if n != index*2 {
+		if n != index {
 			t.Fatalf("unexpected early receipt count %d", n)
 		}
 	}
@@ -245,7 +245,7 @@ func TestDisconnectedResponsesDoNotComplete(t *testing.T) {
 	if e = d.Ledger.DB.QueryRow(`SELECT count(*) FROM receipts_outbox`).Scan(&n); e != nil {
 		t.Fatal(e)
 	}
-	if n != 4 {
+	if n != 3 {
 		t.Fatalf("outbox rows %d", n)
 	}
 }

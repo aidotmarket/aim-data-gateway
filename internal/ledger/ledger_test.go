@@ -120,7 +120,7 @@ func TestReservationProgressSettleAndRestart(t *testing.T) {
 	}
 	var n int
 	must(t, l.DB.QueryRow(`SELECT count(*) FROM receipts_outbox`).Scan(&n))
-	if n != 4 {
+	if n != 3 {
 		t.Fatalf("outbox count %d", n)
 	}
 	var body string
@@ -530,6 +530,115 @@ func TestGLM1Gemini1DeepSeek4ConcurrentSameJTIStopsAfterCoverage(t *testing.T) {
 	}
 	must(t, l.Settle(ctx, a.ID))
 	must(t, l.Settle(ctx, b.ID))
+}
+
+func TestDifferentTransfersWriteWhileBuyerBlocked(t *testing.T) {
+	ctx := context.Background()
+	l, p, _ := fixture(t, 20)
+	other := p
+	other.OrderID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+	other.FileID = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	other.JTI = "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
+	_, e := l.DB.ExecContext(ctx, `INSERT INTO files SELECT ?,source,relative_path,size,mtime,sha256,block_size,block_hashes,display_name,root,changed FROM files WHERE fid=?`, other.FileID, p.FileID)
+	must(t, e)
+	must(t, l.PutOffer(ctx, Offer{FileID: other.FileID, SHA256: other.SHA256, ListingVersionID: other.ListingVersionID, IID: other.OrderID, State: "offered", KeyClass: "listing"}))
+	_, e = l.DB.ExecContext(ctx, `INSERT INTO permissions(jti,oid,fid,sha256,sd,td,ro,state,bound_at) VALUES(?,?,?,?,?,?,?,'bound',?)`, other.JTI, other.OrderID, other.FileID, other.SHA256, other.StartDeadline, other.TransferDeadline, other.ResumeOffset, now())
+	must(t, e)
+	a, e := l.Reserve(ctx, p, 0, 19)
+	must(t, e)
+	b, e := l.Reserve(ctx, other, 0, 19)
+	must(t, e)
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	aDone := make(chan error, 1)
+	go func() {
+		_, err := l.WriteChunk(ctx, a.ID, []byte{1}, func(data []byte) (int, error) {
+			close(entered)
+			<-release
+			return len(data), nil
+		})
+		aDone <- err
+	}()
+	<-entered
+	bDone := make(chan error, 1)
+	go func() {
+		n, err := l.WriteChunk(ctx, b.ID, []byte{2}, func(data []byte) (int, error) { return len(data), nil })
+		if err == nil && n != 1 {
+			err = fmt.Errorf("other transfer wrote %d bytes", n)
+		}
+		bDone <- err
+	}()
+	select {
+	case err := <-bDone:
+		must(t, err)
+	case <-time.After(3 * time.Second):
+		close(release)
+		<-aDone
+		t.Fatal("unrelated transfer waited for blocked buyer")
+	}
+	close(release)
+	must(t, <-aDone)
+	must(t, l.Settle(ctx, a.ID))
+	must(t, l.Settle(ctx, b.ID))
+}
+
+func TestShortWritesCheckpointOncePerBlock(t *testing.T) {
+	ctx := context.Background()
+	l, p, _ := fixture(t, window)
+	r, e := l.Reserve(ctx, p, 0, window-1)
+	must(t, e)
+	data := make([]byte, window)
+	n, e := l.WriteChunk(ctx, r.ID, data, func(b []byte) (int, error) { return min(17, len(b)), nil })
+	must(t, e)
+	if int64(n) != window {
+		t.Fatalf("written %d", n)
+	}
+	var through int64
+	must(t, l.DB.QueryRow(`SELECT written_through FROM requests WHERE id=?`, r.ID).Scan(&through))
+	if through != window-1 {
+		t.Fatalf("written through %d", through)
+	}
+	var receipts int
+	must(t, l.DB.QueryRow(`SELECT count(*) FROM receipts_outbox`).Scan(&receipts))
+	if receipts != 1 {
+		t.Fatalf("progress receipts %d", receipts)
+	}
+	must(t, l.Settle(ctx, r.ID))
+	rec, e := l.Receipt(ctx, p.OrderID, p.FileID, "complete")
+	must(t, e)
+	if rec.TransmittedBytes != window || len(rec.Transmitted) != 1 || rec.Transmitted[0] != ([2]int64{0, window - 1}) {
+		t.Fatalf("transmitted interval %+v", rec.Transmitted)
+	}
+	must(t, l.DB.QueryRow(`SELECT count(*) FROM receipts_outbox`).Scan(&receipts))
+	if receipts != 2 {
+		t.Fatalf("total receipts %d", receipts)
+	}
+}
+
+func TestReserveRejectsCompletedLargerFile(t *testing.T) {
+	ctx := context.Background()
+	l, p, _ := fixture(t, 20)
+	r, e := l.Reserve(ctx, p, 0, 19)
+	must(t, e)
+	must(t, l.Progress(ctx, r.ID, 19))
+	must(t, l.Settle(ctx, r.ID))
+	_, e = l.DB.ExecContext(ctx, `UPDATE files SET size=40 WHERE fid=?`, p.FileID)
+	must(t, e)
+	p.JTI = "dddddddd-dddd-4ddd-8ddd-dddddddddddd"
+	if _, e = l.Reserve(ctx, p, 20, 39); !errors.Is(e, ErrClosed) {
+		t.Fatalf("completed file admitted after redescription: %v", e)
+	}
+}
+
+func TestReserveDeadlineBackstopReturnsExpired(t *testing.T) {
+	ctx := context.Background()
+	l, p, _ := fixture(t, 20)
+	p.TransferDeadline = time.Now().Unix() - 1
+	_, e := l.DB.ExecContext(ctx, `UPDATE permissions SET td=? WHERE jti=?`, p.TransferDeadline, p.JTI)
+	must(t, e)
+	if _, e = l.Reserve(ctx, p, 0, 19); !errors.Is(e, ErrDeadline) {
+		t.Fatalf("deadline backstop: %v", e)
+	}
 }
 
 func TestGLM4DeadlineStopsNextWriteAndQueuesAborted(t *testing.T) {
