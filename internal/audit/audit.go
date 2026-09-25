@@ -63,19 +63,17 @@ type cursor struct {
 }
 
 func Open(dir string, private ed25519.PrivateKey) (*Log, error) {
+	return openWithSync(dir, private, (*os.File).Sync, syncDirectory)
+}
+
+func openWithSync(dir string, private ed25519.PrivateKey, syncFile func(*os.File) error, syncDir func(string) error) (*Log, error) {
 	if len(private) != ed25519.PrivateKeySize {
 		return nil, errors.New("invalid key")
 	}
-	_, statErr := os.Stat(dir)
 	if e := os.MkdirAll(dir, 0700); e != nil {
 		return nil, e
 	}
-	if errors.Is(statErr, os.ErrNotExist) {
-		if e := syncDirectory(filepath.Dir(dir)); e != nil {
-			return nil, e
-		}
-	}
-	l := &Log{dir: dir, private: private, syncDir: syncDirectory}
+	l := &Log{dir: dir, private: private, syncDir: syncDir}
 	files, e := filepath.Glob(filepath.Join(dir, "*.jsonl"))
 	if e != nil {
 		return nil, e
@@ -105,9 +103,15 @@ func Open(dir string, private ed25519.PrivateKey) (*Log, error) {
 			l.last = entry
 		}
 		e = sc.Err()
-		f.Close()
+		if e == nil {
+			e = syncFile(f)
+		}
+		ce := f.Close()
 		if e != nil {
 			return nil, e
+		}
+		if ce != nil {
+			return nil, ce
 		}
 		if l.seq >= first {
 			l.rotations = append(l.rotations, rotation{first, p})
@@ -124,6 +128,14 @@ func Open(dir string, private ed25519.PrivateKey) (*Log, error) {
 			return nil, e
 		}
 		l.size = st.Size()
+	}
+	// A prior process may have stopped after creating a file or directory but
+	// before syncing its entry. Re-establish durability before SQLite recovery.
+	if e := syncDir(dir); e != nil {
+		return nil, e
+	}
+	if e := syncDir(filepath.Dir(dir)); e != nil {
+		return nil, e
 	}
 	return l, nil
 }

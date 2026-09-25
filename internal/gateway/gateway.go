@@ -45,13 +45,12 @@ func Open(dir string, cfg config.Config, state pairing.State) (*Gateway, error) 
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return nil, err
 	}
-	l, err := ledger.Open(filepath.Join(dir, "gateway.db"), state.Private, "gateway")
+	a, err := audit.Open(filepath.Join(dir, "audit"), state.Private)
 	if err != nil {
 		return nil, err
 	}
-	a, err := audit.Open(filepath.Join(dir, "audit"), state.Private)
+	l, err := ledger.Open(filepath.Join(dir, "gateway.db"), state.Private, "gateway")
 	if err != nil {
-		l.Close()
 		return nil, err
 	}
 	g := &Gateway{Config: cfg, State: state, Dir: dir, Ledger: l, Log: a}

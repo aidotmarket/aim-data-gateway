@@ -9,41 +9,108 @@ import (
 	"testing"
 )
 
-func TestDirectorySyncGatesAppend(t *testing.T) {
+func TestStartupSyncGatesRestart(t *testing.T) {
 	for _, rotate := range []bool{false, true} {
-		key := ed25519.NewKeyFromSeed(make([]byte, 32))
-		dir := t.TempDir()
-		l, err := Open(dir, key)
-		if err != nil {
-			t.Fatal(err)
-		}
+		name := "first"
 		if rotate {
-			if _, err = l.Append("inventory", map[string]int{"generation": 1}); err != nil {
+			name = "rotation"
+		}
+		t.Run(name, func(t *testing.T) {
+			key := ed25519.NewKeyFromSeed(make([]byte, 32))
+			dir := filepath.Join(t.TempDir(), "audit")
+			l, err := Open(dir, key)
+			if err != nil {
 				t.Fatal(err)
 			}
-			l.syncDir = func(string) error { t.Fatal("existing audit file synced directory"); return nil }
-			if _, err = l.Append("inventory", map[string]int{"generation": 2}); err != nil {
+			if rotate {
+				if _, err = l.Append("inventory", map[string]int{"generation": 1}); err != nil {
+					t.Fatal(err)
+				}
+				if _, err = l.Append("inventory", map[string]int{"generation": 2}); err != nil {
+					t.Fatal(err)
+				}
+				l.size = RotationBytes - 1
+			}
+			l.syncDir = func(path string) error {
+				if path != dir {
+					t.Fatalf("synced %s", path)
+				}
+				return errors.New("directory sync failed")
+			}
+			if _, err = l.Append("inventory", map[string]int{"generation": 3}); err == nil {
+				t.Fatal("append reported durable before directory sync")
+			}
+			if _, err = l.Append("inventory", map[string]int{"generation": 4}); err == nil {
+				t.Fatal("uncertain log accepted another append")
+			}
+
+			for _, failedSync := range []string{"file", "audit directory", "parent directory"} {
+				var synced []string
+				fileSync := func(f *os.File) error {
+					synced = append(synced, "file")
+					if failedSync == "file" {
+						return errors.New("file sync failed")
+					}
+					return f.Sync()
+				}
+				dirSync := func(path string) error {
+					part := "parent directory"
+					if path == dir {
+						part = "audit directory"
+					}
+					synced = append(synced, part)
+					if failedSync == part {
+						return errors.New(part + " sync failed")
+					}
+					return syncDirectory(path)
+				}
+				if reopened, err := openWithSync(dir, key, fileSync, dirSync); err == nil || reopened != nil {
+					t.Fatalf("restart accepted failed %s sync", failedSync)
+				}
+				if len(synced) == 0 || synced[len(synced)-1] != failedSync {
+					t.Fatalf("sync order before %s failure: %v", failedSync, synced)
+				}
+			}
+			var synced []string
+			reopened, err := openWithSync(dir, key, func(f *os.File) error {
+				synced = append(synced, "file")
+				return f.Sync()
+			}, func(path string) error {
+				if path == dir {
+					synced = append(synced, "audit directory")
+				} else {
+					synced = append(synced, "parent directory")
+				}
+				return syncDirectory(path)
+			})
+			if err != nil {
 				t.Fatal(err)
 			}
-			l.size = RotationBytes - 1
-		}
-		called := 0
-		l.syncDir = func(path string) error {
-			if path != dir {
-				t.Fatalf("synced %s", path)
+			if len(synced) < 3 || synced[len(synced)-2] != "audit directory" || synced[len(synced)-1] != "parent directory" {
+				t.Fatalf("startup barrier order: %v", synced)
 			}
-			called++
-			return errors.New("directory sync failed")
+			if _, err := reopened.Append("inventory", map[string]int{"generation": 4}); err != nil {
+				t.Fatalf("append after durable restart: %v", err)
+			}
+		})
+	}
+}
+
+func TestStartupSyncsEmptyAuditDirectoryAndParent(t *testing.T) {
+	key := ed25519.NewKeyFromSeed(make([]byte, 32))
+	dir := filepath.Join(t.TempDir(), "audit")
+	for _, failedPath := range []string{dir, filepath.Dir(dir)} {
+		if l, err := openWithSync(dir, key, (*os.File).Sync, func(path string) error {
+			if path == failedPath {
+				return errors.New("directory sync failed")
+			}
+			return syncDirectory(path)
+		}); err == nil || l != nil {
+			t.Fatalf("accepted unsynced directory %s", failedPath)
 		}
-		if _, err = l.Append("inventory", map[string]int{"generation": 2}); err == nil {
-			t.Fatal("append reported durable before directory sync")
-		}
-		if called != 1 {
-			t.Fatalf("directory sync calls: %d", called)
-		}
-		if _, err = l.Append("inventory", map[string]int{"generation": 3}); err == nil {
-			t.Fatal("uncertain log accepted another append")
-		}
+	}
+	if _, err := Open(dir, key); err != nil {
+		t.Fatalf("restart did not recover directory creation: %v", err)
 	}
 }
 
