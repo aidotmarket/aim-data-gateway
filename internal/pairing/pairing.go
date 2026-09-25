@@ -177,11 +177,25 @@ func syncDirectory(path string) error {
 
 func Load(dir string) (State, error) {
 	var s State
+	_, stagingErr := os.Stat(filepath.Join(dir, ".pairing-staging"))
+	if stagingErr != nil && !os.IsNotExist(stagingErr) {
+		return s, stagingErr
+	}
 	if err := os.RemoveAll(filepath.Join(dir, ".pairing-staging")); err != nil {
 		return s, err
 	}
 	if _, err := os.Stat(filepath.Join(dir, ".pairing-complete")); err != nil {
-		return s, errors.New("incomplete pairing: completion marker missing")
+		if stagingErr == nil {
+			return s, errors.New("incomplete pairing: completion marker missing")
+		}
+		for _, name := range []string{"identity.key", "secret.bin", "pins.json"} {
+			if _, statErr := os.Stat(filepath.Join(dir, name)); statErr == nil {
+				return s, errors.New("incomplete pairing: completion marker missing")
+			} else if !os.IsNotExist(statErr) {
+				return s, statErr
+			}
+		}
+		return s, errors.New("gateway is not paired: set AIM_PAIRING_CODE for the first run")
 	}
 	private, err := os.ReadFile(filepath.Join(dir, "identity.key"))
 	if err != nil {

@@ -9,6 +9,123 @@ import (
 	"testing"
 )
 
+func TestTornTailRecovery(t *testing.T) {
+	key := ed25519.NewKeyFromSeed(make([]byte, 32))
+	dir := t.TempDir()
+	l, err := Open(dir, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := l.Append("inventory", map[string]int{"generation": 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "000000.jsonl")
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.Write([]byte(`{"seq":2,"body":`))
+	f.Close()
+	recovered, err := Open(dir, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fragments, err := filepath.Glob(filepath.Join(dir, "torn-*.fragment"))
+	if err != nil || len(fragments) != 1 {
+		t.Fatalf("fragments: %v %v", fragments, err)
+	}
+	b, err := os.ReadFile(fragments[0])
+	if err != nil || string(b) != `{"seq":2,"body":` {
+		t.Fatalf("fragment: %q %v", b, err)
+	}
+	second, err := recovered.Append("inventory", map[string]int{"generation": 2})
+	if err != nil || second.Seq != 2 {
+		t.Fatalf("next: %+v %v", second, err)
+	}
+	hash, err := Hash(first)
+	if err != nil || second.PrevHash != hash {
+		t.Fatalf("chain: %+v %v", second, err)
+	}
+}
+
+func TestValidUnterminatedTailRecovery(t *testing.T) {
+	key := ed25519.NewKeyFromSeed(make([]byte, 32))
+	dir := t.TempDir()
+	l, err := Open(dir, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := l.Append("inventory", map[string]int{"generation": 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := l.Append("inventory", map[string]int{"generation": 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "000000.jsonl")
+	contents, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lastNewline := strings.LastIndexByte(string(contents[:len(contents)-1]), '\n')
+	fragment := contents[lastNewline+1 : len(contents)-1]
+	if _, err := ValidateRaw(fragment, key.Public().(ed25519.PublicKey)); err != nil {
+		t.Fatalf("tail fixture is invalid: %v", err)
+	}
+	if err := os.Truncate(path, int64(len(contents)-1)); err != nil {
+		t.Fatal(err)
+	}
+	recovered, err := Open(dir, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fragments, err := filepath.Glob(filepath.Join(dir, "torn-*.fragment"))
+	if err != nil || len(fragments) != 1 {
+		t.Fatalf("fragments: %v %v", fragments, err)
+	}
+	got, err := os.ReadFile(fragments[0])
+	if err != nil || string(got) != string(fragment) {
+		t.Fatalf("fragment: %q %v", got, err)
+	}
+	if got, err := os.ReadFile(path); err != nil || string(got) != string(contents[:lastNewline+1]) {
+		t.Fatalf("truncated log: %q %v", got, err)
+	}
+	next, err := recovered.Append("inventory", map[string]int{"generation": 3})
+	if err != nil || next.Seq != second.Seq {
+		t.Fatalf("next: %+v %v", next, err)
+	}
+	hash, err := Hash(first)
+	if err != nil || next.PrevHash != hash {
+		t.Fatalf("chain: %+v %v", next, err)
+	}
+}
+
+func TestInvalidAuditLinesFailClosed(t *testing.T) {
+	for _, middle := range []bool{false, true} {
+		key := ed25519.NewKeyFromSeed(make([]byte, 32))
+		dir := t.TempDir()
+		l, err := Open(dir, key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		l.Append("inventory", map[string]int{"generation": 1})
+		path := filepath.Join(dir, "000000.jsonl")
+		if middle {
+			b, _ := os.ReadFile(path)
+			os.WriteFile(path, append([]byte("bad\n"), b...), 0600)
+		} else {
+			f, _ := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
+			f.Write([]byte("bad\n"))
+			f.Close()
+		}
+		if _, err = Open(dir, key); err == nil {
+			t.Fatal("accepted bad terminated line")
+		}
+	}
+}
+
 func TestStartupSyncGatesRestart(t *testing.T) {
 	for _, rotate := range []bool{false, true} {
 		name := "first"

@@ -108,6 +108,12 @@ CREATE TABLE IF NOT EXISTS completed(oid TEXT, fid TEXT, PRIMARY KEY(oid,fid));
 `
 
 func Open(path string, key ed25519.PrivateKey, kid string) (*Ledger, error) {
+	return open(path, key, kid, true)
+}
+func OpenForApproval(path string, key ed25519.PrivateKey, kid string) (*Ledger, error) {
+	return open(path, key, kid, false)
+}
+func open(path string, key ed25519.PrivateKey, kid string, recoverRequests bool) (*Ledger, error) {
 	db, e := sql.Open("sqlite", path)
 	if e != nil {
 		return nil, e
@@ -120,7 +126,10 @@ func Open(path string, key ed25519.PrivateKey, kid string) (*Ledger, error) {
 		}
 	}
 	l := &Ledger{DB: db, Key: key, KID: kid}
-	if e = l.Recover(context.Background()); e != nil {
+	if recoverRequests {
+		e = l.Recover(context.Background())
+	}
+	if e != nil {
 		db.Close()
 		return nil, e
 	}
@@ -237,7 +246,14 @@ func (l *Ledger) Offer(ctx context.Context, fid, sha, lvid string) (Offer, error
 	return o, e
 }
 func (l *Ledger) Approve(ctx context.Context, fid, sha, lvid string) error {
-	_, e := l.DB.ExecContext(ctx, `UPDATE offers SET approved_locally_at=? WHERE fid=? AND sha256=? AND lvid=?`, now(), fid, sha, lvid)
+	r, e := l.DB.ExecContext(ctx, `UPDATE offers SET approved_locally_at=? WHERE fid=? AND sha256=? AND lvid=? AND state='offered' AND approved_locally_at IS NULL`, now(), fid, sha, lvid)
+	if e != nil {
+		return e
+	}
+	n, e := r.RowsAffected()
+	if e == nil && n == 0 {
+		return errors.New("offer is not pending local approval")
+	}
 	return e
 }
 

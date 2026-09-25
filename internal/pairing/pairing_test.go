@@ -94,3 +94,21 @@ func TestPartialPairingIsDistinctFromPaired(t *testing.T) {
 		t.Fatal("partial root state accepted for pairing")
 	}
 }
+
+func TestLoadMissingCompletionMarker(t *testing.T) {
+	for _, name := range []string{"", "identity.key", "secret.bin", "pins.json"} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			want := "gateway is not paired: set AIM_PAIRING_CODE for the first run"
+			if name != "" {
+				if err := os.WriteFile(filepath.Join(dir, name), []byte("partial"), 0600); err != nil {
+					t.Fatal(err)
+				}
+				want = "incomplete pairing: completion marker missing"
+			}
+			if _, err := Load(dir); err == nil || err.Error() != want {
+				t.Fatalf("Load error = %v, want %q", err, want)
+			}
+		})
+	}
+}

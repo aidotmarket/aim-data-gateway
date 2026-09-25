@@ -11,7 +11,9 @@ import (
 	"io"
 	"log"
 	"math/rand/v2"
+	"net"
 	"net/http"
+	"net/url"
 	"regexp"
 	"strings"
 	"time"
@@ -26,6 +28,11 @@ import (
 const URL = "wss://api.ai.market/api/v1/gateway-channel"
 const maxMessage = 1 << 20
 
+func ProxyClient(address string) *http.Client {
+	proxy := &url.URL{Scheme: "http", Host: address}
+	return &http.Client{Transport: &http.Transport{Proxy: http.ProxyURL(proxy), DialContext: (&net.Dialer{Timeout: 10 * time.Second}).DialContext}}
+}
+
 var hex64 = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
 type Client struct {
@@ -39,7 +46,8 @@ type Client struct {
 	Handle   func(context.Context, wire.Instruction, string, string) (string, any, error)
 	Complete func(context.Context, string) error
 	// Scan appends an inventory generation after each successful resume.
-	Scan func(context.Context) error
+	Scan   func(context.Context) error
+	Canary func(context.Context) error
 	// Poll appends any newly queued receipts, returning their local audit sequences.
 	Poll func(context.Context) error
 	// Delivered marks an outbox receipt after ack or a later resume.
@@ -47,6 +55,7 @@ type Client struct {
 	Reconcile      func(context.Context, uint64) error
 	sent           uint64
 	heartbeatEvery time.Duration
+	canaryEvery    time.Duration
 }
 
 func (c *Client) pinned() pairing.Pins {
@@ -327,6 +336,37 @@ func (c *Client) Connect(ctx context.Context) error {
 		default:
 			return errors.New("channel work queue full")
 		}
+	}
+	if c.Canary != nil {
+		go func() {
+			interval := c.canaryEvery
+			if interval == 0 {
+				interval = time.Hour
+			}
+			ticker := time.NewTicker(interval)
+			defer ticker.Stop()
+			for {
+				if workCtx.Err() != nil {
+					return
+				}
+				if e := c.Canary(workCtx); e != nil {
+					select {
+					case workErr <- e:
+					default:
+					}
+					return
+				}
+				select {
+				case wake <- struct{}{}:
+				default:
+				}
+				select {
+				case <-workCtx.Done():
+					return
+				case <-ticker.C:
+				}
+			}
+		}()
 	}
 	if c.Scan != nil {
 		if err = queue(jobs, func() error { return c.Scan(workCtx) }); err != nil {

@@ -80,32 +80,47 @@ func openWithSync(dir string, private ed25519.PrivateKey, syncFile func(*os.File
 	}
 	sort.Strings(files)
 	for _, p := range files {
-		f, e := os.Open(p)
+		f, e := os.OpenFile(p, os.O_RDWR, 0)
 		if e != nil {
 			return nil, e
 		}
-		sc := bufio.NewScanner(f)
-		sc.Buffer(make([]byte, 64*1024), 2<<20)
+		reader := bufio.NewReaderSize(f, 2<<20)
+		var offset int64
 		first := l.seq + 1
-		for sc.Scan() {
-			entry, e := ValidateRaw(sc.Bytes(), private.Public().(ed25519.PublicKey))
+		for {
+			line, readErr := reader.ReadSlice('\n')
+			if readErr == bufio.ErrBufferFull {
+				f.Close()
+				return nil, errors.New("audit entry exceeds 2 MiB")
+			}
+			if readErr == io.EOF && len(line) == 0 {
+				break
+			}
+			terminated := readErr == nil
+			if !terminated && p == files[len(files)-1] && readErr == io.EOF {
+				if err := preserveTorn(dir, f, offset, line); err != nil {
+					f.Close()
+					return nil, err
+				}
+				fmt.Fprintln(os.Stderr, "audit: recovered torn tail from", p)
+				break
+			}
+			entry, e := ValidateRaw(bytes.TrimSuffix(line, []byte{'\n'}), private.Public().(ed25519.PublicKey))
 			if e != nil {
 				f.Close()
 				return nil, e
 			}
-			if entry.Seq != l.seq+1 || entry.PrevHash != l.prev {
+			if !terminated || entry.Seq != l.seq+1 || entry.PrevHash != l.prev {
 				f.Close()
 				return nil, errors.New("audit chain broken")
 			}
-			h := sha256.Sum256(sc.Bytes())
+			h := sha256.Sum256(line[:len(line)-1])
 			l.prev = hex.EncodeToString(h[:])
 			l.seq++
 			l.last = entry
+			offset += int64(len(line))
 		}
-		e = sc.Err()
-		if e == nil {
-			e = syncFile(f)
-		}
+		e = syncFile(f)
 		ce := f.Close()
 		if e != nil {
 			return nil, e
@@ -138,6 +153,34 @@ func openWithSync(dir string, private ed25519.PrivateKey, syncFile func(*os.File
 		return nil, e
 	}
 	return l, nil
+}
+func preserveTorn(dir string, source *os.File, offset int64, fragment []byte) error {
+	path := filepath.Join(dir, fmt.Sprintf("torn-%d.fragment", time.Now().UnixNano()))
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	if err != nil {
+		return err
+	}
+	_, err = f.Write(fragment)
+	if err == nil {
+		err = f.Sync()
+	}
+	closeErr := f.Close()
+	if err != nil {
+		return err
+	}
+	if closeErr != nil {
+		return closeErr
+	}
+	if err = syncDirectory(dir); err != nil {
+		return err
+	}
+	if err = source.Truncate(offset); err != nil {
+		return err
+	}
+	if err = source.Sync(); err != nil {
+		return err
+	}
+	return syncDirectory(dir)
 }
 func (l *Log) Append(messageType string, body any) (Entry, error) {
 	l.mu.Lock()

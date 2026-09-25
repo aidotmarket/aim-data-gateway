@@ -6,15 +6,14 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
-	"net"
 	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
 	"sync"
 	"time"
 
 	"github.com/aidotmarket/aim-data-gateway/internal/audit"
+	"github.com/aidotmarket/aim-data-gateway/internal/canary"
 	"github.com/aidotmarket/aim-data-gateway/internal/channel"
 	"github.com/aidotmarket/aim-data-gateway/internal/config"
 	"github.com/aidotmarket/aim-data-gateway/internal/door"
@@ -380,18 +379,31 @@ func (g *Gateway) Run(ctx context.Context, version string) error {
 		return keys
 	}, GatewayKey: g.State.Private, GatewayKID: "gateway", RecoveryContext: ctx}
 	server := d.Server(g.Config.Door.Listen)
+	health := door.HealthServer()
 	serverErr := make(chan error, 1)
 	go func() { serverErr <- server.ListenAndServe() }()
+	go func() { serverErr <- health.ListenAndServe() }()
 	defer server.Shutdown(context.Background())
+	defer health.Shutdown(context.Background())
 	client := &channel.Client{State: &g.State, Log: g.Log, Version: version, Handle: g.Handle, Complete: func(ctx context.Context, iid string) error { _, err := g.Ledger.Seen(ctx, iid); return err }, Scan: g.Scan, Poll: g.Poll, Delivered: g.Delivered, Reconcile: g.Reconcile}
+	client.Canary = func(ctx context.Context) error {
+		g.keyMu.RLock()
+		host, zone := g.State.Pins.CanaryHost, g.State.Pins.CanaryZone
+		g.keyMu.RUnlock()
+		result, err := (canary.Probe{}).Run(ctx, host, zone, g.Config.Egress.ConnectProxy)
+		if err != nil {
+			return err
+		}
+		_, err = g.Log.Append("canary_result", result)
+		return err
+	}
 	client.PinsSnapshot = func() pairing.Pins {
 		g.keyMu.RLock()
 		defer g.keyMu.RUnlock()
 		return copyPins(g.State.Pins)
 	}
 	if g.Config.Egress.ConnectProxy != "" {
-		proxyURL := &url.URL{Scheme: "http", Host: g.Config.Egress.ConnectProxy}
-		client.HTTPClient = &http.Client{Transport: &http.Transport{Proxy: http.ProxyURL(proxyURL), DialContext: (&net.Dialer{Timeout: 10 * time.Second}).DialContext}}
+		client.HTTPClient = channel.ProxyClient(g.Config.Egress.ConnectProxy)
 	}
 	go func() { serverErr <- client.Run(ctx) }()
 	select {

@@ -1,0 +1,22 @@
+# Mount this file read-only at /config/gateway.toml.
+sources = [{name = "data", path = "/sources/data"}]
+# Omit or leave empty to permit all files under the named sources.
+offer_ceiling = []
+# Map a source/relative path to a public display name.
+aliases = {}
+# Require `aim-gateway approve <file-id>` before an offer can be served.
+offer_requires_local_approval = false
+
+[door]
+# Plain HTTP; terminate TLS at the seller's reverse proxy.
+listen = ":8080"
+max_concurrent_downloads = 8
+
+[egress]
+# Optional customer allowlisting HTTP CONNECT proxy, host:port.
+connect_proxy = ""
+
+# Per-file column rules, keyed by source/relative path:
+# [columns."data/example.csv"]
+# rename = { original = "public_name" }
+# drop = ["private_column"]
