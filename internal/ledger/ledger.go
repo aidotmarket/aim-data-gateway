@@ -531,8 +531,9 @@ func (l *Ledger) Progress(ctx context.Context, id, writtenThrough int64) error {
 	})
 }
 
-// WriteChunk serializes the closure check, network write, and durable progress per order/file.
-// A response reserved before completion cannot write after another response closes it.
+// WriteChunk holds the order/file barrier through the network write. A stalled
+// buyer therefore delays other responses for that same file until the writer's
+// transfer deadline; this is required so none writes after completion closes it.
 func (l *Ledger) WriteChunk(ctx context.Context, id int64, data []byte, write func([]byte) (int, error)) (int, error) {
 	keyOID, keyFID, e := l.requestKey(ctx, id)
 	if e != nil {
@@ -714,6 +715,18 @@ func (l *Ledger) Recover(ctx context.Context) error {
 		}
 		return nil
 	})
+}
+
+// RecoverRequest closes a response whose final progress checkpoint failed.
+// Crash settlement conservatively retains at most one uncheckpointed window.
+func (l *Ledger) RecoverRequest(ctx context.Context, id int64) error {
+	oid, fid, e := l.requestKey(ctx, id)
+	if e != nil {
+		return e
+	}
+	_, unlock := l.transferLock(oid, fid)
+	defer unlock()
+	return tx(ctx, l.DB, func(t *sql.Tx) error { return l.settle(ctx, t, id, true, "") })
 }
 
 func (l *Ledger) Receipt(ctx context.Context, oid, fid, outcome string) (wire.Receipt, error) {

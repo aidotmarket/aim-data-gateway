@@ -309,6 +309,17 @@ func (d *Door) download(w http.ResponseWriter, r *http.Request, fid string) {
 	defer func() {
 		if settle {
 			_ = d.Ledger.SettleOutcome(context.Background(), req.ID, outcome)
+		} else {
+			// A failed terminal checkpoint must not strand an open request until
+			// restart. Retry conservative crash settlement after transient DB errors.
+			go func() {
+				for {
+					if d.Ledger.RecoverRequest(context.Background(), req.ID) == nil {
+						return
+					}
+					time.Sleep(time.Second)
+				}
+			}()
 		}
 	}()
 	end = req.End
