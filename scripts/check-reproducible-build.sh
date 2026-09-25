@@ -6,7 +6,7 @@ second=$(mktemp -d)
 trap 'rm -rf "$first" "$second"' EXIT
 for dir in "$first" "$second"; do
   mkdir "$dir/cache"
-  GOCACHE="$dir/cache" CGO_ENABLED=0 go build -trimpath -buildvcs=false -ldflags="-s -w -buildid=" -o "$dir/aim-gateway" ./cmd/aim-gateway
+  GOCACHE="$dir/cache" CGO_ENABLED=0 go build -trimpath -buildvcs=false -ldflags="-s -w -buildid= -X main.version=0.0.0-dev" -o "$dir/aim-gateway" ./cmd/aim-gateway
 done
 sha256sum "$first/aim-gateway" "$second/aim-gateway"
 cmp "$first/aim-gateway" "$second/aim-gateway"

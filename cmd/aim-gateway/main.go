@@ -23,7 +23,7 @@ import (
 	"github.com/aidotmarket/aim-data-gateway/internal/wire"
 )
 
-const version = "0.1.0-dev"
+var version = "0.0.0-dev"
 
 func main() {
 	if e := execute(os.Args[1:]); e != nil {
