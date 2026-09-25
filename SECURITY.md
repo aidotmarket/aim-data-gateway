@@ -13,13 +13,17 @@ Use the digest from the release Compose asset or the pairing response. Replace `
 ```sh
 image=ghcr.io/aidotmarket/aim-gateway@sha256:<digest>
 cosign verify "$image" \
-  --certificate-identity-regexp '^https://github\.com/aidotmarket/aim-data-gateway/\.github/workflows/release\.yml@refs/tags/v[0-9].*$' \
+  --certificate-identity-regexp '^https://github\.com/aidotmarket/aim-data-gateway/\.github/workflows/release\.yml@refs/tags/v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?$' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com
 gh attestation verify "oci://$image" -R aidotmarket/aim-data-gateway --predicate-type https://slsa.dev/provenance/v1
 gh attestation verify "oci://$image" -R aidotmarket/aim-data-gateway --predicate-type https://spdx.dev/Document/v2.3
 ```
 
 Verify the release assets with `sha256sum -c checksums.txt`. The SPDX JSON describes that exact image digest. The release workflow checks two independent OCI exports against the pushed digest, scans fixable high and critical findings, signs the image keylessly, and verifies both attestations before publishing assets.
+
+## First release package visibility
+
+After the first image push, an aidotmarket organization admin must make the GHCR package ghcr.io/aidotmarket/aim-gateway public in GitHub package settings. The release workflow checks an anonymous manifest pull after signing and attestation verification. It fails before publishing release assets if the package is still private. After changing visibility, rerun the failed release workflow.
 
 ## Reproduce the build
 

@@ -14,7 +14,10 @@ def check(path: Path) -> None:
     )
     if result.returncode:
         raise ValueError(f"docker compose config failed: {result.stderr.strip()}")
-    service = json.loads(result.stdout)["services"]["aim-gateway"]
+    services = json.loads(result.stdout)["services"]
+    if set(services) != {"aim-gateway"}:
+        raise ValueError("aim-gateway must be the only service")
+    service = services["aim-gateway"]
     for key, expected in (
         ("user", "65532:65532"), ("read_only", True),
         ("cap_drop", ["ALL"]), ("security_opt", ["no-new-privileges:true"]),
@@ -24,9 +27,9 @@ def check(path: Path) -> None:
     for key in ("privileged", "cap_add", "devices"):
         if key in service:
             raise ValueError(f"{key} is forbidden")
-    for key in ("network_mode", "pid", "ipc"):
-        if service.get(key) == "host":
-            raise ValueError(f"{key}: host is forbidden")
+    for key in ("network_mode", "userns_mode", "pid", "ipc"):
+        if key in service:
+            raise ValueError(f"{key} is forbidden")
     mounts = service.get("volumes", [])
     if not mounts:
         raise ValueError("required mounts missing")
@@ -64,8 +67,17 @@ def self_check(original: str) -> None:
         "new privileges": ("    security_opt: [no-new-privileges:true]", "    security_opt: []"),
         "privileged": ("    build: .", "    build: .\n    privileged: true"),
         "host network": ("    build: .", "    build: .\n    network_mode: host"),
+        "shared service network": ("    build: .", "    build: .\n    network_mode: service:x"),
+        "shared container network": ("    build: .", "    build: .\n    network_mode: container:x"),
+        "no network": ("    build: .", "    build: .\n    network_mode: none"),
+        "host user namespace": ("    build: .", "    build: .\n    userns_mode: host"),
         "host pid": ("    build: .", "    build: .\n    pid: host"),
+        "shared pid": ("    build: .", "    build: .\n    pid: container:x"),
         "host ipc": ("    build: .", "    build: .\n    ipc: host"),
+        "shared ipc": ("    build: .", "    build: .\n    ipc: container:x"),
+        "privileged sidecar": ("services:\n", "services:\n  sidecar:\n    image: busybox\n    privileged: true\n"),
+        "host-network sidecar": ("services:\n", "services:\n  sidecar:\n    image: busybox\n    network_mode: host\n"),
+        "socket sidecar": ("services:\n", "services:\n  sidecar:\n    image: busybox\n    volumes:\n      - /var/run/docker.sock:/var/run/docker.sock\n"),
         "cap add": ("    build: .", "    build: .\n    cap_add: [SYS_ADMIN]"),
         "device": ("    build: .", "    build: .\n    devices: [/dev/null:/dev/example]"),
         "docker socket": ("      - aim-gateway-state:/state", "      - /var/run/docker.sock:/var/run/docker.sock\n      - aim-gateway-state:/state"),
