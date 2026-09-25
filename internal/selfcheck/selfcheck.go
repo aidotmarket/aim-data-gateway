@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 )
 
@@ -20,6 +21,8 @@ func Check(root string, uid, euid int) error {
 	var failed []string
 	if uid == 0 || euid == 0 {
 		failed = append(failed, "root UID")
+	} else if uid != 65532 || euid != 65532 {
+		failed = append(failed, "UID must be 65532")
 	}
 	mounts, mountErr := os.ReadFile(filepath.Join(root, "proc/self/mountinfo"))
 	if mountErr != nil {
@@ -31,14 +34,26 @@ func Check(root string, uid, euid int) error {
 			if len(fields) < 6 {
 				continue
 			}
-			if fields[4] == "/" {
+			mount, err := decodeMount(fields[4])
+			if err != nil {
+				failed = append(failed, "invalid mount point")
+				continue
+			}
+			if mount == "/" {
 				foundRoot = true
 				if strings.Contains(","+fields[5]+",", ",rw,") {
 					failed = append(failed, "writable root filesystem")
 				}
 			}
-			if strings.HasSuffix(fields[4], "docker.sock") {
+			if strings.HasSuffix(mount, "docker.sock") {
 				failed = append(failed, "Docker socket mount")
+			}
+			if info, err := os.Lstat(filepath.Join(root, strings.TrimPrefix(mount, "/"))); err == nil {
+				if info.Mode()&os.ModeSocket != 0 {
+					failed = append(failed, "host socket mount "+mount)
+				}
+			} else if !os.IsNotExist(err) {
+				failed = append(failed, "mount point check failed "+mount)
 			}
 		}
 		if !foundRoot {
@@ -86,4 +101,24 @@ func Check(root string, uid, euid int) error {
 		return fmt.Errorf("start-up self-check: %s", strings.Join(failed, ", "))
 	}
 	return nil
+}
+
+func decodeMount(path string) (string, error) {
+	var out strings.Builder
+	for i := 0; i < len(path); i++ {
+		if path[i] == '\\' {
+			if i+3 >= len(path) {
+				return "", fmt.Errorf("short mount escape")
+			}
+			n, err := strconv.ParseUint(path[i+1:i+4], 8, 8)
+			if err != nil {
+				return "", err
+			}
+			out.WriteByte(byte(n))
+			i += 3
+		} else {
+			out.WriteByte(path[i])
+		}
+	}
+	return out.String(), nil
 }

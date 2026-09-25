@@ -16,7 +16,6 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/aidotmarket/aim-data-gateway/internal/audit"
@@ -54,9 +53,9 @@ type Client struct {
 	// Delivered marks an outbox receipt after ack or a later resume.
 	Delivered      func(context.Context, audit.Entry) error
 	Reconcile      func(context.Context, uint64) error
-	canaryMu       sync.Mutex
 	sent           uint64
 	heartbeatEvery time.Duration
+	canaryEvery    time.Duration
 }
 
 func (c *Client) pinned() pairing.Pins {
@@ -339,9 +338,35 @@ func (c *Client) Connect(ctx context.Context) error {
 		}
 	}
 	if c.Canary != nil {
-		if err = queue(jobs, func() error { c.canaryMu.Lock(); defer c.canaryMu.Unlock(); return c.Canary(workCtx) }); err != nil {
-			return err
-		}
+		go func() {
+			interval := c.canaryEvery
+			if interval == 0 {
+				interval = time.Hour
+			}
+			ticker := time.NewTicker(interval)
+			defer ticker.Stop()
+			for {
+				if workCtx.Err() != nil {
+					return
+				}
+				if e := c.Canary(workCtx); e != nil {
+					select {
+					case workErr <- e:
+					default:
+					}
+					return
+				}
+				select {
+				case wake <- struct{}{}:
+				default:
+				}
+				select {
+				case <-workCtx.Done():
+					return
+				case <-ticker.C:
+				}
+			}
+		}()
 	}
 	if c.Scan != nil {
 		if err = queue(jobs, func() error { return c.Scan(workCtx) }); err != nil {
@@ -404,8 +429,6 @@ func (c *Client) Connect(ctx context.Context) error {
 	defer tick.Stop()
 	scan := time.NewTicker(15 * time.Minute)
 	defer scan.Stop()
-	canaryTick := time.NewTicker(time.Hour)
-	defer canaryTick.Stop()
 	interval := c.heartbeatEvery
 	if interval == 0 {
 		interval = 30 * time.Second
@@ -443,12 +466,6 @@ func (c *Client) Connect(ctx context.Context) error {
 		case <-scan.C:
 			if c.Scan != nil {
 				if err = queue(jobs, func() error { return c.Scan(workCtx) }); err != nil {
-					return err
-				}
-			}
-		case <-canaryTick.C:
-			if c.Canary != nil {
-				if err = queue(jobs, func() error { c.canaryMu.Lock(); defer c.canaryMu.Unlock(); return c.Canary(workCtx) }); err != nil {
 					return err
 				}
 			}

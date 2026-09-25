@@ -8,6 +8,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -125,6 +126,62 @@ func TestBlockedScanDoesNotBlockReceiptDelivery(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
 	defer cancel()
 	_ = c.Connect(ctx)
+}
+
+func TestCanaryRunsAndAcksWhileScanBlocked(t *testing.T) {
+	c, entries := fixture(t)
+	c.canaryEvery = 25 * time.Millisecond
+	started := make(chan struct{})
+	c.Scan = func(ctx context.Context) error {
+		close(started)
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	c.Canary = func(context.Context) error {
+		_, err := c.Log.Append("canary_result", map[string]any{"state": "closed"})
+		return err
+	}
+	acked := make(chan uint64, 2)
+	c.Delivered = func(_ context.Context, entry audit.Entry) error {
+		acked <- entry.Seq
+		return nil
+	}
+	h, _ := audit.Hash(entries[1])
+	s := server(t, func(ctx context.Context, ws *websocket.Conn) {
+		_ = ws.Write(ctx, websocket.MessageText, []byte(`{"resume":{"seq":2,"entry_hash":"`+h+`"}}`))
+		<-started
+		for seq := uint64(3); seq <= 4; seq++ {
+			_, raw, err := ws.Read(ctx)
+			if err != nil {
+				t.Errorf("canary %d stalled: %v", seq, err)
+				return
+			}
+			var entry audit.Entry
+			if json.Unmarshal(raw, &entry) != nil || entry.Seq != seq || entry.MessageType != "canary_result" {
+				t.Errorf("wrong canary: %s", raw)
+				return
+			}
+			_ = ws.Write(ctx, websocket.MessageText, []byte(`{"ack":`+strconv.FormatUint(seq, 10)+`}`))
+			select {
+			case got := <-acked:
+				if got != seq {
+					t.Errorf("ack %d delivered as %d", seq, got)
+				}
+			case <-ctx.Done():
+				t.Errorf("ack %d stalled", seq)
+				return
+			}
+		}
+		_ = ws.Close(websocket.StatusNormalClosure, "done")
+	})
+	defer s.Close()
+	c.URL = "ws" + strings.TrimPrefix(s.URL, "http")
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	defer cancel()
+	_ = c.Connect(ctx)
+	if c.Log.Sequence() < 4 {
+		t.Fatalf("only %d canary results", c.Log.Sequence()-2)
+	}
 }
 
 func TestControlPassesBlockedDescription(t *testing.T) {
