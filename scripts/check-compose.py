@@ -24,8 +24,12 @@ def check(path: Path) -> None:
     if set(services) != {"aim-gateway"}:
         raise ValueError("aim-gateway must be the only service")
     service = services["aim-gateway"]
+    # Compose includes null defaults for these keys even when they are absent.
+    for key in ("command", "entrypoint"):
+        if service.get(key) is None:
+            service.pop(key, None)
     allowed_keys = {
-        "build", "image", "command", "entrypoint", "user", "read_only",
+        "build", "image", "user", "read_only",
         "cap_drop", "security_opt", "volumes", "ports", "environment",
         "healthcheck", "networks", "restart",
     }
@@ -75,6 +79,8 @@ def self_check(original: str) -> None:
         "writable root": ("    read_only: true", "    read_only: false"),
         "capabilities": ("    cap_drop: [ALL]", "    cap_drop: []"),
         "new privileges": ("    security_opt: [no-new-privileges:true]", "    security_opt: []"),
+        "entrypoint override": ("    build: .", "    build: .\n    entrypoint: [\"/bin/sh\"]"),
+        "command override": ("    build: .", "    build: .\n    command: [\"version\"]"),
         "privileged": ("    build: .", "    build: .\n    privileged: true"),
         "host cgroup": ("    build: .", "    build: .\n    cgroup: host"),
         "host uts": ("    build: .", "    build: .\n    uts: host"),
