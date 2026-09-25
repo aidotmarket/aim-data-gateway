@@ -2,12 +2,19 @@
 """Check the effective Compose service, including Docker's normalized mounts."""
 import json
 from pathlib import Path
+import re
 import subprocess
 import sys
 import tempfile
 
 
 def check(path: Path) -> None:
+    source = path.read_text()
+    # Compose omits unused top-level volumes (and other unused resources) from config.
+    if set(re.findall(r"(?m)^([^\s#].*)$", source)) != {"services:", "volumes:"}:
+        raise ValueError("only services and volumes may be declared at the top level")
+    if source.count("\nvolumes:\n") != 1 or source.split("\nvolumes:\n", 1)[1] != "  aim-gateway-state:\n":
+        raise ValueError("only the empty aim-gateway-state volume declaration is allowed")
     result = subprocess.run(
         ["docker", "compose", "-f", str(path), "config", "--format", "json"],
         capture_output=True, text=True,
@@ -15,11 +22,20 @@ def check(path: Path) -> None:
     if result.returncode:
         raise ValueError(f"docker compose config failed: {result.stderr.strip()}")
     model = json.loads(result.stdout)
+    if set(model) != {"name", "services", "networks", "volumes"}:
+        raise ValueError("unexpected top-level Compose keys")
+    project = re.sub(r"[^a-z0-9_-]", "", path.parent.resolve().name.lower()).lstrip("_-")
+    if model["name"] != project:
+        raise ValueError("Compose project name must use the directory default")
     networks = model.get("networks", {})
     if set(networks) != {"default"} or networks["default"] != {
-        "name": f"{model['name']}_default", "ipam": {},
+        "name": f"{project}_default", "ipam": {},
     }:
         raise ValueError(f"only the implicit default network is allowed: {sorted(networks)}")
+    if model["volumes"] != {
+        "aim-gateway-state": {"name": f"{project}_aim-gateway-state"},
+    }:
+        raise ValueError("only the default aim-gateway-state volume is allowed")
     services = model["services"]
     if set(services) != {"aim-gateway"}:
         raise ValueError("aim-gateway must be the only service")
@@ -38,38 +54,57 @@ def check(path: Path) -> None:
         raise ValueError(f"forbidden service key: {sorted(unknown_keys)[0]}")
     if service.get("networks") != {"default": None}:
         raise ValueError("aim-gateway may use only the implicit default network")
+    expected_build = {"context": str(path.parent.absolute()), "dockerfile": "Dockerfile"}
+    if ("build" in service) == ("image" in service):
+        raise ValueError("exactly one default build or pinned release image is required")
+    if "build" in service and service["build"] != expected_build:
+        raise ValueError("build must use only the default context and Dockerfile")
+    if "image" in service and (not isinstance(service["image"], str) or
+        re.fullmatch(r"ghcr.io/aidotmarket/aim-gateway@sha256:[0-9a-f]{64}",
+                     service["image"]) is None):
+        raise ValueError("image must be the pinned release image")
+    if service.get("ports") != [{
+        "mode": "ingress", "target": 8080, "published": "8080", "protocol": "tcp",
+    }]:
+        raise ValueError("only port 8080:8080/tcp is allowed")
+    if service.get("healthcheck") != {
+        "test": ["CMD", "/aim-gateway", "healthcheck"],
+        "timeout": "5s", "interval": "30s", "retries": 3,
+    }:
+        raise ValueError("only the default gateway healthcheck is allowed")
+    environment = service.get("environment", {})
+    if not isinstance(environment, dict) or set(environment) - {
+        "AIM_PAIRING_CODE", "AIM_GATEWAY_CONFIG", "AIM_GATEWAY_STATE",
+    }:
+        raise ValueError("unexpected environment variable")
+    if "AIM_PAIRING_CODE" in environment and not isinstance(
+        environment["AIM_PAIRING_CODE"], str
+    ):
+        raise ValueError("AIM_PAIRING_CODE must be a string")
+    for key, expected in (
+        ("AIM_GATEWAY_CONFIG", "/config/gateway.toml"),
+        ("AIM_GATEWAY_STATE", "/state"),
+    ):
+        if key in environment and environment[key] != expected:
+            raise ValueError(f"{key} must be {expected}")
+    if "restart" in service and service["restart"] != "no":
+        raise ValueError("only the default restart policy is allowed")
     for key, expected in (
         ("user", "65532:65532"), ("read_only", True),
         ("cap_drop", ["ALL"]), ("security_opt", ["no-new-privileges:true"]),
     ):
         if service.get(key) != expected:
             raise ValueError(f"{key} must be {expected!r}")
-    mounts = service.get("volumes", [])
-    if len(mounts) != 3:
-        raise ValueError("exactly three required mounts expected")
-    seen = set()
-    for mount in mounts:
-        source = mount.get("source", "")
-        target = mount.get("target", "")
-        if any(part.endswith(".sock") or "docker.sock" in part for part in (source, target)):
-            raise ValueError("socket mount forbidden")
-        if target in seen:
-            raise ValueError("duplicate mount target")
-        seen.add(target)
-        if target == "/config/gateway.toml":
-            valid = mount.get("type") == "bind" and mount.get("read_only") is True
-        elif target.startswith("/sources/") and target.count("/") == 2:
-            valid = mount.get("type") == "bind" and mount.get("read_only") is True
-        elif target == "/state":
-            valid = mount.get("type") == "volume"
-        else:
-            valid = False
-        if not valid:
-            raise ValueError(f"forbidden or unprotected mount: {target}")
-    if not {"/config/gateway.toml", "/state"} <= seen or not any(
-        target.startswith("/sources/") for target in seen
-    ):
-        raise ValueError("required mounts missing")
+    base = path.parent.absolute()
+    if service.get("volumes") != [
+        {"type": "bind", "source": str(base / "gateway.toml"),
+         "target": "/config/gateway.toml", "read_only": True, "bind": {}},
+        {"type": "bind", "source": str(base / "data"),
+         "target": "/sources/data", "read_only": True, "bind": {}},
+        {"type": "volume", "source": "aim-gateway-state", "target": "/state",
+         "volume": {}},
+    ]:
+        raise ValueError("only the three default mounts are allowed")
 
 
 def self_check(original: str) -> None:
@@ -108,6 +143,23 @@ def self_check(original: str) -> None:
         "extra source mount": ("      - aim-gateway-state:/state", "      - ./extra:/sources/extra:ro\n      - aim-gateway-state:/state"),
         "writable config": ("./gateway.toml:/config/gateway.toml:ro", "./gateway.toml:/config/gateway.toml"),
         "writable source": ("./data:/sources/data:ro", "./data:/sources/data"),
+        "external state volume": ("  aim-gateway-state:\n", "  aim-gateway-state:\n    external: true\n"),
+        "host-backed state volume": ("  aim-gateway-state:\n", "  aim-gateway-state:\n    driver: local\n    driver_opts:\n      type: none\n      device: //\n      o: bind\n"),
+        "extra top-level volume": ("  aim-gateway-state:\n", "  aim-gateway-state:\n  extra:\n"),
+        "wrong state source": ("aim-gateway-state:/state", "extra:/state"),
+        "read-only state": ("aim-gateway-state:/state", "aim-gateway-state:/state:ro"),
+        "privileged build": ("    build: .", "    build:\n      context: .\n      privileged: true"),
+        "host-network build": ("    build: .", "    build:\n      context: .\n      network: host"),
+        "entitled build": ("    build: .", "    build:\n      context: .\n      entitlements: [security.insecure]"),
+        "build argument": ("    build: .", "    build:\n      context: .\n      args: {EXTRA: value}"),
+        "wrong host port": ('      - "8080:8080"', '      - "8081:8080"'),
+        "wrong container port": ('      - "8080:8080"', '      - "8080:8081"'),
+        "extra environment": ("    healthcheck:\n", "    environment: {HOST: value}\n    healthcheck:\n"),
+        "wrong config environment": ("    healthcheck:\n", "    environment: {AIM_GATEWAY_CONFIG: /etc/passwd}\n    healthcheck:\n"),
+        "healthcheck disabled": ("    healthcheck:\n", "    healthcheck:\n      disable: true\n"),
+        "restart always": ("    healthcheck:\n", "    restart: always\n    healthcheck:\n"),
+        "top-level secret": ("\nvolumes:\n", "\nsecrets:\n  extra:\n    file: ./gateway.toml\n\nvolumes:\n"),
+        "project name override": ("services:\n", "name: hostile\nservices:\n"),
     }
     with tempfile.TemporaryDirectory() as directory:
         path = Path(directory) / "compose.yaml"
