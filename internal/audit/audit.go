@@ -2,12 +2,14 @@ package audit
 
 import (
 	"bufio"
+	"bytes"
 	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -37,23 +39,41 @@ type unsigned struct {
 	PrevHash    string          `json:"prev_hash"`
 }
 type Log struct {
-	mu      sync.Mutex
-	dir     string
-	private ed25519.PrivateKey
-	seq     uint64
-	prev    string
-	index   int
-	size    int64
+	mu        sync.Mutex
+	dir       string
+	private   ed25519.PrivateKey
+	seq       uint64
+	prev      string
+	index     int
+	size      int64
+	rotations []rotation
+	cursor    cursor
+	last      Entry
+	syncDir   func(string) error
+	failed    error
+}
+type rotation struct {
+	first uint64
+	path  string
+}
+type cursor struct {
+	seq    uint64
+	path   string
+	offset int64
 }
 
 func Open(dir string, private ed25519.PrivateKey) (*Log, error) {
+	return openWithSync(dir, private, (*os.File).Sync, syncDirectory)
+}
+
+func openWithSync(dir string, private ed25519.PrivateKey, syncFile func(*os.File) error, syncDir func(string) error) (*Log, error) {
 	if len(private) != ed25519.PrivateKeySize {
 		return nil, errors.New("invalid key")
 	}
 	if e := os.MkdirAll(dir, 0700); e != nil {
 		return nil, e
 	}
-	l := &Log{dir: dir, private: private}
+	l := &Log{dir: dir, private: private, syncDir: syncDir}
 	files, e := filepath.Glob(filepath.Join(dir, "*.jsonl"))
 	if e != nil {
 		return nil, e
@@ -66,9 +86,10 @@ func Open(dir string, private ed25519.PrivateKey) (*Log, error) {
 		}
 		sc := bufio.NewScanner(f)
 		sc.Buffer(make([]byte, 64*1024), 2<<20)
+		first := l.seq + 1
 		for sc.Scan() {
-			var entry Entry
-			if e = json.Unmarshal(sc.Bytes(), &entry); e != nil {
+			entry, e := ValidateRaw(sc.Bytes(), private.Public().(ed25519.PublicKey))
+			if e != nil {
 				f.Close()
 				return nil, e
 			}
@@ -76,20 +97,24 @@ func Open(dir string, private ed25519.PrivateKey) (*Log, error) {
 				f.Close()
 				return nil, errors.New("audit chain broken")
 			}
-			raw, e := wire.Canonical(unsigned{entry.Seq, entry.Time, entry.MessageType, entry.Body, entry.PrevHash})
-			sig, e2 := hex.DecodeString(entry.Sig)
-			if e != nil || e2 != nil || !ed25519.Verify(private.Public().(ed25519.PublicKey), raw, sig) {
-				f.Close()
-				return nil, errors.New("audit signature invalid")
-			}
 			h := sha256.Sum256(sc.Bytes())
 			l.prev = hex.EncodeToString(h[:])
 			l.seq++
+			l.last = entry
 		}
 		e = sc.Err()
-		f.Close()
+		if e == nil {
+			e = syncFile(f)
+		}
+		ce := f.Close()
 		if e != nil {
 			return nil, e
+		}
+		if ce != nil {
+			return nil, ce
+		}
+		if l.seq >= first {
+			l.rotations = append(l.rotations, rotation{first, p})
 		}
 		n, e := strconv.Atoi(strings.TrimSuffix(filepath.Base(p), ".jsonl"))
 		if e != nil {
@@ -104,12 +129,23 @@ func Open(dir string, private ed25519.PrivateKey) (*Log, error) {
 		}
 		l.size = st.Size()
 	}
+	// A prior process may have stopped after creating a file or directory but
+	// before syncing its entry. Re-establish durability before SQLite recovery.
+	if e := syncDir(dir); e != nil {
+		return nil, e
+	}
+	if e := syncDir(filepath.Dir(dir)); e != nil {
+		return nil, e
+	}
 	return l, nil
 }
 func (l *Log) Append(messageType string, body any) (Entry, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	var entry Entry
+	if l.failed != nil {
+		return entry, l.failed
+	}
 	if !allowed(messageType) {
 		return entry, errors.New("unknown message type")
 	}
@@ -127,11 +163,15 @@ func (l *Log) Append(messageType string, body any) (Entry, error) {
 	if e != nil {
 		return entry, e
 	}
+	if _, e = ValidateRaw(line, l.private.Public().(ed25519.PublicKey)); e != nil {
+		return Entry{}, e
+	}
 	if l.size+int64(len(line)+1) > RotationBytes && l.size > 0 {
 		l.index++
 		l.size = 0
 	}
 	path := filepath.Join(l.dir, fmt.Sprintf("%06d.jsonl", l.index))
+	newRotation := l.size == 0
 	f, e := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0600)
 	if e != nil {
 		return Entry{}, e
@@ -142,22 +182,238 @@ func (l *Log) Append(messageType string, body any) (Entry, error) {
 	}
 	ce := f.Close()
 	if e != nil {
+		l.failed = e
 		return Entry{}, e
 	}
 	if ce != nil {
+		l.failed = ce
 		return Entry{}, ce
+	}
+	if newRotation {
+		if e = l.syncDir(l.dir); e != nil {
+			l.failed = e
+			return Entry{}, e
+		}
+	}
+	if newRotation {
+		l.rotations = append(l.rotations, rotation{l.seq + 1, path})
 	}
 	l.size += int64(len(line) + 1)
 	l.seq++
 	h := sha256.Sum256(line)
 	l.prev = hex.EncodeToString(h[:])
+	l.last = entry
 	return entry, nil
 }
+func (l *Log) Sequence() uint64 { l.mu.Lock(); defer l.mu.Unlock(); return l.seq }
+func syncDirectory(path string) error {
+	d, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer d.Close()
+	return d.Sync()
+}
+
+// Read starts at the matching rotation, or at the previous read's byte offset.
+// History memory is bounded by the number of rotations, not entries.
+func (l *Log) Read(seq uint64) (Entry, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if seq == 0 || seq > l.seq {
+		return Entry{}, errors.New("audit sequence out of range")
+	}
+	if seq == l.seq {
+		return l.last, nil
+	}
+	n := sort.Search(len(l.rotations), func(i int) bool { return l.rotations[i].first > seq }) - 1
+	if n < 0 {
+		return Entry{}, errors.New("audit rotation missing")
+	}
+	r := l.rotations[n]
+	start, offset := r.first, int64(0)
+	if l.cursor.seq+1 == seq && l.cursor.path == r.path {
+		start, offset = seq, l.cursor.offset
+	}
+	f, err := os.Open(r.path)
+	if err != nil {
+		return Entry{}, err
+	}
+	defer f.Close()
+	if _, err = f.Seek(offset, io.SeekStart); err != nil {
+		return Entry{}, err
+	}
+	reader := bufio.NewReader(f)
+	for current := start; current <= seq; current++ {
+		line, readErr := reader.ReadBytes('\n')
+		if readErr != nil {
+			return Entry{}, readErr
+		}
+		offset += int64(len(line))
+		if current == seq {
+			var entry Entry
+			if err = json.Unmarshal(line[:len(line)-1], &entry); err != nil {
+				return Entry{}, err
+			}
+			l.cursor = cursor{seq, r.path, offset}
+			return entry, nil
+		}
+	}
+	return Entry{}, errors.New("audit sequence missing")
+}
 func allowed(s string) bool {
-	for _, x := range strings.Fields("hello inventory description receipt canary_result revocation_ack offer_ack prepare_ack error") {
+	for _, x := range strings.Fields("inventory description receipt canary_result revocation_ack offer_ack prepare_ack error") {
 		if x == s {
 			return true
 		}
 	}
 	return false
+}
+
+// Entries returns the durable log in sequence order. It never removes entries.
+func (l *Log) Entries() ([]Entry, error) {
+	var entries []Entry
+	err := l.Walk(func(entry Entry) error { entries = append(entries, entry); return nil })
+	return entries, err
+}
+
+// Walk streams the durable log without materializing its history.
+func (l *Log) Walk(visit func(Entry) error) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	files, err := filepath.Glob(filepath.Join(l.dir, "*.jsonl"))
+	if err != nil {
+		return err
+	}
+	sort.Strings(files)
+	for _, path := range files {
+		f, err := os.Open(path)
+		if err != nil {
+			return err
+		}
+		s := bufio.NewScanner(f)
+		s.Buffer(make([]byte, 64*1024), 2<<20)
+		for s.Scan() {
+			var entry Entry
+			if err = json.Unmarshal(s.Bytes(), &entry); err != nil {
+				break
+			}
+			if err = visit(entry); err != nil {
+				break
+			}
+		}
+		if err == nil {
+			err = s.Err()
+		}
+		f.Close()
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func Hash(e Entry) (string, error) {
+	b, err := wire.Canonical(e)
+	if err != nil {
+		return "", err
+	}
+	h := sha256.Sum256(b)
+	return hex.EncodeToString(h[:]), nil
+}
+
+// ValidateRaw applies the six-field canonical wire rule before signature checks.
+func ValidateRaw(raw []byte, public ed25519.PublicKey) (Entry, error) {
+	var entry Entry
+	d := json.NewDecoder(bytes.NewReader(raw))
+	d.UseNumber()
+	v, err := value(d)
+	if err != nil {
+		return entry, err
+	}
+	if _, err = d.Token(); err != io.EOF {
+		return entry, errors.New("trailing audit JSON")
+	}
+	fields, ok := v.(map[string]any)
+	if !ok || len(fields) != 6 {
+		return entry, errors.New("audit entry needs six fields")
+	}
+	for _, key := range []string{"seq", "time", "message_type", "body", "prev_hash", "sig"} {
+		if _, ok := fields[key]; !ok {
+			return entry, errors.New("missing audit field")
+		}
+	}
+	canonical, err := wire.Canonical(v)
+	if err != nil || !bytes.Equal(canonical, raw) {
+		return entry, errors.New("noncanonical audit JSON")
+	}
+	if err = json.Unmarshal(raw, &entry); err != nil {
+		return entry, err
+	}
+	if entry.Seq == 0 || entry.MessageType == "" {
+		return entry, errors.New("invalid audit entry")
+	}
+	unsignedRaw, err := wire.Canonical(unsigned{entry.Seq, entry.Time, entry.MessageType, entry.Body, entry.PrevHash})
+	if err != nil {
+		return entry, err
+	}
+	sig, err := hex.DecodeString(entry.Sig)
+	if err != nil || !ed25519.Verify(public, unsignedRaw, sig) {
+		return entry, errors.New("invalid audit signature")
+	}
+	return entry, nil
+}
+
+func value(d *json.Decoder) (any, error) {
+	t, err := d.Token()
+	if err != nil {
+		return nil, err
+	}
+	if delim, ok := t.(json.Delim); ok {
+		switch delim {
+		case '{':
+			m := map[string]any{}
+			for d.More() {
+				key, err := d.Token()
+				if err != nil {
+					return nil, err
+				}
+				name, ok := key.(string)
+				if !ok {
+					return nil, errors.New("non-string key")
+				}
+				if _, exists := m[name]; exists {
+					return nil, errors.New("duplicate key")
+				}
+				m[name], err = value(d)
+				if err != nil {
+					return nil, err
+				}
+			}
+			_, err := d.Token()
+			return m, err
+		case '[':
+			a := []any{}
+			for d.More() {
+				v, err := value(d)
+				if err != nil {
+					return nil, err
+				}
+				a = append(a, v)
+			}
+			_, err := d.Token()
+			return a, err
+		}
+		return nil, errors.New("unexpected delimiter")
+	}
+	if n, ok := t.(json.Number); ok {
+		s := string(n)
+		if s == "-0" || strings.ContainsAny(s, ".eE+") || (len(s) > 1 && s[0] == '0') || (len(s) > 2 && s[:2] == "-0") {
+			return nil, errors.New("noninteger audit number")
+		}
+		if _, err := strconv.ParseInt(s, 10, 64); err != nil {
+			return nil, err
+		}
+	}
+	return t, nil
 }

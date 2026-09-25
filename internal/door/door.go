@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -24,14 +25,16 @@ import (
 )
 
 type Door struct {
-	Ledger         *ledger.Ledger
-	Config         func() config.Config
-	GatewayID      string
-	PermissionKeys map[string]ed25519.PublicKey
-	GatewayKey     ed25519.PrivateKey
-	GatewayKID     string
-	Limit          int
-	sem            chan struct{}
+	Ledger                *ledger.Ledger
+	Config                func() config.Config
+	GatewayID             string
+	PermissionKeys        map[string]ed25519.PublicKey
+	PermissionKeyProvider func() map[string]ed25519.PublicKey
+	GatewayKey            ed25519.PrivateKey
+	GatewayKID            string
+	RecoveryContext       context.Context
+	Limit                 int
+	sem                   chan struct{}
 }
 
 func (d *Door) Handler() http.Handler {
@@ -191,7 +194,11 @@ func (d *Door) download(w http.ResponseWriter, r *http.Request, fid string) {
 		fail(w, 401, "invalid_permission")
 		return
 	}
-	p, e := wire.VerifyPermission(raw, d.PermissionKeys)
+	keys := d.PermissionKeys
+	if d.PermissionKeyProvider != nil {
+		keys = d.PermissionKeyProvider()
+	}
+	p, e := wire.VerifyPermission(raw, keys)
 	if e != nil {
 		fail(w, 401, "invalid_permission")
 		return
@@ -309,6 +316,30 @@ func (d *Door) download(w http.ResponseWriter, r *http.Request, fid string) {
 	defer func() {
 		if settle {
 			_ = d.Ledger.SettleOutcome(context.Background(), req.ID, outcome)
+		} else {
+			// A failed terminal checkpoint must not strand an open request until
+			// restart. Retry conservative crash settlement after transient DB errors.
+			go func() {
+				ctx := d.RecoveryContext
+				if ctx == nil {
+					ctx = context.Background()
+				}
+				for attempt := 0; attempt < 6; attempt++ {
+					if ctx.Err() != nil {
+						return
+					}
+					if err := d.Ledger.RecoverRequest(ctx, req.ID); err == nil {
+						return
+					}
+					delay := min(time.Duration(1<<attempt)*time.Second, 30*time.Second)
+					select {
+					case <-ctx.Done():
+						return
+					case <-time.After(delay):
+					}
+				}
+				log.Printf("gateway request %d recovery deferred to restart", req.ID)
+			}()
 		}
 	}()
 	end = req.End

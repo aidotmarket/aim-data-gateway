@@ -1,0 +1,7 @@
+{
+  "expected_verdict": "valid",
+  "input": {
+    "ack": 1
+  },
+  "label": "TEST ONLY - transport control"
+}

@@ -4,6 +4,6 @@ AIM Data is a small, self hosted gateway for sellers who keep data on their own 
 
 Listing management, pricing, licences, samples, earnings and payouts remain on the ai.market website. This repository does not provide a management UI, cloud SDK, relay, or auto update path.
 
-This branch is the foundation only. `run` validates local configuration and exits; it does not yet pair, connect, or serve files. `preview <file-id>` computes the local phase 1 and phase 2 payloads. The design authority is [Gate 1](https://github.com/aidotmarket/ai-market/tree/main/runbooks/specs/BQ-AIM-DATA-GATEWAY-S1741-GATE1.md) and [Gate 2](https://github.com/aidotmarket/ai-market/tree/main/runbooks/specs/BQ-AIM-DATA-GATEWAY-S1741-GATE2.md).
+`run` loads `/config/gateway.toml` (or `AIM_GATEWAY_CONFIG`) and uses `/state` (or `AIM_GATEWAY_STATE`). On an empty state volume, supply `AIM_PAIRING_CODE` once. Later runs load the saved identity and pins, recover the ledger, serve the configured HTTP door, and maintain the outbound control channel. `preview <file-id>` computes the exact local phase 1 and phase 2 payloads without sending them. The design authority is [Gate 1](https://github.com/aidotmarket/ai-market/tree/main/runbooks/specs/BQ-AIM-DATA-GATEWAY-S1741-GATE1.md) and [Gate 2](https://github.com/aidotmarket/ai-market/tree/main/runbooks/specs/BQ-AIM-DATA-GATEWAY-S1741-GATE2.md), including Gate 2 Amendment B.
 
-`internal/builddeps` holds the approved SQLite and WebSocket imports until the gateway's runtime uses them; it keeps the B0 dependency graph visible to the compiled-module CI check. It has no runtime behavior.
+This branch covers the B3 gateway channel. The B4 canary, start-up self-check, local approval command, and compose file are still separate work.

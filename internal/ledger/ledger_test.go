@@ -84,6 +84,37 @@ func payload(t *testing.T, s string) wire.Receipt {
 	return r
 }
 
+func TestFailedTerminalProgressCanCloseWithoutRestart(t *testing.T) {
+	ctx := context.Background()
+	l, p, _ := fixture(t, 20)
+	r, err := l.Reserve(ctx, p, 0, 19)
+	must(t, err)
+	_, err = l.DB.Exec(`CREATE TRIGGER fail_receipt BEFORE INSERT ON receipts_outbox BEGIN SELECT RAISE(FAIL, 'blocked'); END`)
+	must(t, err)
+	n, err := l.WriteChunk(ctx, r.ID, []byte("abc"), func(b []byte) (int, error) { return len(b), nil })
+	if n != 3 || !errors.Is(err, ErrProgress) {
+		t.Fatalf("write: %d, %v", n, err)
+	}
+	must(t, l.RecoverRequest(ctx, r.ID))
+	var open int
+	must(t, l.DB.QueryRow(`SELECT open FROM requests WHERE id=?`, r.ID).Scan(&open))
+	if open != 0 {
+		t.Fatal("request left open")
+	}
+}
+func TestRevokeInstructionReplayKeepsOriginalAnswer(t *testing.T) {
+	l, p, _ := fixture(t, 20)
+	iid := "55555555-5555-4555-8555-555555555555"
+	first, err := l.RevokeInstruction(t.Context(), iid, p.JTI)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := l.RevokeInstruction(t.Context(), iid, p.JTI)
+	if err != nil || first != second || first.StateBefore != "active" {
+		t.Fatalf("replay answer changed: %+v %+v %v", first, second, err)
+	}
+}
+
 func TestReservationProgressSettleAndRestart(t *testing.T) {
 	ctx := context.Background()
 	l, p, path := fixture(t, 20)

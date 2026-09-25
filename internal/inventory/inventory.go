@@ -2,6 +2,7 @@ package inventory
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -11,6 +12,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -85,19 +87,26 @@ func Batches(records []Record, generation uint64) []Batch {
 	return out
 }
 
-func (r Record) MarshalJSON() ([]byte, error)            { return json.Marshal(r.Phase1) }
-func Scan(c config.Config, k ids.Keys) ([]Record, error) { return scan(c, k, MaxFiles, nil) }
+func (r Record) MarshalJSON() ([]byte, error) { return json.Marshal(r.Phase1) }
+func Scan(c config.Config, k ids.Keys) ([]Record, error) {
+	return scan(context.Background(), c, k, MaxFiles, nil)
+}
 func ScanWithPrevious(c config.Config, k ids.Keys, previous []Record) ([]Record, error) {
-	return scan(c, k, MaxFiles, previous)
+	return scan(context.Background(), c, k, MaxFiles, previous)
+}
+func ScanWithPreviousContext(ctx context.Context, c config.Config, k ids.Keys, previous []Record) ([]Record, error) {
+	return scan(ctx, c, k, MaxFiles, previous)
 }
 func ScanLimit(c config.Config, k ids.Keys, limit int) ([]Record, error) {
-	return scan(c, k, limit, nil)
+	return scan(context.Background(), c, k, limit, nil)
 }
-func scan(c config.Config, k ids.Keys, limit int, previous []Record) ([]Record, error) {
+func scan(ctx context.Context, c config.Config, k ids.Keys, limit int, previous []Record) ([]Record, error) {
 	var out []Record
 	prior := make(map[string]Record, len(previous))
 	for _, r := range previous {
-		prior[r.Phase1.FileID] = r
+		if r.Phase1.Present {
+			prior[r.Phase1.FileID] = r
+		}
 	}
 	for _, source := range c.Sources {
 		root, e := filepath.EvalSymlinks(source.Path)
@@ -109,6 +118,9 @@ func scan(c config.Config, k ids.Keys, limit int, previous []Record) ([]Record, 
 			return nil, e
 		}
 		e = filepath.WalkDir(root, func(path string, d fs.DirEntry, walkErr error) error {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 			if walkErr != nil {
 				return walkErr
 			}
@@ -144,7 +156,9 @@ func scan(c config.Config, k ids.Keys, limit int, previous []Record) ([]Record, 
 				if e != nil {
 					return e
 				}
-				r, e = readFile(f)
+				stop := context.AfterFunc(ctx, func() { _ = f.Close() })
+				r, e = readFileContext(ctx, f)
+				stop()
 				f.Close()
 				if e != nil {
 					return fmt.Errorf("inventory read: %w", e)
@@ -180,9 +194,26 @@ func scan(c config.Config, k ids.Keys, limit int, previous []Record) ([]Record, 
 			return nil, e
 		}
 	}
+	seen := make(map[string]bool, len(out))
+	for _, r := range out {
+		seen[r.Phase1.FileID] = true
+	}
+	var deleted []string
+	for id := range prior {
+		if !seen[id] {
+			deleted = append(deleted, id)
+		}
+	}
+	sort.Strings(deleted)
+	for _, id := range deleted {
+		r := prior[id]
+		r.Phase1.Present = false
+		out = append(out, r)
+	}
 	return out, nil
 }
-func readFile(f *os.File) (Record, error) {
+func readFile(f *os.File) (Record, error) { return readFileContext(context.Background(), f) }
+func readFileContext(ctx context.Context, f *os.File) (Record, error) {
 	var r Record
 	st, e := f.Stat()
 	if e != nil {
@@ -195,6 +226,9 @@ func readFile(f *os.File) (Record, error) {
 	block := make([]byte, BlockSize)
 	first := make([]byte, 0, 4096)
 	for {
+		if err := ctx.Err(); err != nil {
+			return r, err
+		}
 		n, e := io.ReadFull(f, block)
 		if n > 0 {
 			full.Write(block[:n])
