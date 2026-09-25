@@ -5,3 +5,6 @@ state
 *.db
 *.db-wal
 *.db-shm
+build-check
+dist
+__pycache__

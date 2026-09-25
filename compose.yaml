@@ -1,5 +1,6 @@
 services:
   aim-gateway:
+    # Release compose files replace build with an image pinned by digest.
     build: .
     user: "65532:65532"
     read_only: true
