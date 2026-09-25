@@ -25,7 +25,8 @@ type Config struct {
 	Aliases      map[string]string  `toml:"aliases"`
 	Columns      map[string]Columns `toml:"columns"`
 	Door         struct {
-		Listen string `toml:"listen"`
+		Listen                 string `toml:"listen"`
+		MaxConcurrentDownloads int    `toml:"max_concurrent_downloads"`
 	} `toml:"door"`
 	Egress struct {
 		ConnectProxy string `toml:"connect_proxy"`
@@ -81,6 +82,9 @@ func (c Config) Validate() error {
 		if _, _, e := net.SplitHostPort(c.Door.Listen); e != nil {
 			return fmt.Errorf("door.listen: %w", e)
 		}
+	}
+	if c.Door.MaxConcurrentDownloads < 0 {
+		return errors.New("door.max_concurrent_downloads must be nonnegative")
 	}
 	if c.Egress.ConnectProxy != "" {
 		if _, _, e := net.SplitHostPort(c.Egress.ConnectProxy); e != nil {
