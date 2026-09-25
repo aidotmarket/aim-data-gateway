@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"github.com/aidotmarket/aim-data-gateway/internal/config"
 	"github.com/aidotmarket/aim-data-gateway/internal/ids"
 	"os"
@@ -61,6 +62,55 @@ func TestPhase1Boundary(t *testing.T) {
 	}
 	if _, e := ScanLimit(c, k, 1); !errors.Is(e, ErrTooLarge) {
 		t.Fatal("cap not enforced", e)
+	}
+}
+func TestDeletionOnceAcrossBatches(t *testing.T) {
+	root := t.TempDir()
+	for i := 0; i < 1001; i++ {
+		if err := os.WriteFile(filepath.Join(root, fmt.Sprintf("f%04d.csv", i)), []byte("a,b\n1,2\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	c := config.Config{Sources: []config.Source{{Name: "one", Path: root}}}
+	k, _ := ids.Derive(make([]byte, 32))
+	first, err := Scan(c, k)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deleted := first[0].Phase1.FileID
+	if err = os.Remove(filepath.Join(root, "f0000.csv")); err != nil {
+		t.Fatal(err)
+	}
+	second, err := ScanWithPrevious(c, k, first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	batches := Batches(second, 2)
+	if len(batches) != 2 || len(batches[0].Files) != 1000 || len(batches[1].Files) != 1 {
+		t.Fatalf("batches: %d", len(batches))
+	}
+	missing := 0
+	for _, batch := range batches {
+		for _, f := range batch.Files {
+			if !f.Present {
+				missing++
+				if f.FileID != deleted {
+					t.Fatalf("wrong deletion %s", f.FileID)
+				}
+			}
+		}
+	}
+	if missing != 1 {
+		t.Fatalf("deletions=%d", missing)
+	}
+	third, err := ScanWithPrevious(c, k, second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range third {
+		if !r.Phase1.Present {
+			t.Fatal("repeated deletion")
+		}
 	}
 }
 func TestTwoSourcesAndBatches(t *testing.T) {

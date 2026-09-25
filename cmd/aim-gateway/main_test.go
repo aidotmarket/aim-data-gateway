@@ -24,8 +24,8 @@ func TestRunAndPreview(t *testing.T) {
 	os.WriteFile(secretPath, make([]byte, 32), 0600)
 	t.Setenv("AIM_GATEWAY_CONFIG", configPath)
 	t.Setenv("AIM_GATEWAY_SECRET", secretPath)
-	if e := execute([]string{"run"}); e != nil {
-		t.Fatal(e)
+	if e := execute([]string{"run"}); e == nil {
+		t.Fatal("unpaired run started")
 	}
 	c, e := config.Load(configPath)
 	if e != nil {

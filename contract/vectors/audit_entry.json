@@ -1,0 +1,9 @@
+{
+  "entry_bytes": "{\"body\":{\"above_js_safe\":9007199254740993,\"max_int64\":9223372036854775807,\"negative\":-3,\"text\":\"\\u0026 \\u003c\\u003e \\u2028 café\",\"zero\":0},\"message_type\":\"inventory\",\"prev_hash\":\"\",\"seq\":1,\"sig\":\"f86dd7e510bb3d0723a8455478ebf6be1f1c4cfd582b6e4eb7e9a13a9da9f41e1dfb99fc9caed87226cdd9e67bc4ced9b18b9f47f74046a5a7e59115a6f5ed00\",\"time\":\"2026-01-01T00:00:00Z\"}",
+  "entry_hash": "8d0fce3f7050e40f772f901a20c27eff7c1db9112bfecba4cb789c1e71cde458",
+  "expected_verdict": "valid",
+  "label": "TEST ONLY - synthetic golden vector",
+  "signed_bytes": "{\"body\":{\"above_js_safe\":9007199254740993,\"max_int64\":9223372036854775807,\"negative\":-3,\"text\":\"\\u0026 \\u003c\\u003e \\u2028 café\",\"zero\":0},\"message_type\":\"inventory\",\"prev_hash\":\"\",\"seq\":1,\"time\":\"2026-01-01T00:00:00Z\"}",
+  "test_only_public_hex": "2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12",
+  "test_only_seed_hex": "4242424242424242424242424242424242424242424242424242424242424242"
+}

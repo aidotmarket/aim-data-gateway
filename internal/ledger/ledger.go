@@ -76,6 +76,7 @@ type File struct {
 	Size                                                int64
 	BlockHashes                                         [][32]byte
 	Changed                                             bool
+	Present                                             bool
 }
 type Offer struct {
 	FileID, SHA256, ListingVersionID, IID, State, KeyClass string
@@ -144,6 +145,39 @@ func (l *Ledger) Seen(ctx context.Context, iid string) (bool, error) {
 	n, e := r.RowsAffected()
 	return n == 0, e
 }
+
+type QueuedReceipt struct {
+	Seq  uint64
+	Body string
+}
+
+func (l *Ledger) PendingReceipts(ctx context.Context) ([]QueuedReceipt, error) {
+	rows, err := l.DB.QueryContext(ctx, `SELECT seq,body FROM receipts_outbox ORDER BY seq`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []QueuedReceipt
+	for rows.Next() {
+		var r QueuedReceipt
+		if err = rows.Scan(&r.Seq, &r.Body); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+func (l *Ledger) ResetReceiptDelivery(ctx context.Context) error {
+	_, err := l.DB.ExecContext(ctx, `UPDATE receipts_outbox SET sent_at=NULL`)
+	return err
+}
+
+// A receipt is delivered only after an ack or a later authoritative resume.
+func (l *Ledger) MarkReceiptDelivered(ctx context.Context, seq uint64) error {
+	_, err := l.DB.ExecContext(ctx, `UPDATE receipts_outbox SET sent_at=? WHERE seq=? AND sent_at IS NULL`, now(), seq)
+	return err
+}
 func (l *Ledger) PutFile(ctx context.Context, r inventory.Record) error {
 	b, e := json.Marshal(r.BlockHashes)
 	if e != nil {
@@ -162,12 +196,17 @@ func (l *Ledger) File(ctx context.Context, fid string) (File, error) {
 		return f, e
 	}
 	f.Changed = changed != 0
+	f.Present = changed != 2
 	e = json.Unmarshal(b, &f.BlockHashes)
 	return f, e
 }
 func (l *Ledger) MarkChanged(ctx context.Context, fid string) error {
 	_, e := l.DB.ExecContext(ctx, "UPDATE files SET changed=1 WHERE fid=?", fid)
 	return e
+}
+func (l *Ledger) MarkMissing(ctx context.Context, fid string) error {
+	_, err := l.DB.ExecContext(ctx, `UPDATE files SET changed=2 WHERE fid=?`, fid)
+	return err
 }
 func (f File) Path() string      { return filepath.Join(f.Root, filepath.FromSlash(f.RelativePath)) }
 func (f File) ValidBlocks() bool { return int64(len(f.BlockHashes)) == (f.Size+window-1)/window }
@@ -845,7 +884,7 @@ func (l *Ledger) Prepare(ctx context.Context, i wire.Instruction, c config.Confi
 		return a, e
 	}
 	refusal := ""
-	if e == sql.ErrNoRows {
+	if e == sql.ErrNoRows || !f.Present {
 		refusal = "file_missing"
 	} else if f.Changed || f.SHA256 != i.SHA256 || !f.ValidBlocks() {
 		refusal = "file_changed"

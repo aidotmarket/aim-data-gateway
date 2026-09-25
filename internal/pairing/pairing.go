@@ -21,12 +21,13 @@ import (
 const PairURL = "https://api.ai.market/api/v1/gateway-channel/pair"
 
 type Pins struct {
-	GatewayID      string     `json:"gateway_id"`
-	PermissionKeys []wire.Key `json:"permission_keys"`
-	ListingKeys    []wire.Key `json:"listing_keys"`
-	MinimumVersion string     `json:"minimum_version"`
-	CanaryHost     string     `json:"canary_host"`
-	CanaryZone     string     `json:"canary_zone"`
+	GatewayID      string            `json:"gateway_id"`
+	PermissionKeys []wire.Key        `json:"permission_keys"`
+	ListingKeys    []wire.Key        `json:"listing_keys"`
+	MinimumVersion string            `json:"minimum_version"`
+	CanaryHost     string            `json:"canary_host"`
+	CanaryZone     string            `json:"canary_zone"`
+	KeyExpires     map[string]string `json:"key_expires,omitempty"`
 }
 
 type State struct {

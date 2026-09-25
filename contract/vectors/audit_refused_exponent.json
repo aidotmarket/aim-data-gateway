@@ -1,0 +1,5 @@
+{
+  "expected_verdict": "invalid",
+  "label": "TEST ONLY - refused audit entry",
+  "raw": "{\"body\":{\"n\":1e2},\"message_type\":\"inventory\",\"prev_hash\":\"\",\"seq\":1,\"sig\":\"x\",\"time\":\"t\"}"
+}

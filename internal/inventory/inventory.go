@@ -11,6 +11,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -97,7 +98,9 @@ func scan(c config.Config, k ids.Keys, limit int, previous []Record) ([]Record, 
 	var out []Record
 	prior := make(map[string]Record, len(previous))
 	for _, r := range previous {
-		prior[r.Phase1.FileID] = r
+		if r.Phase1.Present {
+			prior[r.Phase1.FileID] = r
+		}
 	}
 	for _, source := range c.Sources {
 		root, e := filepath.EvalSymlinks(source.Path)
@@ -179,6 +182,22 @@ func scan(c config.Config, k ids.Keys, limit int, previous []Record) ([]Record, 
 		if e != nil {
 			return nil, e
 		}
+	}
+	seen := make(map[string]bool, len(out))
+	for _, r := range out {
+		seen[r.Phase1.FileID] = true
+	}
+	var deleted []string
+	for id := range prior {
+		if !seen[id] {
+			deleted = append(deleted, id)
+		}
+	}
+	sort.Strings(deleted)
+	for _, id := range deleted {
+		r := prior[id]
+		r.Phase1.Present = false
+		out = append(out, r)
 	}
 	return out, nil
 }

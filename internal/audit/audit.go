@@ -2,12 +2,14 @@ package audit
 
 import (
 	"bufio"
+	"bytes"
 	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -67,20 +69,14 @@ func Open(dir string, private ed25519.PrivateKey) (*Log, error) {
 		sc := bufio.NewScanner(f)
 		sc.Buffer(make([]byte, 64*1024), 2<<20)
 		for sc.Scan() {
-			var entry Entry
-			if e = json.Unmarshal(sc.Bytes(), &entry); e != nil {
+			entry, e := ValidateRaw(sc.Bytes(), private.Public().(ed25519.PublicKey))
+			if e != nil {
 				f.Close()
 				return nil, e
 			}
 			if entry.Seq != l.seq+1 || entry.PrevHash != l.prev {
 				f.Close()
 				return nil, errors.New("audit chain broken")
-			}
-			raw, e := wire.Canonical(unsigned{entry.Seq, entry.Time, entry.MessageType, entry.Body, entry.PrevHash})
-			sig, e2 := hex.DecodeString(entry.Sig)
-			if e != nil || e2 != nil || !ed25519.Verify(private.Public().(ed25519.PublicKey), raw, sig) {
-				f.Close()
-				return nil, errors.New("audit signature invalid")
 			}
 			h := sha256.Sum256(sc.Bytes())
 			l.prev = hex.EncodeToString(h[:])
@@ -127,6 +123,9 @@ func (l *Log) Append(messageType string, body any) (Entry, error) {
 	if e != nil {
 		return entry, e
 	}
+	if _, e = ValidateRaw(line, l.private.Public().(ed25519.PublicKey)); e != nil {
+		return Entry{}, e
+	}
 	if l.size+int64(len(line)+1) > RotationBytes && l.size > 0 {
 		l.index++
 		l.size = 0
@@ -154,10 +153,150 @@ func (l *Log) Append(messageType string, body any) (Entry, error) {
 	return entry, nil
 }
 func allowed(s string) bool {
-	for _, x := range strings.Fields("hello inventory description receipt canary_result revocation_ack offer_ack prepare_ack error") {
+	for _, x := range strings.Fields("inventory description receipt canary_result revocation_ack offer_ack prepare_ack error") {
 		if x == s {
 			return true
 		}
 	}
 	return false
+}
+
+// Entries returns the durable log in sequence order. It never removes entries.
+func (l *Log) Entries() ([]Entry, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	files, err := filepath.Glob(filepath.Join(l.dir, "*.jsonl"))
+	if err != nil {
+		return nil, err
+	}
+	sort.Strings(files)
+	var entries []Entry
+	for _, path := range files {
+		f, err := os.Open(path)
+		if err != nil {
+			return nil, err
+		}
+		s := bufio.NewScanner(f)
+		s.Buffer(make([]byte, 64*1024), 2<<20)
+		for s.Scan() {
+			var entry Entry
+			if err = json.Unmarshal(s.Bytes(), &entry); err != nil {
+				break
+			}
+			entries = append(entries, entry)
+		}
+		if err == nil {
+			err = s.Err()
+		}
+		f.Close()
+		if err != nil {
+			return nil, err
+		}
+	}
+	return entries, nil
+}
+
+func Hash(e Entry) (string, error) {
+	b, err := wire.Canonical(e)
+	if err != nil {
+		return "", err
+	}
+	h := sha256.Sum256(b)
+	return hex.EncodeToString(h[:]), nil
+}
+
+// ValidateRaw applies the six-field canonical wire rule before signature checks.
+func ValidateRaw(raw []byte, public ed25519.PublicKey) (Entry, error) {
+	var entry Entry
+	d := json.NewDecoder(bytes.NewReader(raw))
+	d.UseNumber()
+	v, err := value(d)
+	if err != nil {
+		return entry, err
+	}
+	if _, err = d.Token(); err != io.EOF {
+		return entry, errors.New("trailing audit JSON")
+	}
+	fields, ok := v.(map[string]any)
+	if !ok || len(fields) != 6 {
+		return entry, errors.New("audit entry needs six fields")
+	}
+	for _, key := range []string{"seq", "time", "message_type", "body", "prev_hash", "sig"} {
+		if _, ok := fields[key]; !ok {
+			return entry, errors.New("missing audit field")
+		}
+	}
+	canonical, err := wire.Canonical(v)
+	if err != nil || !bytes.Equal(canonical, raw) {
+		return entry, errors.New("noncanonical audit JSON")
+	}
+	if err = json.Unmarshal(raw, &entry); err != nil {
+		return entry, err
+	}
+	if entry.Seq == 0 || entry.MessageType == "" {
+		return entry, errors.New("invalid audit entry")
+	}
+	unsignedRaw, err := wire.Canonical(unsigned{entry.Seq, entry.Time, entry.MessageType, entry.Body, entry.PrevHash})
+	if err != nil {
+		return entry, err
+	}
+	sig, err := hex.DecodeString(entry.Sig)
+	if err != nil || !ed25519.Verify(public, unsignedRaw, sig) {
+		return entry, errors.New("invalid audit signature")
+	}
+	return entry, nil
+}
+
+func value(d *json.Decoder) (any, error) {
+	t, err := d.Token()
+	if err != nil {
+		return nil, err
+	}
+	if delim, ok := t.(json.Delim); ok {
+		switch delim {
+		case '{':
+			m := map[string]any{}
+			for d.More() {
+				key, err := d.Token()
+				if err != nil {
+					return nil, err
+				}
+				name, ok := key.(string)
+				if !ok {
+					return nil, errors.New("non-string key")
+				}
+				if _, exists := m[name]; exists {
+					return nil, errors.New("duplicate key")
+				}
+				m[name], err = value(d)
+				if err != nil {
+					return nil, err
+				}
+			}
+			_, err := d.Token()
+			return m, err
+		case '[':
+			a := []any{}
+			for d.More() {
+				v, err := value(d)
+				if err != nil {
+					return nil, err
+				}
+				a = append(a, v)
+			}
+			_, err := d.Token()
+			return a, err
+		}
+		return nil, errors.New("unexpected delimiter")
+	}
+	if n, ok := t.(json.Number); ok {
+		s := string(n)
+		if s == "-0" || strings.ContainsAny(s, ".eE+") || (len(s) > 1 && s[0] == '0') || (len(s) > 2 && s[:2] == "-0") {
+			return nil, errors.New("noninteger audit number")
+		}
+		if _, err := strconv.ParseInt(s, 10, 64); err != nil {
+			return nil, err
+		}
+	}
+	return t, nil
 }

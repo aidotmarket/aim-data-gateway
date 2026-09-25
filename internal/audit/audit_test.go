@@ -15,7 +15,10 @@ func TestChainAcrossRotationAndTamper(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	first, e := l.Append("hello", map[string]any{"gid": "test"})
+	if _, e := l.Append("hello", map[string]any{"gid": "test"}); e == nil {
+		t.Fatal("hello entered audit log")
+	}
+	first, e := l.Append("inventory", map[string]any{"generation": 0})
 	if e != nil {
 		t.Fatal(e)
 	}

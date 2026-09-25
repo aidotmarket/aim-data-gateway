@@ -1,16 +1,21 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/url"
 	"os"
 
 	_ "github.com/aidotmarket/aim-data-gateway/internal/builddeps"
 	"github.com/aidotmarket/aim-data-gateway/internal/config"
+	"github.com/aidotmarket/aim-data-gateway/internal/gateway"
 	"github.com/aidotmarket/aim-data-gateway/internal/ids"
 	"github.com/aidotmarket/aim-data-gateway/internal/inventory"
 	"github.com/aidotmarket/aim-data-gateway/internal/profile"
+	"github.com/aidotmarket/aim-data-gateway/internal/wire"
 )
 
 const version = "0.1.0-dev"
@@ -48,8 +53,24 @@ func execute(args []string) error {
 		return e
 	}
 	if cmd == "run" {
-		return nil
-	} // foundation only: no listener or outbound channel
+		ctx := context.Background()
+		dir := gateway.StateDir()
+		var client *http.Client
+		if c.Egress.ConnectProxy != "" {
+			proxy := &url.URL{Scheme: "http", Host: c.Egress.ConnectProxy}
+			client = &http.Client{Transport: &http.Transport{Proxy: http.ProxyURL(proxy)}}
+		}
+		state, err := gateway.LoadOrPair(ctx, dir, os.Getenv("AIM_PAIRING_CODE"), version, client)
+		if err != nil {
+			return err
+		}
+		g, err := gateway.Open(dir, c, state)
+		if err != nil {
+			return err
+		}
+		defer g.Ledger.Close()
+		return g.Run(ctx, version)
+	}
 	secretPath := os.Getenv("AIM_GATEWAY_SECRET")
 	if secretPath == "" {
 		secretPath = "/state/secret.bin"
@@ -72,10 +93,14 @@ func execute(args []string) error {
 			if e != nil {
 				return e
 			}
+			body := wire.Description{FileID: r.Phase1.FileID, SHA256: d.SHA256, RowCount: d.RowCount, Columns: make([]wire.Column, 0, len(d.Columns))}
+			for _, col := range d.Columns {
+				body.Columns = append(body.Columns, wire.Column{Name: col.Name, Type: col.Type, NullRatePct: col.NullRatePct, DistinctBucket: col.DistinctBucket})
+			}
 			out := struct {
-				Phase1 inventory.Phase1    `json:"phase_1"`
-				Phase2 profile.Description `json:"phase_2"`
-			}{r.Phase1, d}
+				Phase1 inventory.Phase1 `json:"phase_1"`
+				Phase2 wire.Description `json:"phase_2"`
+			}{r.Phase1, body}
 			enc := json.NewEncoder(os.Stdout)
 			enc.SetIndent("", "  ")
 			return enc.Encode(out)

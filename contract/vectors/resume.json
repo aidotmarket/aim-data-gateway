@@ -1,0 +1,10 @@
+{
+  "expected_verdict": "valid",
+  "input": {
+    "resume": {
+      "entry_hash": "8d0fce3f7050e40f772f901a20c27eff7c1db9112bfecba4cb789c1e71cde458",
+      "seq": 1
+    }
+  },
+  "label": "TEST ONLY - transport control"
+}

@@ -24,14 +24,15 @@ import (
 )
 
 type Door struct {
-	Ledger         *ledger.Ledger
-	Config         func() config.Config
-	GatewayID      string
-	PermissionKeys map[string]ed25519.PublicKey
-	GatewayKey     ed25519.PrivateKey
-	GatewayKID     string
-	Limit          int
-	sem            chan struct{}
+	Ledger                *ledger.Ledger
+	Config                func() config.Config
+	GatewayID             string
+	PermissionKeys        map[string]ed25519.PublicKey
+	PermissionKeyProvider func() map[string]ed25519.PublicKey
+	GatewayKey            ed25519.PrivateKey
+	GatewayKID            string
+	Limit                 int
+	sem                   chan struct{}
 }
 
 func (d *Door) Handler() http.Handler {
@@ -191,7 +192,11 @@ func (d *Door) download(w http.ResponseWriter, r *http.Request, fid string) {
 		fail(w, 401, "invalid_permission")
 		return
 	}
-	p, e := wire.VerifyPermission(raw, d.PermissionKeys)
+	keys := d.PermissionKeys
+	if d.PermissionKeyProvider != nil {
+		keys = d.PermissionKeyProvider()
+	}
+	p, e := wire.VerifyPermission(raw, keys)
 	if e != nil {
 		fail(w, 401, "invalid_permission")
 		return
