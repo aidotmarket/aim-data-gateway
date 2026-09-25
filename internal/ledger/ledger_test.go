@@ -551,3 +551,26 @@ func TestGLM4DeadlineStopsNextWriteAndQueuesAborted(t *testing.T) {
 		t.Fatalf("receipt: %s", body)
 	}
 }
+
+func TestGLM4SlowWriterDeadlineQueuesAborted(t *testing.T) {
+	ctx := context.Background()
+	l, p, _ := fixture(t, 20)
+	r, e := l.Reserve(ctx, p, 0, 19)
+	must(t, e)
+	td := time.Now().Unix() + 2
+	_, e = l.DB.Exec(`UPDATE permissions SET td=? WHERE jti=?`, td, p.JTI)
+	must(t, e)
+	_, e = l.WriteChunk(ctx, r.ID, []byte{1}, func([]byte) (int, error) {
+		time.Sleep(time.Until(time.Unix(td, 0)) + 10*time.Millisecond)
+		return 0, errors.New("network write deadline")
+	})
+	if !errors.Is(e, ErrDeadline) {
+		t.Fatalf("slow writer: %v", e)
+	}
+	must(t, l.SettleOutcome(ctx, r.ID, "aborted_deadline"))
+	var body string
+	must(t, l.DB.QueryRow(`SELECT body FROM receipts_outbox ORDER BY seq DESC LIMIT 1`).Scan(&body))
+	if payload(t, body).Outcome != "aborted_deadline" {
+		t.Fatalf("receipt: %s", body)
+	}
+}

@@ -532,6 +532,12 @@ func (l *Ledger) WriteChunk(ctx context.Context, id int64, data []byte, write fu
 			return n, errors.Join(ErrProgress, e)
 		}
 	}
+	if time.Now().Unix() >= td {
+		if e = l.CloseExpired(context.Background(), time.Now().Unix()); e != nil {
+			return n, e
+		}
+		return n, ErrDeadline
+	}
 	return n, writeErr
 }
 func (l *Ledger) transmitted(ctx context.Context, oid, fid string) ([]segment, error) {
