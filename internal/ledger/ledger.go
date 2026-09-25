@@ -4,14 +4,12 @@ import (
 	"context"
 	"crypto/ed25519"
 	"database/sql"
-	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/aidotmarket/aim-data-gateway/internal/config"
@@ -23,13 +21,16 @@ import (
 var ErrFragmented = errors.New("coverage_fragmented")
 var ErrExhausted = errors.New("coverage_exhausted")
 var ErrClosed = errors.New("permission_closed")
+var ErrDeadline = errors.New("permission_expired")
+var ErrProgress = errors.New("progress_not_recorded")
 
 const window = int64(inventory.BlockSize)
 
 type Ledger struct {
-	DB  *sql.DB
-	Key ed25519.PrivateKey
-	KID string
+	DB      *sql.DB
+	Key     ed25519.PrivateKey
+	KID     string
+	writeMu sync.Mutex
 }
 type File struct {
 	ID, Source, RelativePath, SHA256, DisplayName, Root string
@@ -60,7 +61,8 @@ CREATE TABLE IF NOT EXISTS transmitted(oid TEXT, fid TEXT, start INTEGER, end IN
 CREATE TABLE IF NOT EXISTS requests(id INTEGER PRIMARY KEY, jti TEXT, start INTEGER, end INTEGER, written_through INTEGER, open INTEGER, isolated INTEGER);
 CREATE TABLE IF NOT EXISTS revocations(jti TEXT PRIMARY KEY, received_at TEXT);
 CREATE TABLE IF NOT EXISTS receipts_outbox(seq INTEGER PRIMARY KEY, body TEXT, sent_at TEXT);
-CREATE INDEX IF NOT EXISTS requests_open ON requests(jti,open);`
+CREATE TABLE IF NOT EXISTS completed(oid TEXT, fid TEXT, PRIMARY KEY(oid,fid));
+`
 
 func Open(path string, key ed25519.PrivateKey, kid string) (*Ledger, error) {
 	db, e := sql.Open("sqlite", path)
@@ -130,21 +132,9 @@ func (l *Ledger) MarkChanged(ctx context.Context, fid string) error {
 }
 func (f File) Path() string      { return filepath.Join(f.Root, filepath.FromSlash(f.RelativePath)) }
 func (f File) ValidBlocks() bool { return int64(len(f.BlockHashes)) == (f.Size+window-1)/window }
-func (f File) Hash(i int) [32]byte {
-	if i >= 0 && i < len(f.BlockHashes) {
-		return f.BlockHashes[i]
-	}
-	return [32]byte{}
-}
-func (f File) HashHex() string {
-	if len(f.BlockHashes) == 0 {
-		return ""
-	}
-	return hex.EncodeToString(f.BlockHashes[0][:])
-}
 
 func (l *Ledger) PutOffer(ctx context.Context, o Offer) error {
-	_, e := l.DB.ExecContext(ctx, `INSERT INTO offers(fid,sha256,lvid,iid,state,approved_locally_at,key_class) VALUES(?,?,?,?,?,?,?) ON CONFLICT(fid,sha256,lvid) DO UPDATE SET iid=excluded.iid,state=excluded.state,key_class=excluded.key_class`, o.FileID, o.SHA256, o.ListingVersionID, o.IID, o.State, o.ApprovedAt, o.KeyClass)
+	_, e := l.DB.ExecContext(ctx, `INSERT INTO offers(fid,sha256,lvid,iid,state,approved_locally_at,key_class) VALUES(?,?,?,?,?,?,?) ON CONFLICT(fid,sha256,lvid) DO UPDATE SET iid=excluded.iid,state=excluded.state,approved_locally_at=CASE WHEN excluded.state='withdrawn' THEN offers.approved_locally_at ELSE excluded.approved_locally_at END,key_class=excluded.key_class`, o.FileID, o.SHA256, o.ListingVersionID, o.IID, o.State, o.ApprovedAt, o.KeyClass)
 	return e
 }
 func (l *Ledger) Offer(ctx context.Context, fid, sha, lvid string) (Offer, error) {
@@ -157,35 +147,11 @@ func (l *Ledger) Approve(ctx context.Context, fid, sha, lvid string) error {
 	return e
 }
 
-func (l *Ledger) Issue(ctx context.Context, p wire.Permission) error {
-	_, e := l.DB.ExecContext(ctx, `INSERT OR IGNORE INTO permissions(jti,oid,fid,sha256,sd,td,ro,state) VALUES(?,?,?,?,?,?,?,'issued')`, p.JTI, p.OrderID, p.FileID, p.SHA256, p.StartDeadline, p.TransferDeadline, p.ResumeOffset)
-	return e
-}
 func (l *Ledger) Permission(ctx context.Context, jti string) (Permission, error) {
 	var p Permission
 	e := l.DB.QueryRowContext(ctx, `SELECT oid,fid,sha256,sd,td,ro,state FROM permissions WHERE jti=?`, jti).Scan(&p.OrderID, &p.FileID, &p.SHA256, &p.StartDeadline, &p.TransferDeadline, &p.ResumeOffset, &p.State)
 	p.JTI = jti
 	return p, e
-}
-func (l *Ledger) Bind(ctx context.Context, p wire.Permission) error {
-	return tx(ctx, l.DB, func(t *sql.Tx) error {
-		var q Permission
-		e := t.QueryRowContext(ctx, `SELECT oid,fid,sha256,sd,td,ro,state FROM permissions WHERE jti=?`, p.JTI).Scan(&q.OrderID, &q.FileID, &q.SHA256, &q.StartDeadline, &q.TransferDeadline, &q.ResumeOffset, &q.State)
-		if e == sql.ErrNoRows {
-			_, e = t.ExecContext(ctx, `INSERT INTO permissions(jti,oid,fid,sha256,sd,td,ro,state,bound_at) VALUES(?,?,?,?,?,?,?,'bound',?)`, p.JTI, p.OrderID, p.FileID, p.SHA256, p.StartDeadline, p.TransferDeadline, p.ResumeOffset, now())
-			return e
-		}
-		if e != nil {
-			return e
-		}
-		if q.OrderID != p.OrderID || q.FileID != p.FileID || q.SHA256 != p.SHA256 || q.StartDeadline != p.StartDeadline || q.TransferDeadline != p.TransferDeadline || q.ResumeOffset != p.ResumeOffset || q.State == "closed" || q.State == "revoked" {
-			return ErrClosed
-		}
-		if q.State == "issued" {
-			_, e = t.ExecContext(ctx, `UPDATE permissions SET state='bound',bound_at=? WHERE jti=?`, now(), p.JTI)
-		}
-		return e
-	})
 }
 func (l *Ledger) CloseExpired(ctx context.Context, at int64) error {
 	_, e := l.DB.ExecContext(ctx, `UPDATE permissions SET state='closed',closed_at=? WHERE state IN ('issued','bound') AND td<=?`, now(), at)
@@ -367,6 +333,13 @@ func (l *Ledger) Reserve(ctx context.Context, p wire.Permission, start, end int6
 		if e != nil {
 			return e
 		}
+		var size int64
+		if e = t.QueryRowContext(ctx, `SELECT size FROM files WHERE fid=?`, p.FileID).Scan(&size); e != nil {
+			return e
+		}
+		if size == 0 || covered(tr, 0, size-1) {
+			return ErrClosed
+		}
 		if start < 0 || end < start {
 			return errors.New("invalid range")
 		}
@@ -424,6 +397,8 @@ func (l *Ledger) Reserve(ctx context.Context, p wire.Permission, start, end int6
 
 // FinishEmpty closes an empty file without creating a fictitious byte range.
 func (l *Ledger) FinishEmpty(ctx context.Context, p wire.Permission) error {
+	l.writeMu.Lock()
+	defer l.writeMu.Unlock()
 	return tx(ctx, l.DB, func(t *sql.Tx) error {
 		var size int64
 		var sha string
@@ -431,6 +406,13 @@ func (l *Ledger) FinishEmpty(ctx context.Context, p wire.Permission) error {
 			return e
 		}
 		if size != 0 || sha != p.SHA256 {
+			return ErrClosed
+		}
+		var complete int
+		if e := t.QueryRowContext(ctx, `SELECT count(*) FROM completed WHERE oid=? AND fid=?`, p.OrderID, p.FileID).Scan(&complete); e != nil {
+			return e
+		}
+		if complete != 0 {
 			return ErrClosed
 		}
 		var revoked int
@@ -456,11 +438,12 @@ func (l *Ledger) FinishEmpty(ctx context.Context, p wire.Permission) error {
 			}
 		}
 		if missing {
-			_, e = t.ExecContext(ctx, `INSERT INTO permissions(jti,oid,fid,sha256,sd,td,ro,state,bound_at,closed_at) VALUES(?,?,?,?,?,?,?,'closed',?,?)`, p.JTI, p.OrderID, p.FileID, p.SHA256, p.StartDeadline, p.TransferDeadline, p.ResumeOffset, now(), now())
-		} else {
-			_, e = t.ExecContext(ctx, `UPDATE permissions SET state='closed',closed_at=? WHERE jti=?`, now(), p.JTI)
+			_, e = t.ExecContext(ctx, `INSERT INTO permissions(jti,oid,fid,sha256,sd,td,ro,state,bound_at) VALUES(?,?,?,?,?,?,?,'bound',?)`, p.JTI, p.OrderID, p.FileID, p.SHA256, p.StartDeadline, p.TransferDeadline, p.ResumeOffset, now())
 		}
 		if e != nil {
+			return e
+		}
+		if _, e = t.ExecContext(ctx, `UPDATE permissions SET state='closed',closed_at=? WHERE oid=? AND fid=? AND state IN ('issued','bound')`, now(), p.OrderID, p.FileID); e != nil {
 			return e
 		}
 		return l.queueTx(ctx, t, p.OrderID, p.FileID, "complete", true)
@@ -501,10 +484,67 @@ func (l *Ledger) Progress(ctx context.Context, id, writtenThrough int64) error {
 		return nil
 	})
 }
+
+// WriteChunk serializes the closure check, network write, and durable progress.
+// A response reserved before completion cannot write after another response closes it.
+func (l *Ledger) WriteChunk(ctx context.Context, id int64, data []byte, write func([]byte) (int, error)) (int, error) {
+	l.writeMu.Lock()
+	defer l.writeMu.Unlock()
+	var oid, fid, state string
+	var td, old, end, size int64
+	var open int
+	e := l.DB.QueryRowContext(ctx, `SELECT p.oid,p.fid,p.state,p.td,r.written_through,r.end,r.open,f.size FROM requests r JOIN permissions p ON p.jti=r.jti JOIN files f ON f.fid=p.fid WHERE r.id=?`, id).Scan(&oid, &fid, &state, &td, &old, &end, &open, &size)
+	if e != nil {
+		return 0, e
+	}
+	if open != 1 || state != "bound" {
+		return 0, ErrClosed
+	}
+	if time.Now().Unix() >= td {
+		if e = l.CloseExpired(context.Background(), time.Now().Unix()); e != nil {
+			return 0, e
+		}
+		return 0, ErrDeadline
+	}
+	var complete int
+	if e = l.DB.QueryRowContext(ctx, `SELECT count(*) FROM completed WHERE oid=? AND fid=?`, oid, fid).Scan(&complete); e != nil {
+		return 0, e
+	}
+	if complete != 0 {
+		return 0, ErrClosed
+	}
+	tr, e := l.transmitted(ctx, oid, fid)
+	if e != nil {
+		return 0, e
+	}
+	if size == 0 || covered(tr, 0, size-1) {
+		return 0, ErrClosed
+	}
+	if len(data) == 0 || old+int64(len(data)) > end {
+		return 0, errors.New("invalid write chunk")
+	}
+	n, writeErr := write(data)
+	if n < 0 || n > len(data) {
+		return 0, errors.New("invalid write result")
+	}
+	if n > 0 {
+		if e = l.Progress(context.Background(), id, old+int64(n)); e != nil {
+			return n, errors.Join(ErrProgress, e)
+		}
+	}
+	return n, writeErr
+}
+func (l *Ledger) transmitted(ctx context.Context, oid, fid string) ([]segment, error) {
+	var out []segment
+	e := tx(ctx, l.DB, func(t *sql.Tx) error { var e error; out, e = segments(ctx, t, "transmitted", oid, fid); return e })
+	return out, e
+}
 func (l *Ledger) Settle(ctx context.Context, id int64) error {
 	return l.SettleOutcome(ctx, id, "")
 }
 func (l *Ledger) SettleOutcome(ctx context.Context, id int64, outcome string) error {
+	l.writeMu.Lock()
+	defer l.writeMu.Unlock()
 	return tx(ctx, l.DB, func(t *sql.Tx) error { return l.settle(ctx, t, id, false, outcome) })
 }
 func (l *Ledger) settle(ctx context.Context, t *sql.Tx, id int64, crash bool, outcome string) error {
@@ -548,7 +588,7 @@ func (l *Ledger) settle(ctx context.Context, t *sql.Tx, id int64, crash bool, ou
 			return e
 		}
 	}
-	if !crash && (complete || outcome != "" || (written >= start && written < end)) {
+	if complete || (!crash && (outcome != "" || (written >= start && written < end))) {
 		return l.queueTx(ctx, t, p.OrderID, p.FileID, outcome, complete)
 	}
 	return nil
@@ -646,41 +686,20 @@ func (l *Ledger) receiptTx(ctx context.Context, t *sql.Tx, oid, fid, outcome str
 	}
 	return r, nil
 }
-func (l *Ledger) Queue(ctx context.Context, oid, fid, outcome string) error {
-	return tx(ctx, l.DB, func(t *sql.Tx) error { return l.queueTx(ctx, t, oid, fid, outcome, false) })
-}
 func (l *Ledger) queueTx(ctx context.Context, t *sql.Tx, oid, fid, outcome string, complete bool) error {
-	if complete && outcome != "aborted_block_mismatch" && outcome != "aborted_deadline" {
+	if complete {
 		outcome = "complete"
 	}
 	if outcome == "" {
 		outcome = "in_progress"
 	}
 	if outcome == "complete" {
-		rows, e := t.QueryContext(ctx, `SELECT body FROM receipts_outbox`)
-		if e != nil {
+		var exists int
+		if e := t.QueryRowContext(ctx, `SELECT count(*) FROM completed WHERE oid=? AND fid=?`, oid, fid).Scan(&exists); e != nil {
 			return e
 		}
-		for rows.Next() {
-			var body string
-			if e = rows.Scan(&body); e != nil {
-				rows.Close()
-				return e
-			}
-			raw := []byte(body)
-			if p := strings.Split(body, "."); len(p) == 3 {
-				raw, _ = base64.RawURLEncoding.DecodeString(p[1])
-			}
-			var old wire.Receipt
-			if json.Unmarshal(raw, &old) == nil && old.OrderID == oid && old.FileID == fid && old.Outcome == "complete" {
-				rows.Close()
-				return nil
-			}
-		}
-		e = rows.Err()
-		rows.Close()
-		if e != nil {
-			return e
+		if exists != 0 {
+			return nil
 		}
 	}
 	var seq uint64
@@ -695,20 +714,20 @@ func (l *Ledger) queueTx(ctx context.Context, t *sql.Tx, oid, fid, outcome strin
 	if outcome == "complete" && (r.TransmittedBytes != r.SizeBytes || !r.BlocksVerified) {
 		return errors.New("incomplete receipt")
 	}
-	var body string
-	if len(l.Key) == ed25519.PrivateKeySize {
-		body, e = wire.Sign("aim-receipt+jwt", l.KID, r, l.Key)
-		if e != nil {
-			return e
-		}
-	} else {
-		b, err := json.Marshal(r)
-		if err != nil {
-			return err
-		}
-		body = string(b)
+	if len(l.Key) != ed25519.PrivateKeySize {
+		return errors.New("receipt signing key unavailable")
+	}
+	body, e := wire.Sign("aim-receipt+jwt", l.KID, r, l.Key)
+	if e != nil {
+		return e
 	}
 	_, e = t.ExecContext(ctx, `INSERT INTO receipts_outbox(seq,body) VALUES(?,?)`, seq, body)
+	if e != nil {
+		return e
+	}
+	if outcome == "complete" {
+		_, e = t.ExecContext(ctx, `INSERT INTO completed(oid,fid) VALUES(?,?)`, oid, fid)
+	}
 	return e
 }
 
@@ -769,7 +788,11 @@ func (l *Ledger) Prepare(ctx context.Context, i wire.Instruction, c config.Confi
 				refusal = "coverage_exhausted"
 			}
 		}
-		if f.Size >= 0 && a.TransmittedBytes == f.Size && refusal == "" {
+		var complete int
+		if e = t.QueryRowContext(ctx, `SELECT count(*) FROM completed WHERE oid=? AND fid=?`, i.OrderID, i.FileID).Scan(&complete); e != nil {
+			return e
+		}
+		if (complete != 0 || (f.Size > 0 && a.TransmittedBytes == f.Size)) && refusal == "" {
 			refusal = "complete"
 		}
 		return nil
@@ -813,15 +836,4 @@ func WithinCeiling(c config.Config, f File) bool {
 		}
 	}
 	return false
-}
-
-func (l *Ledger) Debug(ctx context.Context) error {
-	var mode string
-	if e := l.DB.QueryRowContext(ctx, "PRAGMA journal_mode").Scan(&mode); e != nil {
-		return e
-	}
-	if mode != "wal" {
-		return fmt.Errorf("journal mode %s", mode)
-	}
-	return nil
 }

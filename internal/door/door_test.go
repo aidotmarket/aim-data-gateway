@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -171,8 +172,8 @@ func TestDoorRefusalsAndNoCORS(t *testing.T) {
 	if e = os.Chtimes(filepath.Join(root, "data.bin"), st.ModTime(), st.ModTime()); e != nil {
 		t.Fatal(e)
 	}
-	if w := call(t, h, p, key, "GET", "bytes=5-7", "header"); w.Body.Len() != 0 {
-		t.Fatalf("mismatch leaked bytes: %q", w.Body.String())
+	if w := call(t, h, p, key, "GET", "bytes=5-7", "header"); w.Code != 409 || !strings.Contains(w.Body.String(), "file_changed") {
+		t.Fatalf("mismatch response: %d %q", w.Code, w.Body.String())
 	}
 }
 
@@ -266,5 +267,106 @@ func TestStatementAndHealthSeparation(t *testing.T) {
 	HealthServer().Handler.ServeHTTP(w, httptest.NewRequest("GET", "/healthz", nil))
 	if w.Code != 200 {
 		t.Fatalf("private health %d", w.Code)
+	}
+}
+
+func TestGLM6DeepSeek2OfferPrecedesJTIAndFileCode(t *testing.T) {
+	d, p, key, _ := setup(t)
+	h := d.Handler()
+	p.FileID = "ffffffffffffffffffffffffffffffff"
+	w := call(t, h, p, key, "GET", "", "header")
+	if w.Code != 403 || !strings.Contains(w.Body.String(), "wrong_file") {
+		t.Fatalf("fid: %d %s", w.Code, w.Body.String())
+	}
+	p.FileID = fileID
+	_, e := d.Ledger.DB.Exec(`INSERT INTO permissions(jti,oid,fid,sha256,sd,td,ro,state) VALUES(?,?,?,?,?,?,?,'closed')`, p.JTI, p.OrderID, p.FileID, p.SHA256, p.StartDeadline, p.TransferDeadline, 0)
+	if e != nil {
+		t.Fatal(e)
+	}
+	_, e = d.Ledger.DB.Exec(`DELETE FROM offers`)
+	if e != nil {
+		t.Fatal(e)
+	}
+	w = call(t, h, p, key, "GET", "", "header")
+	if w.Code != 403 || !strings.Contains(w.Body.String(), "not_offered") {
+		t.Fatalf("offer precedence: %d %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "message") || !strings.Contains(w.Body.String(), "details") {
+		t.Fatalf("error shape: %s", w.Body.String())
+	}
+}
+
+func TestGLM7Gemini3DeepSeek1FirstBlockMismatchIs409(t *testing.T) {
+	for _, rng := range []string{"", "bytes=5-7"} {
+		t.Run(rng, func(t *testing.T) {
+			d, p, key, root := setup(t)
+			if e := os.WriteFile(filepath.Join(root, "data.bin"), []byte("abcdEfghij"), 0600); e != nil {
+				t.Fatal(e)
+			}
+			w := call(t, d.Handler(), p, key, "GET", rng, "header")
+			if w.Code != 409 || !strings.Contains(w.Body.String(), "file_changed") {
+				t.Fatalf("response: %d %s", w.Code, w.Body.String())
+			}
+			if w.Header().Get("Content-Range") != "" || w.Header().Get("Content-Length") == "10" {
+				t.Fatalf("success headers: %v", w.Header())
+			}
+			f, e := d.Ledger.File(t.Context(), fileID)
+			if e != nil || !f.Changed {
+				t.Fatalf("changed: %+v %v", f, e)
+			}
+			var body string
+			if e = d.Ledger.DB.QueryRow(`SELECT body FROM receipts_outbox ORDER BY seq DESC LIMIT 1`).Scan(&body); e != nil || !strings.Contains(body, ".") {
+				t.Fatalf("receipt: %v %s", e, body)
+			}
+		})
+	}
+}
+
+func TestDeepSeek7ReofferRequiresFreshLocalApproval(t *testing.T) {
+	d, p, key, _ := setup(t)
+	d.Config = func() config.Config { return config.Config{OfferRequiresLocalApproval: true} }
+	if e := d.Ledger.Approve(t.Context(), fileID, p.SHA256, listingID); e != nil {
+		t.Fatal(e)
+	}
+	if e := d.Ledger.PutOffer(t.Context(), ledger.Offer{FileID: fileID, SHA256: p.SHA256, ListingVersionID: listingID, State: "withdrawn", KeyClass: "listing"}); e != nil {
+		t.Fatal(e)
+	}
+	if e := d.Ledger.PutOffer(t.Context(), ledger.Offer{FileID: fileID, SHA256: p.SHA256, ListingVersionID: listingID, State: "offered", KeyClass: "listing"}); e != nil {
+		t.Fatal(e)
+	}
+	w := call(t, d.Handler(), p, key, "GET", "bytes=0-0", "header")
+	if w.Code != 403 || !strings.Contains(w.Body.String(), "awaiting_local_approval") {
+		t.Fatalf("approval: %d %s", w.Code, w.Body.String())
+	}
+}
+
+func TestGLM1Gemini1DeepSeek4ConcurrentResponsesOneJTI(t *testing.T) {
+	d, p, key, _ := setup(t)
+	h := d.Handler()
+	start := make(chan struct{})
+	results := make(chan *httptest.ResponseRecorder, 2)
+	var wg sync.WaitGroup
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			results <- call(t, h, p, key, "GET", "", "header")
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(results)
+	complete, refused := 0, 0
+	for w := range results {
+		if w.Code == 200 && w.Body.String() == "abcdefghij" {
+			complete++
+		}
+		if w.Code == 403 && strings.Contains(w.Body.String(), "permission_closed") {
+			refused++
+		}
+	}
+	if complete != 1 || refused != 1 {
+		t.Fatalf("complete=%d refused=%d", complete, refused)
 	}
 }

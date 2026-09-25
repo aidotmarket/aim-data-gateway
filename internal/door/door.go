@@ -5,7 +5,6 @@ import (
 	"crypto/ed25519"
 	"crypto/sha256"
 	"database/sql"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -68,7 +67,7 @@ func HealthServer() *http.Server {
 func fail(w http.ResponseWriter, status int, code string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]string{"code": code}})
+	_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{"code": code, "message": strings.ReplaceAll(code, "_", " "), "details": map[string]any{}}})
 }
 
 var fidRE = regexp.MustCompile(`^[0-9a-f]{32}$`)
@@ -197,27 +196,28 @@ func (d *Door) download(w http.ResponseWriter, r *http.Request, fid string) {
 		fail(w, 401, "invalid_permission")
 		return
 	}
-	if p.Audience != d.GatewayID || p.FileID != fid {
+	if p.Audience != d.GatewayID {
 		fail(w, 403, "wrong_audience")
 		return
 	}
-	state, e := d.Ledger.Permission(ctx, p.JTI)
-	bound := e == nil && state.State == "bound" && state.OrderID == p.OrderID && state.FileID == fid && state.SHA256 == p.SHA256
-	if e != nil && e != sql.ErrNoRows {
-		fail(w, 500, "internal_error")
-		return
-	}
-	if e == nil && (state.State == "closed" || state.State == "revoked" || state.OrderID != p.OrderID || state.FileID != fid || state.SHA256 != p.SHA256) {
-		fail(w, 403, "permission_closed")
+	if p.FileID != fid {
+		fail(w, 403, "wrong_file")
 		return
 	}
 	o, e := d.Ledger.Offer(ctx, fid, p.SHA256, p.ListingVersionID)
-	if !bound && (e != nil || o.State != "offered" || o.KeyClass != "listing") {
-		fail(w, 403, "not_offered")
-		return
-	}
 	if e != nil && e != sql.ErrNoRows {
 		fail(w, 500, "internal_error")
+		return
+	}
+	// The bound exception is read only to decide whether withdrawal still permits this offer.
+	state, stateErr := d.Ledger.Permission(ctx, p.JTI)
+	bound := stateErr == nil && state.State == "bound" && state.OrderID == p.OrderID && state.FileID == fid && state.SHA256 == p.SHA256
+	if stateErr != nil && stateErr != sql.ErrNoRows {
+		fail(w, 500, "internal_error")
+		return
+	}
+	if !bound && (e == sql.ErrNoRows || o.State != "offered" || o.KeyClass != "listing") {
+		fail(w, 403, "not_offered")
 		return
 	}
 	f, e := d.Ledger.File(ctx, fid)
@@ -242,6 +242,10 @@ func (d *Door) download(w http.ResponseWriter, r *http.Request, fid string) {
 	if now >= p.TransferDeadline || (!bound && now >= p.StartDeadline) {
 		_ = d.Ledger.CloseExpired(ctx, now)
 		fail(w, 403, "permission_expired")
+		return
+	}
+	if stateErr == nil && (state.State == "closed" || state.State == "revoked" || state.OrderID != p.OrderID || state.FileID != fid || state.SHA256 != p.SHA256) {
+		fail(w, 403, "permission_closed")
 		return
 	}
 	if f.Size == 0 && r.Header.Get("Range") == "" {
@@ -323,54 +327,73 @@ func (d *Door) download(w http.ResponseWriter, r *http.Request, fid string) {
 		fail(w, 404, "file_missing")
 		return
 	}
+	buf := make([]byte, inventory.BlockSize)
+	readBlock := func(pos int64) (int64, int, bool) {
+		index := int(pos / inventory.BlockSize)
+		blockStart := int64(index) * inventory.BlockSize
+		blockLen := int(min(int64(inventory.BlockSize), f.Size-blockStart))
+		n, readErr := file.ReadAt(buf[:blockLen], blockStart)
+		return blockStart, blockLen, (readErr == nil || readErr == io.EOF) && n == blockLen && index < len(f.BlockHashes) && sha256.Sum256(buf[:blockLen]) == f.BlockHashes[index]
+	}
+	blockStart, blockLen, ok := readBlock(start)
+	if !ok {
+		_ = d.Ledger.MarkChanged(context.Background(), fid)
+		outcome = "aborted_block_mismatch"
+		fail(w, 409, "file_changed")
+		return
+	}
+	_ = http.NewResponseController(w).SetWriteDeadline(time.Unix(p.TransferDeadline, 0))
 	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", safeName(f.DisplayName)))
 	w.Header().Set("Accept-Ranges", "bytes")
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("Content-Length", strconv.FormatInt(end-start+1, 10))
 	if partial {
 		w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, f.Size))
-		w.WriteHeader(206)
 	}
-	buf := make([]byte, inventory.BlockSize)
-	written := start - 1
-	checkpoint := written
+	committed := false
 	for pos := start; pos <= end; {
-		blockIndex := int(pos / inventory.BlockSize)
-		blockStart := int64(blockIndex) * inventory.BlockSize
-		blockLen := int(min(int64(inventory.BlockSize), f.Size-blockStart))
-		n, e := file.ReadAt(buf[:blockLen], blockStart)
-		if e != nil && e != io.EOF || n != blockLen || blockIndex >= len(f.BlockHashes) || sha256.Sum256(buf[:blockLen]) != f.BlockHashes[blockIndex] {
-			_ = d.Ledger.MarkChanged(context.Background(), fid)
-			outcome = "aborted_block_mismatch"
-			break
+		if pos >= blockStart+int64(blockLen) {
+			blockStart, blockLen, ok = readBlock(pos)
+			if !ok {
+				_ = d.Ledger.MarkChanged(context.Background(), fid)
+				outcome = "aborted_block_mismatch"
+				return
+			}
 		}
 		lo := int(pos - blockStart)
 		hi := int(min(int64(blockLen), end-blockStart+1))
 		for lo < hi {
-			n, e = w.Write(buf[lo:hi])
+			n, e := d.Ledger.WriteChunk(ctx, req.ID, buf[lo:hi], func(b []byte) (int, error) {
+				if !committed {
+					if partial {
+						w.WriteHeader(206)
+					}
+					committed = true
+				}
+				return w.Write(b)
+			})
 			if n > 0 {
 				lo += n
 				pos += int64(n)
-				written += int64(n)
-				if written-checkpoint >= inventory.BlockSize {
-					if e = d.Ledger.Progress(context.Background(), req.ID, written); e != nil {
-						settle = false
-						return
-					}
-					checkpoint = written
-				}
+			}
+			if errors.Is(e, ledger.ErrDeadline) {
+				outcome = "aborted_deadline"
+			}
+			if errors.Is(e, ledger.ErrProgress) {
+				settle = false
 			}
 			if e != nil || n == 0 {
-				if e = d.Ledger.Progress(context.Background(), req.ID, written); e != nil {
-					settle = false
+				if !committed && (errors.Is(e, ledger.ErrClosed) || errors.Is(e, ledger.ErrDeadline)) {
+					w.Header().Del("Content-Length")
+					w.Header().Del("Content-Range")
+					if errors.Is(e, ledger.ErrDeadline) {
+						fail(w, 403, "permission_expired")
+					} else {
+						fail(w, 403, "permission_closed")
+					}
 				}
 				return
 			}
-		}
-	}
-	if written >= start {
-		if e = d.Ledger.Progress(context.Background(), req.ID, written); e != nil {
-			settle = false
 		}
 	}
 }
@@ -387,4 +410,3 @@ func safeName(s string) string {
 	}
 	return s
 }
-func HashHex(b []byte) string { return hex.EncodeToString(b) }
