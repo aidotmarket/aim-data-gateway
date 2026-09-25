@@ -1,0 +1,24 @@
+services:
+  aim-gateway:
+    build: .
+    user: "65532:65532"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    volumes:
+      - ./gateway.toml:/config/gateway.toml:ro
+      - ./data:/sources/data:ro
+      - aim-gateway-state:/state
+    ports:
+      - "8080:8080"
+    # First run only: set AIM_PAIRING_CODE to the code shown by ai.market.
+    # environment:
+    #   AIM_PAIRING_CODE: "XXXX-XXXX-XXXX"
+    healthcheck:
+      test: ["CMD", "/aim-gateway", "healthcheck"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  aim-gateway-state:

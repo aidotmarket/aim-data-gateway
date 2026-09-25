@@ -360,6 +360,20 @@ func TestDeepSeek7ReofferRequiresFreshLocalApproval(t *testing.T) {
 	}
 }
 
+func TestLocalApprovalOpensDoor(t *testing.T) {
+	d, p, key, _ := setup(t)
+	d.Config = func() config.Config { return config.Config{OfferRequiresLocalApproval: true} }
+	if w := call(t, d.Handler(), p, key, "GET", "bytes=0-0", "header"); w.Code != 403 || !strings.Contains(w.Body.String(), "awaiting_local_approval") {
+		t.Fatalf("before approval: %d %s", w.Code, w.Body.String())
+	}
+	if err := d.Ledger.Approve(t.Context(), fileID, p.SHA256, listingID); err != nil {
+		t.Fatal(err)
+	}
+	if w := call(t, d.Handler(), p, key, "GET", "bytes=0-0", "header"); w.Code != 206 || w.Body.String() != "a" {
+		t.Fatalf("after approval: %d %s", w.Code, w.Body.String())
+	}
+}
+
 func TestGLM1Gemini1DeepSeek4ConcurrentResponsesOneJTI(t *testing.T) {
 	d, p, key, _ := setup(t)
 	h := d.Handler()

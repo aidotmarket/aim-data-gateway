@@ -1,0 +1,7 @@
+.git
+data
+gateway.toml
+state
+*.db
+*.db-wal
+*.db-shm

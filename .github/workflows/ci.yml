@@ -16,6 +16,7 @@ jobs:
           cache: true
       - run: go vet ./...
       - run: go test ./...
+      - run: bash scripts/check-reproducible-build.sh
       - run: go mod verify
       - run: python3 scripts/check-module-budget.py
       - run: python3 scripts/count-lines.py

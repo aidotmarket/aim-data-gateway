@@ -11,9 +11,12 @@ import (
 	"io"
 	"log"
 	"math/rand/v2"
+	"net"
 	"net/http"
+	"net/url"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/aidotmarket/aim-data-gateway/internal/audit"
@@ -25,6 +28,11 @@ import (
 
 const URL = "wss://api.ai.market/api/v1/gateway-channel"
 const maxMessage = 1 << 20
+
+func ProxyClient(address string) *http.Client {
+	proxy := &url.URL{Scheme: "http", Host: address}
+	return &http.Client{Transport: &http.Transport{Proxy: http.ProxyURL(proxy), DialContext: (&net.Dialer{Timeout: 10 * time.Second}).DialContext}}
+}
 
 var hex64 = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
@@ -39,12 +47,14 @@ type Client struct {
 	Handle   func(context.Context, wire.Instruction, string, string) (string, any, error)
 	Complete func(context.Context, string) error
 	// Scan appends an inventory generation after each successful resume.
-	Scan func(context.Context) error
+	Scan   func(context.Context) error
+	Canary func(context.Context) error
 	// Poll appends any newly queued receipts, returning their local audit sequences.
 	Poll func(context.Context) error
 	// Delivered marks an outbox receipt after ack or a later resume.
 	Delivered      func(context.Context, audit.Entry) error
 	Reconcile      func(context.Context, uint64) error
+	canaryMu       sync.Mutex
 	sent           uint64
 	heartbeatEvery time.Duration
 }
@@ -328,6 +338,11 @@ func (c *Client) Connect(ctx context.Context) error {
 			return errors.New("channel work queue full")
 		}
 	}
+	if c.Canary != nil {
+		if err = queue(jobs, func() error { c.canaryMu.Lock(); defer c.canaryMu.Unlock(); return c.Canary(workCtx) }); err != nil {
+			return err
+		}
+	}
 	if c.Scan != nil {
 		if err = queue(jobs, func() error { return c.Scan(workCtx) }); err != nil {
 			return err
@@ -389,6 +404,8 @@ func (c *Client) Connect(ctx context.Context) error {
 	defer tick.Stop()
 	scan := time.NewTicker(15 * time.Minute)
 	defer scan.Stop()
+	canaryTick := time.NewTicker(time.Hour)
+	defer canaryTick.Stop()
 	interval := c.heartbeatEvery
 	if interval == 0 {
 		interval = 30 * time.Second
@@ -426,6 +443,12 @@ func (c *Client) Connect(ctx context.Context) error {
 		case <-scan.C:
 			if c.Scan != nil {
 				if err = queue(jobs, func() error { return c.Scan(workCtx) }); err != nil {
+					return err
+				}
+			}
+		case <-canaryTick.C:
+			if c.Canary != nil {
+				if err = queue(jobs, func() error { c.canaryMu.Lock(); defer c.canaryMu.Unlock(); return c.Canary(workCtx) }); err != nil {
 					return err
 				}
 			}

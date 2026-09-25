@@ -6,4 +6,12 @@ Listing management, pricing, licences, samples, earnings and payouts remain on t
 
 `run` loads `/config/gateway.toml` (or `AIM_GATEWAY_CONFIG`) and uses `/state` (or `AIM_GATEWAY_STATE`). On an empty state volume, supply `AIM_PAIRING_CODE` once. Later runs load the saved identity and pins, recover the ledger, serve the configured HTTP door, and maintain the outbound control channel. `preview <file-id>` computes the exact local phase 1 and phase 2 payloads without sending them. The design authority is [Gate 1](https://github.com/aidotmarket/ai-market/tree/main/runbooks/specs/BQ-AIM-DATA-GATEWAY-S1741-GATE1.md) and [Gate 2](https://github.com/aidotmarket/ai-market/tree/main/runbooks/specs/BQ-AIM-DATA-GATEWAY-S1741-GATE2.md), including Gate 2 Amendment B.
 
-This branch covers the B3 gateway channel. The B4 canary, start-up self-check, local approval command, and compose file are still separate work.
+## Install with Compose
+
+Copy `gateway.example.toml` to `gateway.toml`, create `data/`, and place the files to offer there. Set the one-time `AIM_PAIRING_CODE` in `compose.yaml`, then run `docker compose up --build -d`. Remove the pairing code after the first successful start. The seller's reverse proxy must terminate HTTPS and forward the door to port 8080. `/state` is a named volume; keep it across upgrades. To approve a pending offer when local approval is enabled, run `docker compose exec aim-gateway /aim-gateway approve <file-id>`.
+
+The container runs as UID 65532 with a read-only root filesystem, zero capabilities, no new privileges, no Docker socket, and no host network or host process namespace. Its only writable mount is `/state`. The gateway checks these controls before reading configuration or state and refuses to start if any is loosened. The customer must restrict outbound access to `api.ai.market:443` with an allowlisting CONNECT proxy or firewall and restricted DNS. The canary checks direct DNS, direct TCP, and the configured proxy on each channel connection and hourly; an open result blocks publishing and new permissions at ai.market.
+
+## Audit log recovery
+
+At startup, an invalid line without a terminating newline at the end of the last audit file is treated as an interrupted write. The fragment is preserved as `audit/torn-<unix-nanos>.fragment`, the file is truncated to the last valid line and synced, and one recovery line is logged to stderr. A newline-terminated invalid line or damage anywhere earlier still stops startup. Audit entries are synced before transmission, so the recovered fragment was never sent.

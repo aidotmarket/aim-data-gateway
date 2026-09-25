@@ -6,16 +6,20 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
+	"time"
 
 	_ "github.com/aidotmarket/aim-data-gateway/internal/builddeps"
+	"github.com/aidotmarket/aim-data-gateway/internal/channel"
 	"github.com/aidotmarket/aim-data-gateway/internal/config"
 	"github.com/aidotmarket/aim-data-gateway/internal/gateway"
 	"github.com/aidotmarket/aim-data-gateway/internal/ids"
 	"github.com/aidotmarket/aim-data-gateway/internal/inventory"
+	"github.com/aidotmarket/aim-data-gateway/internal/ledger"
+	"github.com/aidotmarket/aim-data-gateway/internal/pairing"
 	"github.com/aidotmarket/aim-data-gateway/internal/profile"
+	"github.com/aidotmarket/aim-data-gateway/internal/selfcheck"
 	"github.com/aidotmarket/aim-data-gateway/internal/wire"
 )
 
@@ -38,12 +42,29 @@ func execute(args []string) error {
 		fmt.Println(version)
 		return nil
 	}
-	cmd := args[0]
-	if cmd != "run" && cmd != "preview" {
-		return errors.New("usage: aim-gateway [run|preview <file-id>|version]")
+	if args[0] == "healthcheck" && len(args) == 1 {
+		client := &http.Client{Timeout: 3 * time.Second, Transport: &http.Transport{}}
+		response, err := client.Get("http://127.0.0.1:8081/healthz")
+		if err != nil {
+			return err
+		}
+		defer response.Body.Close()
+		if response.StatusCode != http.StatusOK {
+			return fmt.Errorf("healthcheck: HTTP %d", response.StatusCode)
+		}
+		return nil
 	}
-	if (cmd == "run" && len(args) != 1) || (cmd == "preview" && len(args) != 2) {
+	cmd := args[0]
+	if cmd != "run" && cmd != "preview" && cmd != "approve" {
+		return errors.New("usage: aim-gateway [run|preview <file-id>|approve <file-id>|healthcheck|version]")
+	}
+	if (cmd == "run" && len(args) != 1) || (cmd != "run" && len(args) != 2) {
 		return errors.New("invalid arguments")
+	}
+	if cmd == "run" {
+		if err := selfcheck.Run(); err != nil {
+			return err
+		}
 	}
 	path := os.Getenv("AIM_GATEWAY_CONFIG")
 	if path == "" {
@@ -53,13 +74,57 @@ func execute(args []string) error {
 	if e != nil {
 		return e
 	}
+	if cmd == "approve" {
+		if !c.OfferRequiresLocalApproval {
+			fmt.Println("local approval is not required")
+			return nil
+		}
+		state, err := pairing.Load(gateway.StateDir())
+		if err != nil {
+			return err
+		}
+		l, err := ledger.OpenForApproval(filepath.Join(gateway.StateDir(), "gateway.db"), state.Private, "gateway")
+		if err != nil {
+			return err
+		}
+		defer l.Close()
+		rows, err := l.DB.QueryContext(context.Background(), `SELECT o.sha256,o.lvid,f.relative_path FROM offers o JOIN files f ON f.fid=o.fid WHERE o.fid=? AND o.state='offered' AND o.approved_locally_at IS NULL`, args[1])
+		if err != nil {
+			return err
+		}
+		type pending struct{ sha, lvid, path string }
+		var offers []pending
+		for rows.Next() {
+			var offer pending
+			if err = rows.Scan(&offer.sha, &offer.lvid, &offer.path); err != nil {
+				break
+			}
+			offers = append(offers, offer)
+		}
+		if err == nil {
+			err = rows.Err()
+		}
+		rows.Close()
+		if err != nil {
+			return err
+		}
+		if len(offers) == 0 {
+			return errors.New("no pending offers for file-id")
+		}
+		for _, offer := range offers {
+			if err = l.Approve(context.Background(), args[1], offer.sha, offer.lvid); err != nil {
+				return err
+			}
+			fmt.Printf("fid=%s listing_version_id=%s sha256=%s relative_path=%s\n", args[1], offer.lvid, offer.sha, offer.path)
+		}
+		return nil
+	}
 	if cmd == "run" {
 		ctx := context.Background()
 		dir := gateway.StateDir()
 		var client *http.Client
 		if c.Egress.ConnectProxy != "" {
-			proxy := &url.URL{Scheme: "http", Host: c.Egress.ConnectProxy}
-			client = &http.Client{Transport: &http.Transport{Proxy: http.ProxyURL(proxy)}}
+			client = channel.ProxyClient(c.Egress.ConnectProxy)
 		}
 		state, err := gateway.LoadOrPair(ctx, dir, os.Getenv("AIM_PAIRING_CODE"), version, client)
 		if err != nil {
