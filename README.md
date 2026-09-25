@@ -4,7 +4,7 @@ AIM Data is a small, self hosted gateway for sellers who keep data on their own 
 
 Listing management, pricing, licences, samples, earnings and payouts remain on the ai.market website. This repository does not provide a management UI, cloud SDK, relay, or auto update path.
 
-`run` loads `/config/gateway.toml` (or `AIM_GATEWAY_CONFIG`) and uses `/state` (or `AIM_GATEWAY_STATE`). On an empty state volume, supply `AIM_PAIRING_CODE` once. Later runs load the saved identity and pins, recover the ledger, serve the configured HTTP door, and maintain the outbound control channel. `preview <file-id>` computes the exact local phase 1 and phase 2 payloads without sending them. The design authority is [Gate 1](https://github.com/aidotmarket/ai-market/tree/main/runbooks/specs/BQ-AIM-DATA-GATEWAY-S1741-GATE1.md) and [Gate 2](https://github.com/aidotmarket/ai-market/tree/main/runbooks/specs/BQ-AIM-DATA-GATEWAY-S1741-GATE2.md), including Gate 2 Amendment B.
+`run` loads `/config/gateway.toml` (or `AIM_GATEWAY_CONFIG`) and uses `/state` (or `AIM_GATEWAY_STATE`). On an empty state volume, supply `AIM_PAIRING_CODE` once. Later runs load the saved identity and pins, recover the ledger, serve the configured HTTP door, and maintain the outbound control channel. `preview <file-id>` computes the exact local phase 1 and phase 2 payloads without sending them. The design authority is [Gate 1](https://github.com/aidotmarket/runbooks/blob/main/specs/BQ-AIM-DATA-GATEWAY-S1741-GATE1.md) and [Gate 2](https://github.com/aidotmarket/runbooks/blob/main/specs/BQ-AIM-DATA-GATEWAY-S1741-GATE2.md), including Gate 2 Amendment B.
 
 ## Install with Compose
 
@@ -14,4 +14,4 @@ The container runs as UID 65532 with a read-only root filesystem, zero capabilit
 
 ## Audit log recovery
 
-At startup, an invalid line without a terminating newline at the end of the last audit file is treated as an interrupted write. The fragment is preserved as `audit/torn-<unix-nanos>.fragment`, the file is truncated to the last valid line and synced, and one recovery line is logged to stderr. A newline-terminated invalid line or damage anywhere earlier still stops startup. Audit entries are synced before transmission, so the recovered fragment was never sent.
+At startup, a line without a terminating newline at the end of the last audit file is treated as an interrupted write. The fragment is preserved as `audit/torn-<unix-nanos>.fragment`, the file is truncated to the last valid line and synced, and one recovery line is logged to stderr. A newline-terminated invalid line or damage anywhere earlier still stops startup. Audit entries are synced before transmission, so the recovered fragment was never sent.

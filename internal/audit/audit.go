@@ -97,8 +97,7 @@ func openWithSync(dir string, private ed25519.PrivateKey, syncFile func(*os.File
 				break
 			}
 			terminated := readErr == nil
-			entry, e := ValidateRaw(bytes.TrimSuffix(line, []byte{'\n'}), private.Public().(ed25519.PublicKey))
-			if !terminated && (e != nil || entry.Seq != l.seq+1 || entry.PrevHash != l.prev) && p == files[len(files)-1] && readErr == io.EOF {
+			if !terminated && p == files[len(files)-1] && readErr == io.EOF {
 				if err := preserveTorn(dir, f, offset, line); err != nil {
 					f.Close()
 					return nil, err
@@ -106,6 +105,7 @@ func openWithSync(dir string, private ed25519.PrivateKey, syncFile func(*os.File
 				fmt.Fprintln(os.Stderr, "audit: recovered torn tail from", p)
 				break
 			}
+			entry, e := ValidateRaw(bytes.TrimSuffix(line, []byte{'\n'}), private.Public().(ed25519.PublicKey))
 			if e != nil {
 				f.Close()
 				return nil, e

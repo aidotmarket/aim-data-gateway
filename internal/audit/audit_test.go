@@ -49,6 +49,59 @@ func TestTornTailRecovery(t *testing.T) {
 	}
 }
 
+func TestValidUnterminatedTailRecovery(t *testing.T) {
+	key := ed25519.NewKeyFromSeed(make([]byte, 32))
+	dir := t.TempDir()
+	l, err := Open(dir, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := l.Append("inventory", map[string]int{"generation": 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := l.Append("inventory", map[string]int{"generation": 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "000000.jsonl")
+	contents, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lastNewline := strings.LastIndexByte(string(contents[:len(contents)-1]), '\n')
+	fragment := contents[lastNewline+1 : len(contents)-1]
+	if _, err := ValidateRaw(fragment, key.Public().(ed25519.PublicKey)); err != nil {
+		t.Fatalf("tail fixture is invalid: %v", err)
+	}
+	if err := os.Truncate(path, int64(len(contents)-1)); err != nil {
+		t.Fatal(err)
+	}
+	recovered, err := Open(dir, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fragments, err := filepath.Glob(filepath.Join(dir, "torn-*.fragment"))
+	if err != nil || len(fragments) != 1 {
+		t.Fatalf("fragments: %v %v", fragments, err)
+	}
+	got, err := os.ReadFile(fragments[0])
+	if err != nil || string(got) != string(fragment) {
+		t.Fatalf("fragment: %q %v", got, err)
+	}
+	if got, err := os.ReadFile(path); err != nil || string(got) != string(contents[:lastNewline+1]) {
+		t.Fatalf("truncated log: %q %v", got, err)
+	}
+	next, err := recovered.Append("inventory", map[string]int{"generation": 3})
+	if err != nil || next.Seq != second.Seq {
+		t.Fatalf("next: %+v %v", next, err)
+	}
+	hash, err := Hash(first)
+	if err != nil || next.PrevHash != hash {
+		t.Fatalf("chain: %+v %v", next, err)
+	}
+}
+
 func TestInvalidAuditLinesFailClosed(t *testing.T) {
 	for _, middle := range []bool{false, true} {
 		key := ed25519.NewKeyFromSeed(make([]byte, 32))
