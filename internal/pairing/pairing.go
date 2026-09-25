@@ -45,14 +45,14 @@ func Pair(ctx context.Context, dir, code, version, url string, client *http.Clie
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return State{}, err
 	}
+	if err := os.RemoveAll(filepath.Join(dir, ".pairing-staging")); err != nil {
+		return State{}, err
+	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return State{}, err
 	}
 	if len(entries) != 0 {
-		if _, err := os.Stat(filepath.Join(dir, ".pairing-staging")); err == nil {
-			return State{}, errors.New("incomplete pairing: staged state requires recovery")
-		}
 		return State{}, errors.New("pairing requires an empty state volume")
 	}
 	public, private, err := ed25519.GenerateKey(rand.Reader)
@@ -128,10 +128,40 @@ func Pair(ctx context.Context, dir, code, version, url string, client *http.Clie
 	if err = syncDirectory(stage); err != nil {
 		return State{}, err
 	}
-	if err = os.Rename(stage, filepath.Join(dir, "paired")); err != nil {
+	for _, name := range []string{"identity.key", "secret.bin", "pins.json"} {
+		if err = os.Rename(filepath.Join(stage, name), filepath.Join(dir, name)); err != nil {
+			return State{}, err
+		}
+	}
+	if err = syncDirectory(dir); err != nil {
+		return State{}, err
+	}
+	marker := filepath.Join(stage, "complete")
+	if err = os.WriteFile(marker, []byte("paired\n"), 0600); err != nil {
+		return State{}, err
+	}
+	markFile, err := os.Open(marker)
+	if err != nil {
+		return State{}, err
+	}
+	err = markFile.Sync()
+	closeErr := markFile.Close()
+	if err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		return State{}, err
+	}
+	if err = syncDirectory(stage); err != nil {
+		return State{}, err
+	}
+	if err = os.Rename(marker, filepath.Join(dir, ".pairing-complete")); err != nil {
 		return State{}, err
 	}
 	if err = syncDirectory(dir); err != nil {
+		return State{}, err
+	}
+	if err = os.Remove(stage); err != nil {
 		return State{}, err
 	}
 	return State{private, secret, pins}, nil
@@ -147,27 +177,27 @@ func syncDirectory(path string) error {
 
 func Load(dir string) (State, error) {
 	var s State
-	base := dir
-	if _, err := os.Stat(filepath.Join(dir, "paired")); err == nil {
-		base = filepath.Join(dir, "paired")
-	} else if _, err := os.Stat(filepath.Join(dir, ".pairing-staging")); err == nil {
-		return s, errors.New("incomplete pairing: staged state requires recovery")
+	if err := os.RemoveAll(filepath.Join(dir, ".pairing-staging")); err != nil {
+		return s, err
 	}
-	private, err := os.ReadFile(filepath.Join(base, "identity.key"))
+	if _, err := os.Stat(filepath.Join(dir, ".pairing-complete")); err != nil {
+		return s, errors.New("incomplete pairing: completion marker missing")
+	}
+	private, err := os.ReadFile(filepath.Join(dir, "identity.key"))
 	if err != nil {
 		return s, err
 	}
 	if len(private) != ed25519.PrivateKeySize {
 		return s, errors.New("invalid gateway identity")
 	}
-	secret, err := os.ReadFile(filepath.Join(base, "secret.bin"))
+	secret, err := os.ReadFile(filepath.Join(dir, "secret.bin"))
 	if err != nil {
 		return s, err
 	}
 	if len(secret) != 32 {
 		return s, errors.New("invalid volume secret")
 	}
-	b, err := os.ReadFile(filepath.Join(base, "pins.json"))
+	b, err := os.ReadFile(filepath.Join(dir, "pins.json"))
 	if err != nil {
 		return s, err
 	}

@@ -15,6 +15,7 @@ import (
 
 	"github.com/aidotmarket/aim-data-gateway/internal/audit"
 	"github.com/aidotmarket/aim-data-gateway/internal/pairing"
+	"github.com/aidotmarket/aim-data-gateway/internal/profile"
 	"github.com/aidotmarket/aim-data-gateway/internal/wire"
 	"github.com/coder/websocket"
 )
@@ -126,6 +127,119 @@ func TestBlockedScanDoesNotBlockReceiptDelivery(t *testing.T) {
 	_ = c.Connect(ctx)
 }
 
+func TestControlPassesBlockedDescription(t *testing.T) {
+	c, _ := fixture(t)
+	key := ed25519.NewKeyFromSeed(bytesRepeat(0x42, 32))
+	c.State.Pins.ListingKeys = []wire.Key{{KID: "listing", Alg: "EdDSA", Key: base64.RawURLEncoding.EncodeToString(key.Public().(ed25519.PublicKey))}}
+	started := make(chan struct{})
+	c.Handle = func(ctx context.Context, i wire.Instruction, _, _ string) (string, any, error) {
+		if i.Op == "describe" {
+			close(started)
+			<-ctx.Done()
+			return "", nil, ctx.Err()
+		}
+		return "offer_ack", wire.OfferAck{IID: i.IID, FileID: i.FileID, Ready: true}, nil
+	}
+	now := time.Now().Unix()
+	base := wire.Instruction{Audience: c.State.Pins.GatewayID, IID: "44444444-4444-4444-8444-444444444444", IssuedAt: now, FileID: "0123456789abcdef0123456789abcdef"}
+	d := base
+	d.Op, d.ExpiresAt, d.ConfirmationID = "describe", now+900, "33333333-3333-4333-8333-333333333333"
+	o := base
+	o.Op, o.IID, o.SHA256, o.ListingVersionID = "offer", "55555555-5555-4555-8555-555555555555", strings.Repeat("a", 64), "33333333-3333-4333-8333-333333333333"
+	dToken, err := wire.Sign("aim-describe+jwt", "listing", d, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oToken, err := wire.Sign("aim-offer+jwt", "listing", o, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := server(t, func(ctx context.Context, ws *websocket.Conn) {
+		_ = ws.Write(ctx, websocket.MessageText, []byte(`{"resume":{"seq":0,"entry_hash":""}}`))
+		for range 2 {
+			_, _, _ = ws.Read(ctx)
+		}
+		_ = ws.Write(ctx, websocket.MessageText, []byte(dToken))
+		<-started
+		_ = ws.Write(ctx, websocket.MessageText, []byte(oToken))
+		_, raw, e := ws.Read(ctx)
+		if e != nil {
+			t.Error(e)
+			return
+		}
+		var entry audit.Entry
+		if json.Unmarshal(raw, &entry) != nil || entry.MessageType != "offer_ack" {
+			t.Errorf("control blocked: %s", raw)
+		}
+		_ = ws.Close(websocket.StatusNormalClosure, "done")
+	})
+	defer s.Close()
+	c.URL = "ws" + strings.TrimPrefix(s.URL, "http")
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	defer cancel()
+	_ = c.Connect(ctx)
+}
+
+func TestSuccessorUsesRotatedPin(t *testing.T) {
+	c, _ := fixture(t)
+	oldKey := ed25519.NewKeyFromSeed(bytesRepeat(0x41, 32))
+	newKey := ed25519.NewKeyFromSeed(bytesRepeat(0x42, 32))
+	oldPin := wire.Key{KID: "old", Alg: "EdDSA", Key: base64.RawURLEncoding.EncodeToString(oldKey.Public().(ed25519.PublicKey))}
+	newPin := wire.Key{KID: "new", Alg: "EdDSA", Key: base64.RawURLEncoding.EncodeToString(newKey.Public().(ed25519.PublicKey))}
+	var mu sync.RWMutex
+	c.State.Pins.ListingKeys = []wire.Key{oldPin}
+	c.PinsSnapshot = func() pairing.Pins {
+		mu.RLock()
+		defer mu.RUnlock()
+		p := c.State.Pins
+		p.ListingKeys = append([]wire.Key(nil), p.ListingKeys...)
+		return p
+	}
+	c.Handle = func(_ context.Context, i wire.Instruction, _, _ string) (string, any, error) {
+		if i.Op == "key_rotation" {
+			mu.Lock()
+			c.State.Pins.ListingKeys = append(c.State.Pins.ListingKeys, newPin)
+			mu.Unlock()
+			return "", nil, nil
+		}
+		return "offer_ack", wire.OfferAck{IID: i.IID, FileID: i.FileID, Ready: true}, nil
+	}
+	now := time.Now().Unix()
+	rotation := wire.Instruction{Op: "key_rotation", Audience: c.State.Pins.GatewayID, IID: "44444444-4444-4444-8444-444444444444", IssuedAt: now, Keys: []wire.Key{newPin}}
+	offer := wire.Instruction{Op: "offer", Audience: c.State.Pins.GatewayID, IID: "55555555-5555-4555-8555-555555555555", IssuedAt: now, FileID: "0123456789abcdef0123456789abcdef", SHA256: strings.Repeat("a", 64), ListingVersionID: "33333333-3333-4333-8333-333333333333"}
+	rToken, err := wire.Sign("aim-keys+jwt", "old", rotation, oldKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oToken, err := wire.Sign("aim-offer+jwt", "new", offer, newKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := server(t, func(ctx context.Context, ws *websocket.Conn) {
+		_ = ws.Write(ctx, websocket.MessageText, []byte(`{"resume":{"seq":0,"entry_hash":""}}`))
+		for range 2 {
+			_, _, _ = ws.Read(ctx)
+		}
+		_ = ws.Write(ctx, websocket.MessageText, []byte(rToken))
+		_ = ws.Write(ctx, websocket.MessageText, []byte(oToken))
+		_, raw, e := ws.Read(ctx)
+		if e != nil {
+			t.Error(e)
+			return
+		}
+		var entry audit.Entry
+		if json.Unmarshal(raw, &entry) != nil || entry.MessageType != "offer_ack" {
+			t.Errorf("successor rejected: %s", raw)
+		}
+		_ = ws.Close(websocket.StatusNormalClosure, "done")
+	})
+	defer s.Close()
+	c.URL = "ws" + strings.TrimPrefix(s.URL, "http")
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	defer cancel()
+	_ = c.Connect(ctx)
+}
+
 func TestDuplicateControlKeysRejected(t *testing.T) {
 	for _, raw := range []string{`{"ack":1,"ack":2}`, `{"nonce":"` + strings.Repeat("a", 64) + `","nonce":"` + strings.Repeat("b", 64) + `"}`, `{"resume":{"seq":0,"seq":1,"entry_hash":""}}`} {
 		if kind, _, _ := parseControl([]byte(raw)); kind != "" {
@@ -138,7 +252,7 @@ func TestDescribeFailureCodeInAudit(t *testing.T) {
 	key := ed25519.NewKeyFromSeed(bytesRepeat(0x42, 32))
 	c.State.Pins.ListingKeys = []wire.Key{{KID: "listing", Alg: "EdDSA", Key: base64.RawURLEncoding.EncodeToString(key.Public().(ed25519.PublicKey))}}
 	c.Handle = func(context.Context, wire.Instruction, string, string) (string, any, error) {
-		return "", nil, errors.New("unsupported_format")
+		return "", nil, profile.ErrUnsupportedFormat
 	}
 	c.Complete = func(context.Context, string) error { t.Error("failed description was marked seen"); return nil }
 	now := time.Now().Unix()
@@ -337,7 +451,7 @@ func TestForgedAckCorrectedByNextResume(t *testing.T) {
 	var mu sync.Mutex
 	marked := map[uint64]bool{}
 	c.Delivered = func(_ context.Context, e audit.Entry) error { mu.Lock(); marked[e.Seq] = true; mu.Unlock(); return nil }
-	c.Reconcile = func(_ context.Context, seq uint64, _ []audit.Entry) error {
+	c.Reconcile = func(_ context.Context, seq uint64) error {
 		mu.Lock()
 		defer mu.Unlock()
 		for k := range marked {

@@ -34,6 +34,7 @@ type Gateway struct {
 	Log             *audit.Log
 	previous        []inventory.Record
 	generation      uint64
+	inventoryMu     sync.RWMutex
 	keyMu           sync.RWMutex
 	permissionKeys  map[string]ed25519.PublicKey
 	unmarkedReceipt uint64
@@ -112,18 +113,23 @@ func (g *Gateway) Scan(ctx context.Context) error {
 			return err
 		}
 	}
+	g.inventoryMu.Lock()
 	g.generation++
-	for _, batch := range inventory.Batches(records, g.generation) {
+	generation := g.generation
+	g.inventoryMu.Unlock()
+	for _, batch := range inventory.Batches(records, generation) {
 		if _, err = g.Log.Append("inventory", batch); err != nil {
 			return err
 		}
 	}
+	g.inventoryMu.Lock()
 	g.previous = g.previous[:0]
 	for _, r := range records {
 		if r.Phase1.Present {
 			g.previous = append(g.previous, r)
 		}
 	}
+	g.inventoryMu.Unlock()
 	return nil
 }
 
@@ -173,7 +179,7 @@ func (g *Gateway) Delivered(ctx context.Context, entry audit.Entry) error {
 	}
 	return g.Ledger.MarkReceiptDelivered(ctx, receipt.Seq)
 }
-func (g *Gateway) Reconcile(ctx context.Context, seq uint64, entries []audit.Entry) error {
+func (g *Gateway) Reconcile(ctx context.Context, seq uint64) error {
 	return g.Ledger.ReconcileReceipts(ctx, seq)
 }
 
@@ -208,12 +214,18 @@ func (g *Gateway) Handle(ctx context.Context, i wire.Instruction, class, signer 
 		ack.Ready = true
 		return "offer_ack", ack, nil
 	case "describe":
-		for _, r := range g.previous {
+		g.inventoryMu.RLock()
+		previous := append([]inventory.Record(nil), g.previous...)
+		g.inventoryMu.RUnlock()
+		for _, r := range previous {
 			if r.Phase1.FileID != i.FileID {
 				continue
 			}
 			profileCtx, cancel := context.WithTimeout(ctx, 30*time.Minute)
 			d, e := profile.FileContext(profileCtx, r, g.Config.ColumnRule(r.Source, r.RelativePath))
+			if profileCtx.Err() != nil {
+				e = profile.ErrGatewayTimeout
+			}
 			cancel()
 			if e != nil {
 				return "", nil, e
@@ -306,9 +318,6 @@ func (g *Gateway) savePins(pins pairing.Pins) error {
 		return err
 	}
 	path := filepath.Join(g.Dir, "pins.json")
-	if _, err := os.Stat(filepath.Join(g.Dir, "paired")); err == nil {
-		path = filepath.Join(g.Dir, "paired", "pins.json")
-	}
 	f, err := os.OpenFile(path+".tmp", os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
 	if err != nil {
 		return err

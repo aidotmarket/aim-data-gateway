@@ -49,6 +49,8 @@ type Log struct {
 	rotations []rotation
 	cursor    cursor
 	last      Entry
+	syncDir   func(string) error
+	failed    error
 }
 type rotation struct {
 	first uint64
@@ -64,10 +66,16 @@ func Open(dir string, private ed25519.PrivateKey) (*Log, error) {
 	if len(private) != ed25519.PrivateKeySize {
 		return nil, errors.New("invalid key")
 	}
+	_, statErr := os.Stat(dir)
 	if e := os.MkdirAll(dir, 0700); e != nil {
 		return nil, e
 	}
-	l := &Log{dir: dir, private: private}
+	if errors.Is(statErr, os.ErrNotExist) {
+		if e := syncDirectory(filepath.Dir(dir)); e != nil {
+			return nil, e
+		}
+	}
+	l := &Log{dir: dir, private: private, syncDir: syncDirectory}
 	files, e := filepath.Glob(filepath.Join(dir, "*.jsonl"))
 	if e != nil {
 		return nil, e
@@ -123,6 +131,9 @@ func (l *Log) Append(messageType string, body any) (Entry, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	var entry Entry
+	if l.failed != nil {
+		return entry, l.failed
+	}
 	if !allowed(messageType) {
 		return entry, errors.New("unknown message type")
 	}
@@ -159,10 +170,18 @@ func (l *Log) Append(messageType string, body any) (Entry, error) {
 	}
 	ce := f.Close()
 	if e != nil {
+		l.failed = e
 		return Entry{}, e
 	}
 	if ce != nil {
+		l.failed = ce
 		return Entry{}, ce
+	}
+	if newRotation {
+		if e = l.syncDir(l.dir); e != nil {
+			l.failed = e
+			return Entry{}, e
+		}
 	}
 	if newRotation {
 		l.rotations = append(l.rotations, rotation{l.seq + 1, path})
@@ -175,7 +194,14 @@ func (l *Log) Append(messageType string, body any) (Entry, error) {
 	return entry, nil
 }
 func (l *Log) Sequence() uint64 { l.mu.Lock(); defer l.mu.Unlock(); return l.seq }
-func (l *Log) LastHash() string { l.mu.Lock(); defer l.mu.Unlock(); return l.prev }
+func syncDirectory(path string) error {
+	d, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer d.Close()
+	return d.Sync()
+}
 
 // Read starts at the matching rotation, or at the previous read's byte offset.
 // History memory is bounded by the number of rotations, not entries.

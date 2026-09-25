@@ -61,13 +61,13 @@ func TestReceiptOutboxAckAndResume(t *testing.T) {
 	if err = g.Ledger.DB.QueryRow(`SELECT sent_at FROM receipts_outbox WHERE seq=1`).Scan(&sent); err != nil || sent == nil {
 		t.Fatalf("ack did not deliver: %v %v", sent, err)
 	}
-	if err = g.Reconcile(ctx, 0, entries); err != nil {
+	if err = g.Reconcile(ctx, 0); err != nil {
 		t.Fatal(err)
 	}
 	if err = g.Ledger.DB.QueryRow(`SELECT sent_at FROM receipts_outbox WHERE seq=1`).Scan(&sent); err != nil || sent != nil {
 		t.Fatalf("forged ack not corrected: %v %v", sent, err)
 	}
-	if err = g.Reconcile(ctx, 1, entries); err != nil {
+	if err = g.Reconcile(ctx, 1); err != nil {
 		t.Fatal(err)
 	}
 	if err = g.Ledger.DB.QueryRow(`SELECT sent_at FROM receipts_outbox WHERE seq=1`).Scan(&sent); err != nil || sent == nil {

@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 
 	_ "github.com/aidotmarket/aim-data-gateway/internal/builddeps"
 	"github.com/aidotmarket/aim-data-gateway/internal/config"
@@ -73,7 +74,7 @@ func execute(args []string) error {
 	}
 	secretPath := os.Getenv("AIM_GATEWAY_SECRET")
 	if secretPath == "" {
-		secretPath = "/state/secret.bin"
+		secretPath = filepath.Join(gateway.StateDir(), "secret.bin")
 	}
 	secret, e := os.ReadFile(secretPath)
 	if e != nil {

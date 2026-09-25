@@ -2,11 +2,50 @@ package audit
 
 import (
 	"crypto/ed25519"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+func TestDirectorySyncGatesAppend(t *testing.T) {
+	for _, rotate := range []bool{false, true} {
+		key := ed25519.NewKeyFromSeed(make([]byte, 32))
+		dir := t.TempDir()
+		l, err := Open(dir, key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if rotate {
+			if _, err = l.Append("inventory", map[string]int{"generation": 1}); err != nil {
+				t.Fatal(err)
+			}
+			l.syncDir = func(string) error { t.Fatal("existing audit file synced directory"); return nil }
+			if _, err = l.Append("inventory", map[string]int{"generation": 2}); err != nil {
+				t.Fatal(err)
+			}
+			l.size = RotationBytes - 1
+		}
+		called := 0
+		l.syncDir = func(path string) error {
+			if path != dir {
+				t.Fatalf("synced %s", path)
+			}
+			called++
+			return errors.New("directory sync failed")
+		}
+		if _, err = l.Append("inventory", map[string]int{"generation": 2}); err == nil {
+			t.Fatal("append reported durable before directory sync")
+		}
+		if called != 1 {
+			t.Fatalf("directory sync calls: %d", called)
+		}
+		if _, err = l.Append("inventory", map[string]int{"generation": 3}); err == nil {
+			t.Fatal("uncertain log accepted another append")
+		}
+	}
+}
 
 func TestChainAcrossRotationAndTamper(t *testing.T) {
 	key := ed25519.NewKeyFromSeed(make([]byte, 32))

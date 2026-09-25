@@ -156,6 +156,10 @@ func File(r inventory.Record, rule config.Columns) (Description, error) {
 	defer cancel()
 	return FileContext(ctx, r, rule)
 }
+
+var ErrUnsupportedFormat = errors.New("unsupported_format")
+var ErrGatewayTimeout = errors.New("gateway_timeout")
+
 func FileContext(ctx context.Context, r inventory.Record, rule config.Columns) (Description, error) {
 	if e := checkDeadline(ctx); e != nil {
 		return Description{}, e
@@ -169,12 +173,12 @@ func FileContext(ctx context.Context, r inventory.Record, rule config.Columns) (
 	case "application/vnd.apache.parquet":
 		return parquetFile(ctx, r, rule, sha)
 	default:
-		return Description{}, errors.New("unsupported_format")
+		return Description{}, ErrUnsupportedFormat
 	}
 }
 func checkDeadline(ctx context.Context) error {
 	if ctx.Err() != nil {
-		return errors.New("gateway_timeout")
+		return ErrGatewayTimeout
 	}
 	return nil
 }

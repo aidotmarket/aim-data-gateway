@@ -42,13 +42,16 @@ func TestPairSingleUse(t *testing.T) {
 		t.Fatal("incomplete state")
 	}
 	for _, name := range []string{"identity.key", "secret.bin", "pins.json"} {
-		st, err := os.Stat(filepath.Join(dir, "paired", name))
+		st, err := os.Stat(filepath.Join(dir, name))
 		if err != nil {
 			t.Fatal(err)
 		}
 		if st.Mode().Perm() != 0600 {
 			t.Fatalf("%s mode %v", name, st.Mode())
 		}
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".pairing-complete")); err != nil {
+		t.Fatal(err)
 	}
 	if _, err := Load(dir); err != nil {
 		t.Fatal(err)
@@ -74,8 +77,20 @@ func TestPartialPairingIsDistinctFromPaired(t *testing.T) {
 		if _, err := Load(dir); err == nil || !strings.Contains(err.Error(), "incomplete pairing") {
 			t.Fatalf("%s: %v", name, err)
 		}
-		if _, err := Pair(context.Background(), dir, "unused", "1", "http://invalid", http.DefaultClient); err == nil || !strings.Contains(err.Error(), "incomplete pairing") {
-			t.Fatalf("%s: %v", name, err)
+		if _, err := os.Stat(stage); !os.IsNotExist(err) {
+			t.Fatalf("staging not cleaned: %v", err)
 		}
+		if err := os.Mkdir(stage, 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(dir, "identity.key"), []byte("partial"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(dir); err == nil || !strings.Contains(err.Error(), "incomplete pairing") {
+		t.Fatalf("published partial state accepted: %v", err)
+	}
+	if _, err := Pair(context.Background(), dir, "unused", "1", "http://invalid", http.DefaultClient); err == nil {
+		t.Fatal("partial root state accepted for pairing")
 	}
 }

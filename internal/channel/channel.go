@@ -18,6 +18,7 @@ import (
 
 	"github.com/aidotmarket/aim-data-gateway/internal/audit"
 	"github.com/aidotmarket/aim-data-gateway/internal/pairing"
+	"github.com/aidotmarket/aim-data-gateway/internal/profile"
 	"github.com/aidotmarket/aim-data-gateway/internal/wire"
 	"github.com/coder/websocket"
 )
@@ -43,16 +44,22 @@ type Client struct {
 	Poll func(context.Context) error
 	// Delivered marks an outbox receipt after ack or a later resume.
 	Delivered      func(context.Context, audit.Entry) error
-	Reconcile      func(context.Context, uint64, []audit.Entry) error
+	Reconcile      func(context.Context, uint64) error
 	sent           uint64
 	heartbeatEvery time.Duration
 }
 
-func (c *Client) keys(class string) (map[string]ed25519.PublicKey, error) {
-	pinned := c.State.Pins
+func (c *Client) pinned() pairing.Pins {
 	if c.PinsSnapshot != nil {
-		pinned = c.PinsSnapshot()
+		return c.PinsSnapshot()
 	}
+	return c.State.Pins
+}
+
+func (c *Client) keys(class string) (map[string]ed25519.PublicKey, error) {
+	return keys(c.pinned(), class)
+}
+func keys(pinned pairing.Pins, class string) (map[string]ed25519.PublicKey, error) {
 	var pins []wire.Key
 	if class == "permission" {
 		pins = pinned.PermissionKeys
@@ -77,6 +84,7 @@ func (c *Client) keys(class string) (map[string]ed25519.PublicKey, error) {
 }
 
 func (c *Client) verify(token string) (wire.Instruction, string, string, error) {
+	pinned := c.pinned()
 	var i wire.Instruction
 	parts := strings.Split(token, ".")
 	if len(parts) != 3 {
@@ -104,7 +112,7 @@ func (c *Client) verify(token string) (wire.Instruction, string, string, error) 
 	if class == "outgoing" {
 		// A rotation may be signed by either outgoing key class.
 		for _, kind := range []string{"listing", "permission"} {
-			keys, e := c.keys(kind)
+			keys, e := keys(pinned, kind)
 			if e == nil {
 				if i, e = wire.VerifyInstruction(token, keys); e == nil {
 					class = kind
@@ -116,7 +124,7 @@ func (c *Client) verify(token string) (wire.Instruction, string, string, error) 
 			}
 		}
 	} else {
-		keys, e := c.keys(class)
+		keys, e := keys(pinned, class)
 		if e != nil {
 			return i, "", "", e
 		}
@@ -125,7 +133,7 @@ func (c *Client) verify(token string) (wire.Instruction, string, string, error) 
 	if err != nil {
 		return i, "", "", err
 	}
-	if i.Audience != c.State.Pins.GatewayID {
+	if i.Audience != pinned.GatewayID {
 		return i, "", "", errors.New("wrong instruction audience")
 	}
 	return i, class, header.KID, nil
@@ -192,13 +200,6 @@ func uniqueObject(raw []byte) (map[string]json.RawMessage, error) {
 	return out, nil
 }
 
-func (c *Client) appendAndSend(ctx context.Context, ws *websocket.Conn, typ string, body any) error {
-	if _, err := c.Log.Append(typ, body); err != nil {
-		return err
-	}
-	return c.sendNew(ctx, ws)
-}
-
 // sendNew sends each local sequence at most once on this connection.
 func (c *Client) sendNew(ctx context.Context, ws *websocket.Conn) error {
 	for c.sent < c.Log.Sequence() {
@@ -243,7 +244,7 @@ func (c *Client) Connect(ctx context.Context) error {
 		if kind != "nonce" {
 			continue
 		}
-		hello, err := wire.Sign("aim-hello+jwt", "gateway", wire.Hello{GatewayID: c.State.Pins.GatewayID, Nonce: nonce, Version: c.Version, Time: time.Now().UTC().Format(time.RFC3339Nano)}, c.State.Private)
+		hello, err := wire.Sign("aim-hello+jwt", "gateway", wire.Hello{GatewayID: c.pinned().GatewayID, Nonce: nonce, Version: c.Version, Time: time.Now().UTC().Format(time.RFC3339Nano)}, c.State.Private)
 		if err != nil {
 			return err
 		}
@@ -283,7 +284,7 @@ func (c *Client) Connect(ctx context.Context) error {
 	}
 	// Reconcile delivery from the authoritative resume, then replay before new work.
 	if c.Reconcile != nil {
-		if err = c.Reconcile(ctx, resume, nil); err != nil {
+		if err = c.Reconcile(ctx, resume); err != nil {
 			return err
 		}
 	}
@@ -294,14 +295,15 @@ func (c *Client) Connect(ctx context.Context) error {
 	workCtx, stopWork := context.WithCancel(ctx)
 	defer stopWork()
 	jobs := make(chan func() error, 64)
+	descriptions := make(chan func() error, 64)
 	wake := make(chan struct{}, 1)
 	workErr := make(chan error, 1)
-	go func() {
+	worker := func(lane <-chan func() error) {
 		for {
 			select {
 			case <-workCtx.Done():
 				return
-			case job := <-jobs:
+			case job := <-lane:
 				if e := job(); e != nil {
 					select {
 					case workErr <- e:
@@ -315,19 +317,57 @@ func (c *Client) Connect(ctx context.Context) error {
 				}
 			}
 		}
-	}()
-	queue := func(job func() error) error {
+	}
+	go worker(jobs)
+	go worker(descriptions)
+	queue := func(lane chan<- func() error, job func() error) error {
 		select {
-		case jobs <- job:
+		case lane <- job:
 			return nil
 		default:
 			return errors.New("channel work queue full")
 		}
 	}
 	if c.Scan != nil {
-		if err = queue(func() error { return c.Scan(workCtx) }); err != nil {
+		if err = queue(jobs, func() error { return c.Scan(workCtx) }); err != nil {
 			return err
 		}
+	}
+	process := func(i wire.Instruction, class, signer string) error {
+		if c.Handle == nil {
+			return nil
+		}
+		typ, body, e := c.Handle(workCtx, i, class, signer)
+		if workCtx.Err() != nil {
+			return workCtx.Err()
+		}
+		failed := e != nil
+		if e != nil {
+			log.Printf("gateway instruction failed: %v", e)
+			code := "instruction_failed"
+			if i.Op == "describe" {
+				code = "read_error"
+				if errors.Is(e, profile.ErrUnsupportedFormat) {
+					code = "unsupported_format"
+				}
+				if errors.Is(e, profile.ErrGatewayTimeout) || errors.Is(e, context.DeadlineExceeded) {
+					code = "gateway_timeout"
+				}
+			}
+			typ, body = "error", wire.GatewayError{Code: code, Message: code}
+		}
+		if typ != "" {
+			if _, e = c.Log.Append(typ, body); e != nil {
+				return e
+			}
+		}
+		if failed {
+			return nil
+		}
+		if c.Complete != nil {
+			return c.Complete(workCtx, i.IID)
+		}
+		return nil
 	}
 	reads := make(chan []byte)
 	errorsCh := make(chan error, 1)
@@ -385,7 +425,7 @@ func (c *Client) Connect(ctx context.Context) error {
 			}
 		case <-scan.C:
 			if c.Scan != nil {
-				if err = queue(func() error { return c.Scan(workCtx) }); err != nil {
+				if err = queue(jobs, func() error { return c.Scan(workCtx) }); err != nil {
 					return err
 				}
 			}
@@ -406,47 +446,17 @@ func (c *Client) Connect(ctx context.Context) error {
 			if len(raw) == 0 || raw[0] == '{' {
 				continue
 			}
-			i, class, signer, e := c.verify(string(raw))
-			if e != nil {
-				log.Printf("invalid gateway instruction: %v", e)
-				continue
-			}
-			if c.Handle == nil {
-				continue
-			}
-			if err = queue(func() error {
-				typ, body, e := c.Handle(workCtx, i, class, signer)
-				if workCtx.Err() != nil {
-					return workCtx.Err()
-				}
-				failed := e != nil
+			token := string(raw)
+			if err = queue(jobs, func() error {
+				i, class, signer, e := c.verify(token)
 				if e != nil {
-					log.Printf("gateway instruction failed: %v", e)
-					code := "instruction_failed"
-					if i.Op == "describe" {
-						code = "read_error"
-						if strings.Contains(e.Error(), "unsupported_format") {
-							code = "unsupported_format"
-						}
-						if strings.Contains(e.Error(), "gateway_timeout") || workCtx.Err() != nil {
-							code = "gateway_timeout"
-						}
-					}
-					typ, body = "error", wire.GatewayError{Code: code, Message: code}
-				}
-				if typ != "" {
-					_, e = c.Log.Append(typ, body)
-					if e != nil {
-						return e
-					}
-				}
-				if failed {
+					log.Printf("invalid gateway instruction: %v", e)
 					return nil
 				}
-				if c.Complete != nil {
-					return c.Complete(workCtx, i.IID)
+				if i.Op == "describe" {
+					return queue(descriptions, func() error { return process(i, class, signer) })
 				}
-				return e
+				return process(i, class, signer)
 			}); err != nil {
 				return err
 			}
