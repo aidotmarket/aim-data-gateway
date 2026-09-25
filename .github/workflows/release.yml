@@ -71,8 +71,9 @@ jobs:
         env:
           DIGEST: ${{ steps.build.outputs.digest }}
         run: |
-          docker logout ghcr.io
-          if ! docker manifest inspect "ghcr.io/aidotmarket/aim-gateway@$DIGEST" > /dev/null; then
+          anonymous_docker_config="$(mktemp -d)"
+          trap 'rm -rf "$anonymous_docker_config"' EXIT
+          if ! DOCKER_CONFIG="$anonymous_docker_config" docker manifest inspect "ghcr.io/aidotmarket/aim-gateway@$DIGEST" > /dev/null; then
             echo '::error::Anonymous GHCR pull failed. An aidotmarket org admin must make the ghcr.io/aidotmarket/aim-gateway package public, then rerun this release workflow.'
             exit 1
           fi
