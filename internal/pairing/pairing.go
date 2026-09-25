@@ -50,6 +50,9 @@ func Pair(ctx context.Context, dir, code, version, url string, client *http.Clie
 		return State{}, err
 	}
 	if len(entries) != 0 {
+		if _, err := os.Stat(filepath.Join(dir, ".pairing-staging")); err == nil {
+			return State{}, errors.New("incomplete pairing: staged state requires recovery")
+		}
 		return State{}, errors.New("pairing requires an empty state volume")
 	}
 	public, private, err := ed25519.GenerateKey(rand.Reader)
@@ -98,34 +101,73 @@ func Pair(ctx context.Context, dir, code, version, url string, client *http.Clie
 	if err != nil {
 		return State{}, err
 	}
+	stage := filepath.Join(dir, ".pairing-staging")
+	if err = os.Mkdir(stage, 0700); err != nil {
+		return State{}, err
+	}
 	for _, file := range []struct {
 		name string
 		data []byte
 	}{{"identity.key", private}, {"secret.bin", secret}, {"pins.json", pinsRaw}} {
-		if err = os.WriteFile(filepath.Join(dir, file.name), file.data, 0600); err != nil {
+		f, openErr := os.OpenFile(filepath.Join(stage, file.name), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+		if openErr != nil {
+			return State{}, openErr
+		}
+		_, err = f.Write(file.data)
+		if err == nil {
+			err = f.Sync()
+		}
+		closeErr := f.Close()
+		if err == nil {
+			err = closeErr
+		}
+		if err != nil {
 			return State{}, err
 		}
 	}
+	if err = syncDirectory(stage); err != nil {
+		return State{}, err
+	}
+	if err = os.Rename(stage, filepath.Join(dir, "paired")); err != nil {
+		return State{}, err
+	}
+	if err = syncDirectory(dir); err != nil {
+		return State{}, err
+	}
 	return State{private, secret, pins}, nil
+}
+func syncDirectory(path string) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	return f.Sync()
 }
 
 func Load(dir string) (State, error) {
 	var s State
-	private, err := os.ReadFile(filepath.Join(dir, "identity.key"))
+	base := dir
+	if _, err := os.Stat(filepath.Join(dir, "paired")); err == nil {
+		base = filepath.Join(dir, "paired")
+	} else if _, err := os.Stat(filepath.Join(dir, ".pairing-staging")); err == nil {
+		return s, errors.New("incomplete pairing: staged state requires recovery")
+	}
+	private, err := os.ReadFile(filepath.Join(base, "identity.key"))
 	if err != nil {
 		return s, err
 	}
 	if len(private) != ed25519.PrivateKeySize {
 		return s, errors.New("invalid gateway identity")
 	}
-	secret, err := os.ReadFile(filepath.Join(dir, "secret.bin"))
+	secret, err := os.ReadFile(filepath.Join(base, "secret.bin"))
 	if err != nil {
 		return s, err
 	}
 	if len(secret) != 32 {
 		return s, errors.New("invalid volume secret")
 	}
-	b, err := os.ReadFile(filepath.Join(dir, "pins.json"))
+	b, err := os.ReadFile(filepath.Join(base, "pins.json"))
 	if err != nil {
 		return s, err
 	}

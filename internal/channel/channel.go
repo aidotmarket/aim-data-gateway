@@ -1,12 +1,14 @@
 package channel
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"math/rand/v2"
 	"net/http"
@@ -26,33 +28,40 @@ const maxMessage = 1 << 20
 var hex64 = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
 type Client struct {
-	URL        string
-	HTTPClient *http.Client
-	State      *pairing.State
-	Log        *audit.Log
-	Version    string
+	URL          string
+	HTTPClient   *http.Client
+	State        *pairing.State
+	PinsSnapshot func() pairing.Pins
+	Log          *audit.Log
+	Version      string
 	// Handle processes a verified, unseen instruction and returns an audit answer.
-	Handle func(context.Context, wire.Instruction, string, string) (string, any, error)
+	Handle   func(context.Context, wire.Instruction, string, string) (string, any, error)
+	Complete func(context.Context, string) error
 	// Scan appends an inventory generation after each successful resume.
 	Scan func(context.Context) error
 	// Poll appends any newly queued receipts, returning their local audit sequences.
 	Poll func(context.Context) error
 	// Delivered marks an outbox receipt after ack or a later resume.
-	Delivered func(context.Context, audit.Entry) error
-	Reconcile func(context.Context, uint64, []audit.Entry) error
-	sent      uint64
+	Delivered      func(context.Context, audit.Entry) error
+	Reconcile      func(context.Context, uint64, []audit.Entry) error
+	sent           uint64
+	heartbeatEvery time.Duration
 }
 
 func (c *Client) keys(class string) (map[string]ed25519.PublicKey, error) {
+	pinned := c.State.Pins
+	if c.PinsSnapshot != nil {
+		pinned = c.PinsSnapshot()
+	}
 	var pins []wire.Key
 	if class == "permission" {
-		pins = c.State.Pins.PermissionKeys
+		pins = pinned.PermissionKeys
 	} else {
-		pins = c.State.Pins.ListingKeys
+		pins = pinned.ListingKeys
 	}
 	out := make(map[string]ed25519.PublicKey, len(pins))
 	for _, p := range pins {
-		if at := c.State.Pins.KeyExpires[p.KID]; at != "" {
+		if at := pinned.KeyExpires[p.KID]; at != "" {
 			deadline, err := time.Parse(time.RFC3339Nano, at)
 			if err != nil || !time.Now().Before(deadline) {
 				continue
@@ -123,8 +132,8 @@ func (c *Client) verify(token string) (wire.Instruction, string, string, error) 
 }
 
 func parseControl(raw []byte) (kind string, seq uint64, hash string) {
-	var obj map[string]json.RawMessage
-	if json.Unmarshal(raw, &obj) != nil || len(obj) != 1 {
+	obj, err := uniqueObject(raw)
+	if err != nil || len(obj) != 1 {
 		return "", 0, ""
 	}
 	if value, ok := obj["nonce"]; ok {
@@ -134,8 +143,8 @@ func parseControl(raw []byte) (kind string, seq uint64, hash string) {
 		}
 	}
 	if value, ok := obj["resume"]; ok {
-		var fields map[string]json.RawMessage
-		if json.Unmarshal(value, &fields) != nil || len(fields) != 2 {
+		fields, err := uniqueObject(value)
+		if err != nil || len(fields) != 2 {
 			return "", 0, ""
 		}
 		if json.Unmarshal(fields["seq"], &seq) != nil || json.Unmarshal(fields["entry_hash"], &hash) != nil {
@@ -152,6 +161,36 @@ func parseControl(raw []byte) (kind string, seq uint64, hash string) {
 	}
 	return "", 0, ""
 }
+func uniqueObject(raw []byte) (map[string]json.RawMessage, error) {
+	d := json.NewDecoder(bytes.NewReader(raw))
+	t, err := d.Token()
+	if err != nil || t != json.Delim('{') {
+		return nil, errors.New("invalid control object")
+	}
+	out := make(map[string]json.RawMessage)
+	for d.More() {
+		t, err = d.Token()
+		if err != nil {
+			return nil, err
+		}
+		key, ok := t.(string)
+		if !ok || out[key] != nil {
+			return nil, errors.New("duplicate control key")
+		}
+		var value json.RawMessage
+		if err = d.Decode(&value); err != nil {
+			return nil, err
+		}
+		out[key] = value
+	}
+	if _, err = d.Token(); err != nil {
+		return nil, err
+	}
+	if _, err = d.Token(); err != io.EOF {
+		return nil, errors.New("trailing control data")
+	}
+	return out, nil
+}
 
 func (c *Client) appendAndSend(ctx context.Context, ws *websocket.Conn, typ string, body any) error {
 	if _, err := c.Log.Append(typ, body); err != nil {
@@ -162,12 +201,12 @@ func (c *Client) appendAndSend(ctx context.Context, ws *websocket.Conn, typ stri
 
 // sendNew sends each local sequence at most once on this connection.
 func (c *Client) sendNew(ctx context.Context, ws *websocket.Conn) error {
-	entries, err := c.Log.Entries()
-	if err != nil {
-		return err
-	}
-	for c.sent < uint64(len(entries)) {
-		b, err := wire.Canonical(entries[c.sent])
+	for c.sent < c.Log.Sequence() {
+		entry, err := c.Log.Read(c.sent + 1)
+		if err != nil {
+			return err
+		}
+		b, err := wire.Canonical(entry)
 		if err != nil {
 			return err
 		}
@@ -213,7 +252,6 @@ func (c *Client) Connect(ctx context.Context) error {
 		}
 		break
 	}
-	var entries []audit.Entry
 	var resume uint64
 	for {
 		_, raw, err := ws.Read(handshake)
@@ -224,19 +262,19 @@ func (c *Client) Connect(ctx context.Context) error {
 		if kind != "resume" {
 			continue
 		}
-		entries, err = c.Log.Entries()
-		if err != nil {
-			return err
-		}
 		localHash := ""
-		if seq > 0 && seq <= uint64(len(entries)) {
-			localHash, err = audit.Hash(entries[seq-1])
+		if seq > 0 && seq <= c.Log.Sequence() {
+			entry, readErr := c.Log.Read(seq)
+			if readErr != nil {
+				return readErr
+			}
+			localHash, err = audit.Hash(entry)
 			if err != nil {
 				return err
 			}
 		}
-		if seq > uint64(len(entries)) || localHash != hash {
-			log.Printf("audit_divergence: server seq=%d local seq=%d", seq, len(entries))
+		if seq > c.Log.Sequence() || localHash != hash {
+			log.Printf("audit_divergence: server seq=%d local seq=%d", seq, c.Log.Sequence())
 			_ = ws.Close(websocket.StatusCode(4409), "audit_divergence")
 			return errors.New("audit_divergence")
 		}
@@ -245,7 +283,7 @@ func (c *Client) Connect(ctx context.Context) error {
 	}
 	// Reconcile delivery from the authoritative resume, then replay before new work.
 	if c.Reconcile != nil {
-		if err = c.Reconcile(ctx, resume, entries); err != nil {
+		if err = c.Reconcile(ctx, resume, nil); err != nil {
 			return err
 		}
 	}
@@ -253,19 +291,41 @@ func (c *Client) Connect(ctx context.Context) error {
 	if err = c.sendNew(ctx, ws); err != nil {
 		return err
 	}
-	if c.Scan != nil {
-		if err = c.Scan(ctx); err != nil {
-			return err
+	workCtx, stopWork := context.WithCancel(ctx)
+	defer stopWork()
+	jobs := make(chan func() error, 64)
+	wake := make(chan struct{}, 1)
+	workErr := make(chan error, 1)
+	go func() {
+		for {
+			select {
+			case <-workCtx.Done():
+				return
+			case job := <-jobs:
+				if e := job(); e != nil {
+					select {
+					case workErr <- e:
+					default:
+					}
+					return
+				}
+				select {
+				case wake <- struct{}{}:
+				default:
+				}
+			}
 		}
-		if err = c.sendNew(ctx, ws); err != nil {
-			return err
+	}()
+	queue := func(job func() error) error {
+		select {
+		case jobs <- job:
+			return nil
+		default:
+			return errors.New("channel work queue full")
 		}
 	}
-	if c.Poll != nil {
-		if err = c.Poll(ctx); err != nil {
-			return err
-		}
-		if err = c.sendNew(ctx, ws); err != nil {
+	if c.Scan != nil {
+		if err = queue(func() error { return c.Scan(workCtx) }); err != nil {
 			return err
 		}
 	}
@@ -289,7 +349,11 @@ func (c *Client) Connect(ctx context.Context) error {
 	defer tick.Stop()
 	scan := time.NewTicker(15 * time.Minute)
 	defer scan.Stop()
-	heartbeat := time.NewTicker(30 * time.Second)
+	interval := c.heartbeatEvery
+	if interval == 0 {
+		interval = 30 * time.Second
+	}
+	heartbeat := time.NewTicker(interval)
 	defer heartbeat.Stop()
 	for {
 		select {
@@ -297,6 +361,12 @@ func (c *Client) Connect(ctx context.Context) error {
 			return ctx.Err()
 		case err = <-errorsCh:
 			return err
+		case err = <-workErr:
+			return err
+		case <-wake:
+			if err = c.sendNew(ctx, ws); err != nil {
+				return err
+			}
 		case <-heartbeat.C:
 			pingCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 			err = ws.Ping(pingCtx)
@@ -315,22 +385,19 @@ func (c *Client) Connect(ctx context.Context) error {
 			}
 		case <-scan.C:
 			if c.Scan != nil {
-				if err = c.Scan(ctx); err != nil {
+				if err = queue(func() error { return c.Scan(workCtx) }); err != nil {
 					return err
 				}
-			}
-			if err = c.sendNew(ctx, ws); err != nil {
-				return err
 			}
 		case raw := <-reads:
 			kind, seq, _ := parseControl(raw)
 			if kind == "ack" {
 				if seq <= c.sent && c.Delivered != nil {
-					entries, err = c.Log.Entries()
-					if err != nil {
-						return err
+					entry, readErr := c.Log.Read(seq)
+					if readErr != nil {
+						return readErr
 					}
-					if err = c.Delivered(ctx, entries[seq-1]); err != nil {
+					if err = c.Delivered(ctx, entry); err != nil {
 						return err
 					}
 				}
@@ -347,15 +414,41 @@ func (c *Client) Connect(ctx context.Context) error {
 			if c.Handle == nil {
 				continue
 			}
-			typ, body, e := c.Handle(ctx, i, class, signer)
-			if e != nil {
-				log.Printf("gateway instruction failed: %v", e)
-				typ, body = "error", wire.GatewayError{Code: "instruction_failed", Message: "instruction failed"}
-			}
-			if typ != "" {
-				if err = c.appendAndSend(ctx, ws, typ, body); err != nil {
-					return err
+			if err = queue(func() error {
+				typ, body, e := c.Handle(workCtx, i, class, signer)
+				if workCtx.Err() != nil {
+					return workCtx.Err()
 				}
+				failed := e != nil
+				if e != nil {
+					log.Printf("gateway instruction failed: %v", e)
+					code := "instruction_failed"
+					if i.Op == "describe" {
+						code = "read_error"
+						if strings.Contains(e.Error(), "unsupported_format") {
+							code = "unsupported_format"
+						}
+						if strings.Contains(e.Error(), "gateway_timeout") || workCtx.Err() != nil {
+							code = "gateway_timeout"
+						}
+					}
+					typ, body = "error", wire.GatewayError{Code: code, Message: code}
+				}
+				if typ != "" {
+					_, e = c.Log.Append(typ, body)
+					if e != nil {
+						return e
+					}
+				}
+				if failed {
+					return nil
+				}
+				if c.Complete != nil {
+					return c.Complete(workCtx, i.IID)
+				}
+				return e
+			}); err != nil {
+				return err
 			}
 		}
 	}
@@ -369,7 +462,7 @@ func (c *Client) Run(ctx context.Context) error {
 			return ctx.Err()
 		}
 		log.Printf("gateway channel disconnected: %v", err)
-		delay := min(backoff/2+time.Duration(rand.Int64N(int64(backoff))), 60*time.Second)
+		delay := max(time.Second, min(backoff/2+time.Duration(rand.Int64N(int64(backoff))), 60*time.Second))
 		t := time.NewTimer(delay)
 		select {
 		case <-ctx.Done():

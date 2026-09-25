@@ -102,6 +102,18 @@ func TestFailedTerminalProgressCanCloseWithoutRestart(t *testing.T) {
 		t.Fatal("request left open")
 	}
 }
+func TestRevokeInstructionReplayKeepsOriginalAnswer(t *testing.T) {
+	l, p, _ := fixture(t, 20)
+	iid := "55555555-5555-4555-8555-555555555555"
+	first, err := l.RevokeInstruction(t.Context(), iid, p.JTI)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := l.RevokeInstruction(t.Context(), iid, p.JTI)
+	if err != nil || first != second || first.StateBefore != "active" {
+		t.Fatalf("replay answer changed: %+v %+v %v", first, second, err)
+	}
+}
 
 func TestReservationProgressSettleAndRestart(t *testing.T) {
 	ctx := context.Background()

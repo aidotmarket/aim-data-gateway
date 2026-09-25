@@ -400,6 +400,19 @@ func VerifyInstruction(token string, keys map[string]ed25519.PublicKey) (Instruc
 	if err := required(token, extra...); err != nil {
 		return i, err
 	}
+	var claims map[string]json.RawMessage
+	if err := json.Unmarshal(p, &claims); err != nil {
+		return i, err
+	}
+	allowed := map[string]bool{"op": true, "aud": true, "iid": true, "iat": true}
+	for _, name := range extra {
+		allowed[name] = true
+	}
+	for name := range claims {
+		if !allowed[name] {
+			return i, fmt.Errorf("inapplicable instruction claim %s", name)
+		}
+	}
 	return i, nil
 }
 

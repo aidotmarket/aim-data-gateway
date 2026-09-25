@@ -122,6 +122,26 @@ func TestRangesAndPermissionClosure(t *testing.T) {
 		t.Fatalf("receipt count %d, %v", n, e)
 	}
 }
+
+func TestDoorRecoversFailedTerminalProgress(t *testing.T) {
+	d, p, key, _ := setup(t)
+	if _, err := d.Ledger.DB.Exec(`CREATE TRIGGER fail_receipt BEFORE INSERT ON receipts_outbox BEGIN SELECT RAISE(FAIL, 'blocked'); END`); err != nil {
+		t.Fatal(err)
+	}
+	_ = call(t, d.Handler(), p, key, "GET", "bytes=0-2", "header")
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		var open int
+		if err := d.Ledger.DB.QueryRow(`SELECT coalesce(max(open),0) FROM requests`).Scan(&open); err != nil {
+			t.Fatal(err)
+		}
+		if open == 0 {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("door recovery left an open request")
+}
 func TestDoorRefusalsAndNoCORS(t *testing.T) {
 	d, p, key, root := setup(t)
 	h := d.Handler()

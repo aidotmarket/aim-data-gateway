@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -31,6 +32,7 @@ type Door struct {
 	PermissionKeyProvider func() map[string]ed25519.PublicKey
 	GatewayKey            ed25519.PrivateKey
 	GatewayKID            string
+	RecoveryContext       context.Context
 	Limit                 int
 	sem                   chan struct{}
 }
@@ -318,12 +320,25 @@ func (d *Door) download(w http.ResponseWriter, r *http.Request, fid string) {
 			// A failed terminal checkpoint must not strand an open request until
 			// restart. Retry conservative crash settlement after transient DB errors.
 			go func() {
-				for {
-					if d.Ledger.RecoverRequest(context.Background(), req.ID) == nil {
+				ctx := d.RecoveryContext
+				if ctx == nil {
+					ctx = context.Background()
+				}
+				for attempt := 0; attempt < 6; attempt++ {
+					if ctx.Err() != nil {
 						return
 					}
-					time.Sleep(time.Second)
+					if err := d.Ledger.RecoverRequest(ctx, req.ID); err == nil {
+						return
+					}
+					delay := min(time.Duration(1<<attempt)*time.Second, 30*time.Second)
+					select {
+					case <-ctx.Done():
+						return
+					case <-time.After(delay):
+					}
 				}
+				log.Printf("gateway request %d recovery deferred to restart", req.ID)
 			}()
 		}
 	}()

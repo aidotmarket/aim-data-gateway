@@ -4,11 +4,14 @@ import (
 	"bytes"
 	"context"
 	"crypto/ed25519"
+	"crypto/sha256"
+	"encoding/hex"
 	"os"
 	"path/filepath"
 	"testing"
 
 	"github.com/aidotmarket/aim-data-gateway/internal/config"
+	"github.com/aidotmarket/aim-data-gateway/internal/inventory"
 	"github.com/aidotmarket/aim-data-gateway/internal/pairing"
 	"github.com/aidotmarket/aim-data-gateway/internal/wire"
 )
@@ -34,6 +37,9 @@ func TestReceiptOutboxAckAndResume(t *testing.T) {
 	}
 	if err = g.Poll(ctx); err != nil {
 		t.Fatal(err)
+	}
+	if pending, err := g.Ledger.PendingReceipts(ctx); err != nil || len(pending) != 0 {
+		t.Fatalf("idle poll still walks audited receipts: %d %v", len(pending), err)
 	}
 	if err = g.Poll(ctx); err != nil {
 		t.Fatal(err)
@@ -85,5 +91,47 @@ func TestReceiptOutboxAckAndResume(t *testing.T) {
 	}
 	if _, err = os.Stat(filepath.Join(dir, "audit", "000000.jsonl")); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestOfferCrashAfterEffectBeforeSeenIsRetryable(t *testing.T) {
+	dir := t.TempDir()
+	key := ed25519.NewKeyFromSeed(make([]byte, 32))
+	state := pairing.State{Private: key, Secret: make([]byte, 32)}
+	g, err := Open(dir, config.Config{}, state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sha := sha256.Sum256(nil)
+	fid := "0123456789abcdef0123456789abcdef"
+	if err := g.Ledger.PutFile(t.Context(), inventory.Record{Phase1: inventory.Phase1{FileID: fid, Present: true}, SHA256: sha}); err != nil {
+		t.Fatal(err)
+	}
+	i := wire.Instruction{Op: "offer", IID: "44444444-4444-4444-8444-444444444444", FileID: fid, SHA256: hex.EncodeToString(sha[:]), ListingVersionID: "33333333-3333-4333-8333-333333333333"}
+	typ, body, err := g.Handle(t.Context(), i, "listing", "listing")
+	if err != nil || typ != "offer_ack" || !body.(wire.OfferAck).Ready {
+		t.Fatalf("first effect: %s %+v %v", typ, body, err)
+	}
+	if err := g.Ledger.Close(); err != nil {
+		t.Fatal(err)
+	}
+	g, err = Open(dir, config.Config{}, state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer g.Ledger.Close()
+	typ, body, err = g.Handle(t.Context(), i, "listing", "listing")
+	if err != nil || typ != "offer_ack" || !body.(wire.OfferAck).Ready {
+		t.Fatalf("replay after crash: %s %+v %v", typ, body, err)
+	}
+	if _, err = g.Log.Append(typ, body); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = g.Ledger.Seen(t.Context(), i.IID); err != nil {
+		t.Fatal(err)
+	}
+	typ, _, err = g.Handle(t.Context(), i, "listing", "listing")
+	if err != nil || typ != "" {
+		t.Fatalf("completed replay was handled: %s %v", typ, err)
 	}
 }

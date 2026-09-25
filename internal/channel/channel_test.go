@@ -89,6 +89,88 @@ func bytesRepeat(b byte, n int) []byte {
 	return out
 }
 
+func TestBlockedScanDoesNotBlockReceiptDelivery(t *testing.T) {
+	c, entries := fixture(t)
+	c.heartbeatEvery = 20 * time.Millisecond
+	started := make(chan struct{})
+	c.Scan = func(ctx context.Context) error {
+		close(started)
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	var once sync.Once
+	c.Poll = func(context.Context) error {
+		var err error
+		once.Do(func() { _, err = c.Log.Append("receipt", map[string]any{"seq": 1}) })
+		return err
+	}
+	h, _ := audit.Hash(entries[1])
+	s := server(t, func(ctx context.Context, ws *websocket.Conn) {
+		_ = ws.Write(ctx, websocket.MessageText, []byte(`{"resume":{"seq":2,"entry_hash":"`+h+`"}}`))
+		<-started
+		_, raw, err := ws.Read(ctx)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		var entry audit.Entry
+		if json.Unmarshal(raw, &entry) != nil || entry.Seq != 3 || entry.MessageType != "receipt" {
+			t.Errorf("receipt stalled by scan: %s", raw)
+		}
+		_ = ws.Close(websocket.StatusNormalClosure, "done")
+	})
+	defer s.Close()
+	c.URL = "ws" + strings.TrimPrefix(s.URL, "http")
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	defer cancel()
+	_ = c.Connect(ctx)
+}
+
+func TestDuplicateControlKeysRejected(t *testing.T) {
+	for _, raw := range []string{`{"ack":1,"ack":2}`, `{"nonce":"` + strings.Repeat("a", 64) + `","nonce":"` + strings.Repeat("b", 64) + `"}`, `{"resume":{"seq":0,"seq":1,"entry_hash":""}}`} {
+		if kind, _, _ := parseControl([]byte(raw)); kind != "" {
+			t.Fatalf("accepted %s", raw)
+		}
+	}
+}
+func TestDescribeFailureCodeInAudit(t *testing.T) {
+	c, _ := fixture(t)
+	key := ed25519.NewKeyFromSeed(bytesRepeat(0x42, 32))
+	c.State.Pins.ListingKeys = []wire.Key{{KID: "listing", Alg: "EdDSA", Key: base64.RawURLEncoding.EncodeToString(key.Public().(ed25519.PublicKey))}}
+	c.Handle = func(context.Context, wire.Instruction, string, string) (string, any, error) {
+		return "", nil, errors.New("unsupported_format")
+	}
+	c.Complete = func(context.Context, string) error { t.Error("failed description was marked seen"); return nil }
+	now := time.Now().Unix()
+	i := wire.Instruction{Op: "describe", Audience: c.State.Pins.GatewayID, IID: "44444444-4444-4444-8444-444444444444", IssuedAt: now, ExpiresAt: now + 900, FileID: "0123456789abcdef0123456789abcdef", ConfirmationID: "33333333-3333-4333-8333-333333333333"}
+	token, err := wire.Sign("aim-describe+jwt", "listing", i, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := server(t, func(ctx context.Context, ws *websocket.Conn) {
+		_ = ws.Write(ctx, websocket.MessageText, []byte(`{"resume":{"seq":0,"entry_hash":""}}`))
+		for range 2 {
+			_, _, _ = ws.Read(ctx)
+		}
+		_ = ws.Write(ctx, websocket.MessageText, []byte(token))
+		_, raw, err := ws.Read(ctx)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		var entry audit.Entry
+		if json.Unmarshal(raw, &entry) != nil || entry.MessageType != "error" || !strings.Contains(string(entry.Body), "unsupported_format") {
+			t.Errorf("wrong failure code: %s", raw)
+		}
+		_ = ws.Close(websocket.StatusNormalClosure, "done")
+	})
+	defer s.Close()
+	c.URL = "ws" + strings.TrimPrefix(s.URL, "http")
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	defer cancel()
+	_ = c.Connect(ctx)
+}
+
 func TestRotatedKeyExpires(t *testing.T) {
 	c, _ := fixture(t)
 	key := ed25519.NewKeyFromSeed(bytesRepeat(0x42, 32))

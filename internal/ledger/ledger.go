@@ -94,6 +94,7 @@ type Request struct {
 const schema = `
 CREATE TABLE IF NOT EXISTS offers(fid TEXT, sha256 TEXT, lvid TEXT, iid TEXT, state TEXT, approved_locally_at TEXT, key_class TEXT, PRIMARY KEY(fid,sha256,lvid));
 CREATE TABLE IF NOT EXISTS seen_instructions(iid TEXT PRIMARY KEY);
+CREATE TABLE IF NOT EXISTS revocation_answers(iid TEXT PRIMARY KEY, body BLOB NOT NULL);
 CREATE TABLE IF NOT EXISTS files(fid TEXT PRIMARY KEY, source TEXT, relative_path TEXT, size INTEGER, mtime TEXT, sha256 TEXT, block_size INTEGER, block_hashes BLOB, display_name TEXT, root TEXT, changed INTEGER DEFAULT 0);
 CREATE TABLE IF NOT EXISTS permissions(jti TEXT PRIMARY KEY, oid TEXT, fid TEXT, sha256 TEXT, sd INTEGER, td INTEGER, ro INTEGER, state TEXT, bound_at TEXT, closed_at TEXT);
 CREATE TABLE IF NOT EXISTS serves(oid TEXT, fid TEXT, start INTEGER, end INTEGER, count INTEGER, PRIMARY KEY(oid,fid,start));
@@ -101,6 +102,8 @@ CREATE TABLE IF NOT EXISTS transmitted(oid TEXT, fid TEXT, start INTEGER, end IN
 CREATE TABLE IF NOT EXISTS requests(id INTEGER PRIMARY KEY, jti TEXT, start INTEGER, end INTEGER, written_through INTEGER, open INTEGER, isolated INTEGER);
 CREATE TABLE IF NOT EXISTS revocations(jti TEXT PRIMARY KEY, received_at TEXT);
 CREATE TABLE IF NOT EXISTS receipts_outbox(seq INTEGER PRIMARY KEY, body TEXT, sent_at TEXT);
+CREATE INDEX IF NOT EXISTS receipts_pending ON receipts_outbox(sent_at);
+CREATE TABLE IF NOT EXISTS receipts_audited(seq INTEGER PRIMARY KEY, audit_seq INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS completed(oid TEXT, fid TEXT, PRIMARY KEY(oid,fid));
 `
 
@@ -145,6 +148,11 @@ func (l *Ledger) Seen(ctx context.Context, iid string) (bool, error) {
 	n, e := r.RowsAffected()
 	return n == 0, e
 }
+func (l *Ledger) WasSeen(ctx context.Context, iid string) (bool, error) {
+	var n int
+	err := l.DB.QueryRowContext(ctx, `SELECT count(*) FROM seen_instructions WHERE iid=?`, iid).Scan(&n)
+	return n != 0, err
+}
 
 type QueuedReceipt struct {
 	Seq  uint64
@@ -152,7 +160,7 @@ type QueuedReceipt struct {
 }
 
 func (l *Ledger) PendingReceipts(ctx context.Context) ([]QueuedReceipt, error) {
-	rows, err := l.DB.QueryContext(ctx, `SELECT seq,body FROM receipts_outbox ORDER BY seq`)
+	rows, err := l.DB.QueryContext(ctx, `SELECT seq,body FROM receipts_outbox WHERE seq>(SELECT coalesce(max(seq),0) FROM receipts_audited) ORDER BY seq`)
 	if err != nil {
 		return nil, err
 	}
@@ -166,6 +174,14 @@ func (l *Ledger) PendingReceipts(ctx context.Context) ([]QueuedReceipt, error) {
 		out = append(out, r)
 	}
 	return out, rows.Err()
+}
+func (l *Ledger) MarkReceiptAudited(ctx context.Context, seq, auditSeq uint64) error {
+	_, err := l.DB.ExecContext(ctx, `INSERT INTO receipts_audited(seq,audit_seq) VALUES(?,?) ON CONFLICT(seq) DO UPDATE SET audit_seq=excluded.audit_seq WHERE audit_seq!=excluded.audit_seq`, seq, auditSeq)
+	return err
+}
+func (l *Ledger) ReconcileReceipts(ctx context.Context, seq uint64) error {
+	_, err := l.DB.ExecContext(ctx, `UPDATE receipts_outbox SET sent_at=CASE WHEN EXISTS(SELECT 1 FROM receipts_audited a WHERE a.seq=receipts_outbox.seq AND a.audit_seq<=?) THEN ? ELSE NULL END`, seq, now())
+	return err
 }
 
 func (l *Ledger) ResetReceiptDelivery(ctx context.Context) error {
@@ -212,7 +228,7 @@ func (f File) Path() string      { return filepath.Join(f.Root, filepath.FromSla
 func (f File) ValidBlocks() bool { return int64(len(f.BlockHashes)) == (f.Size+window-1)/window }
 
 func (l *Ledger) PutOffer(ctx context.Context, o Offer) error {
-	_, e := l.DB.ExecContext(ctx, `INSERT INTO offers(fid,sha256,lvid,iid,state,approved_locally_at,key_class) VALUES(?,?,?,?,?,?,?) ON CONFLICT(fid,sha256,lvid) DO UPDATE SET iid=excluded.iid,state=excluded.state,approved_locally_at=CASE WHEN excluded.state='withdrawn' THEN offers.approved_locally_at ELSE excluded.approved_locally_at END,key_class=excluded.key_class`, o.FileID, o.SHA256, o.ListingVersionID, o.IID, o.State, o.ApprovedAt, o.KeyClass)
+	_, e := l.DB.ExecContext(ctx, `INSERT INTO offers(fid,sha256,lvid,iid,state,approved_locally_at,key_class) VALUES(?,?,?,?,?,?,?) ON CONFLICT(fid,sha256,lvid) DO UPDATE SET iid=excluded.iid,state=excluded.state,approved_locally_at=CASE WHEN excluded.state='withdrawn' OR (offers.state='offered' AND excluded.state='offered' AND offers.iid=excluded.iid) THEN offers.approved_locally_at ELSE excluded.approved_locally_at END,key_class=excluded.key_class`, o.FileID, o.SHA256, o.ListingVersionID, o.IID, o.State, o.ApprovedAt, o.KeyClass)
 	return e
 }
 func (l *Ledger) Offer(ctx context.Context, fid, sha, lvid string) (Offer, error) {
@@ -238,28 +254,55 @@ func (l *Ledger) CloseExpired(ctx context.Context, at int64) error {
 func (l *Ledger) Revoke(ctx context.Context, jti string) (wire.RevokeAck, error) {
 	a := wire.RevokeAck{Op: "revoke_ack", JTI: jti, StateBefore: "unknown"}
 	e := tx(ctx, l.DB, func(t *sql.Tx) error {
-		var state string
-		var td int64
-		e := t.QueryRowContext(ctx, `SELECT state,td FROM permissions WHERE jti=?`, jti).Scan(&state, &td)
-		if e != nil && e != sql.ErrNoRows {
-			return e
-		}
-		if e == nil {
-			a.StateBefore = "active"
-			if state == "closed" || state == "revoked" {
-				a.StateBefore = "closed"
-			} else if td <= time.Now().Unix() {
-				a.StateBefore = "expired"
-			}
-			_, e = t.ExecContext(ctx, `UPDATE permissions SET state='revoked' WHERE jti=?`, jti)
-			if e != nil {
-				return e
-			}
-		}
-		_, e = t.ExecContext(ctx, `INSERT OR IGNORE INTO revocations(jti,received_at) VALUES(?,?)`, jti, now())
-		return e
+		return revokeTx(ctx, t, jti, &a)
 	})
 	return a, e
+}
+func (l *Ledger) RevokeInstruction(ctx context.Context, iid, jti string) (wire.RevokeAck, error) {
+	var a wire.RevokeAck
+	err := tx(ctx, l.DB, func(t *sql.Tx) error {
+		var body []byte
+		err := t.QueryRowContext(ctx, `SELECT body FROM revocation_answers WHERE iid=?`, iid).Scan(&body)
+		if err == nil {
+			return json.Unmarshal(body, &a)
+		}
+		if err != sql.ErrNoRows {
+			return err
+		}
+		a = wire.RevokeAck{Op: "revoke_ack", JTI: jti, StateBefore: "unknown"}
+		if err = revokeTx(ctx, t, jti, &a); err != nil {
+			return err
+		}
+		body, err = json.Marshal(a)
+		if err != nil {
+			return err
+		}
+		_, err = t.ExecContext(ctx, `INSERT INTO revocation_answers(iid,body) VALUES(?,?)`, iid, body)
+		return err
+	})
+	return a, err
+}
+func revokeTx(ctx context.Context, t *sql.Tx, jti string, a *wire.RevokeAck) error {
+	var state string
+	var td int64
+	e := t.QueryRowContext(ctx, `SELECT state,td FROM permissions WHERE jti=?`, jti).Scan(&state, &td)
+	if e != nil && e != sql.ErrNoRows {
+		return e
+	}
+	if e == nil {
+		a.StateBefore = "active"
+		if state == "closed" || state == "revoked" {
+			a.StateBefore = "closed"
+		} else if td <= time.Now().Unix() {
+			a.StateBefore = "expired"
+		}
+		_, e = t.ExecContext(ctx, `UPDATE permissions SET state='revoked' WHERE jti=?`, jti)
+		if e != nil {
+			return e
+		}
+	}
+	_, e = t.ExecContext(ctx, `INSERT OR IGNORE INTO revocations(jti,received_at) VALUES(?,?)`, jti, now())
+	return e
 }
 
 type segment struct {

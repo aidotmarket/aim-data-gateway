@@ -27,15 +27,17 @@ import (
 )
 
 type Gateway struct {
-	Config         config.Config
-	State          pairing.State
-	Dir            string
-	Ledger         *ledger.Ledger
-	Log            *audit.Log
-	previous       []inventory.Record
-	generation     uint64
-	keyMu          sync.RWMutex
-	permissionKeys map[string]ed25519.PublicKey
+	Config          config.Config
+	State           pairing.State
+	Dir             string
+	Ledger          *ledger.Ledger
+	Log             *audit.Log
+	previous        []inventory.Record
+	generation      uint64
+	keyMu           sync.RWMutex
+	permissionKeys  map[string]ed25519.PublicKey
+	unmarkedReceipt uint64
+	unmarkedAudit   uint64
 }
 
 func Open(dir string, cfg config.Config, state pairing.State) (*Gateway, error) {
@@ -52,20 +54,23 @@ func Open(dir string, cfg config.Config, state pairing.State) (*Gateway, error) 
 		return nil, err
 	}
 	g := &Gateway{Config: cfg, State: state, Dir: dir, Ledger: l, Log: a}
-	entries, err := a.Entries()
-	if err != nil {
-		l.Close()
-		return nil, err
-	}
 	active := map[string]inventory.Record{}
-	for _, entry := range entries {
+	err = a.Walk(func(entry audit.Entry) error {
+		if entry.MessageType == "receipt" {
+			var receipt wire.Receipt
+			if err = json.Unmarshal(entry.Body, &receipt); err != nil {
+				return err
+			}
+			if err = l.MarkReceiptAudited(context.Background(), receipt.Seq, entry.Seq); err != nil {
+				return err
+			}
+		}
 		if entry.MessageType != "inventory" {
-			continue
+			return nil
 		}
 		var batch inventory.Batch
 		if err = json.Unmarshal(entry.Body, &batch); err != nil {
-			l.Close()
-			return nil, err
+			return err
 		}
 		if batch.Generation > g.generation {
 			g.generation = batch.Generation
@@ -77,6 +82,11 @@ func Open(dir string, cfg config.Config, state pairing.State) (*Gateway, error) 
 				delete(active, f.FileID)
 			}
 		}
+		return nil
+	})
+	if err != nil {
+		l.Close()
+		return nil, err
 	}
 	for _, r := range active {
 		g.previous = append(g.previous, r)
@@ -89,7 +99,7 @@ func (g *Gateway) Scan(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	records, err := inventory.ScanWithPrevious(g.Config, keys, g.previous)
+	records, err := inventory.ScanWithPreviousContext(ctx, g.Config, keys, g.previous)
 	if err != nil {
 		return err
 	}
@@ -125,22 +135,12 @@ func (g *Gateway) Poll(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	entries, err := g.Log.Entries()
-	if err != nil {
-		return err
-	}
-	seen := make(map[uint64]bool)
-	for _, e := range entries {
-		if e.MessageType == "receipt" {
-			var receipt wire.Receipt
-			if err = json.Unmarshal(e.Body, &receipt); err != nil {
+	for _, r := range queued {
+		if g.unmarkedReceipt == r.Seq {
+			if err = g.Ledger.MarkReceiptAudited(ctx, r.Seq, g.unmarkedAudit); err != nil {
 				return err
 			}
-			seen[receipt.Seq] = true
-		}
-	}
-	for _, r := range queued {
-		if seen[r.Seq] {
+			g.unmarkedReceipt = 0
 			continue
 		}
 		var receipt wire.Receipt
@@ -151,9 +151,15 @@ func (g *Gateway) Poll(ctx context.Context) error {
 		if receipt.Seq != r.Seq {
 			return errors.New("receipt outbox sequence mismatch")
 		}
-		if _, err = g.Log.Append("receipt", receipt); err != nil {
+		entry, appendErr := g.Log.Append("receipt", receipt)
+		if appendErr != nil {
+			return appendErr
+		}
+		g.unmarkedReceipt, g.unmarkedAudit = r.Seq, entry.Seq
+		if err = g.Ledger.MarkReceiptAudited(ctx, r.Seq, entry.Seq); err != nil {
 			return err
 		}
+		g.unmarkedReceipt = 0
 	}
 	return nil
 }
@@ -168,19 +174,11 @@ func (g *Gateway) Delivered(ctx context.Context, entry audit.Entry) error {
 	return g.Ledger.MarkReceiptDelivered(ctx, receipt.Seq)
 }
 func (g *Gateway) Reconcile(ctx context.Context, seq uint64, entries []audit.Entry) error {
-	if err := g.Ledger.ResetReceiptDelivery(ctx); err != nil {
-		return err
-	}
-	for _, e := range entries[:seq] {
-		if err := g.Delivered(ctx, e); err != nil {
-			return err
-		}
-	}
-	return nil
+	return g.Ledger.ReconcileReceipts(ctx, seq)
 }
 
 func (g *Gateway) Handle(ctx context.Context, i wire.Instruction, class, signer string) (string, any, error) {
-	seen, err := g.Ledger.Seen(ctx, i.IID)
+	seen, err := g.Ledger.WasSeen(ctx, i.IID)
 	if err != nil || seen {
 		return "", nil, err
 	}
@@ -214,7 +212,9 @@ func (g *Gateway) Handle(ctx context.Context, i wire.Instruction, class, signer 
 			if r.Phase1.FileID != i.FileID {
 				continue
 			}
-			d, e := profile.File(r, g.Config.ColumnRule(r.Source, r.RelativePath))
+			profileCtx, cancel := context.WithTimeout(ctx, 30*time.Minute)
+			d, e := profile.FileContext(profileCtx, r, g.Config.ColumnRule(r.Source, r.RelativePath))
+			cancel()
 			if e != nil {
 				return "", nil, e
 			}
@@ -226,7 +226,7 @@ func (g *Gateway) Handle(ctx context.Context, i wire.Instruction, class, signer 
 		}
 		return "", nil, errors.New("file_missing")
 	case "revoke":
-		a, e := g.Ledger.Revoke(ctx, i.JTI)
+		a, e := g.Ledger.RevokeInstruction(ctx, i.IID, i.JTI)
 		return "revocation_ack", a, e
 	case "prepare":
 		a, e := g.Ledger.Prepare(ctx, i, g.Config)
@@ -234,40 +234,105 @@ func (g *Gateway) Handle(ctx context.Context, i wire.Instruction, class, signer 
 	case "key_rotation":
 		// The channel verifies the outgoing key before this update.
 		g.keyMu.Lock()
-		if g.State.Pins.KeyExpires == nil {
-			g.State.Pins.KeyExpires = map[string]string{}
+		pins := copyPins(g.State.Pins)
+		if pins.KeyExpires == nil {
+			pins.KeyExpires = map[string]string{}
 		}
-		if g.State.Pins.KeyExpires[signer] == "" {
-			g.State.Pins.KeyExpires[signer] = time.Now().Add(7 * 24 * time.Hour).UTC().Format(time.RFC3339Nano)
+		if pins.KeyExpires[signer] == "" {
+			pins.KeyExpires[signer] = time.Now().Add(7 * 24 * time.Hour).UTC().Format(time.RFC3339Nano)
 		}
+		var permissionKeys map[string]ed25519.PublicKey
 		if class == "permission" {
-			g.State.Pins.PermissionKeys = append(g.State.Pins.PermissionKeys, i.Keys...)
-			g.permissionKeys, err = keyMap(g.State.Pins.PermissionKeys)
+			pins.PermissionKeys = appendUniqueKeys(pins.PermissionKeys, i.Keys)
+			permissionKeys, err = keyMap(pins.PermissionKeys)
 		} else {
-			g.State.Pins.ListingKeys = append(g.State.Pins.ListingKeys, i.Keys...)
+			pins.ListingKeys = appendUniqueKeys(pins.ListingKeys, i.Keys)
+		}
+		if err == nil {
+			err = g.savePins(pins)
+		}
+		if err == nil {
+			g.State.Pins = pins
+			if class == "permission" {
+				g.permissionKeys = permissionKeys
+			}
 		}
 		g.keyMu.Unlock()
-		if err != nil {
-			return "", nil, err
-		}
-		return "", nil, g.savePins()
+		return "", nil, err
 	case "minimum_version":
-		g.State.Pins.MinimumVersion = i.Version
-		return "", nil, g.savePins()
+		g.keyMu.Lock()
+		pins := copyPins(g.State.Pins)
+		pins.MinimumVersion = i.Version
+		err = g.savePins(pins)
+		if err == nil {
+			g.State.Pins = pins
+		}
+		g.keyMu.Unlock()
+		return "", nil, err
 	default:
 		return "", nil, errors.New("unknown instruction")
 	}
 }
-func (g *Gateway) savePins() error {
-	b, err := json.Marshal(g.State.Pins)
+func appendUniqueKeys(existing, added []wire.Key) []wire.Key {
+	for _, key := range added {
+		found := false
+		for _, old := range existing {
+			if old.KID == key.KID {
+				found = true
+				break
+			}
+		}
+		if !found {
+			existing = append(existing, key)
+		}
+	}
+	return existing
+}
+func copyPins(p pairing.Pins) pairing.Pins {
+	p.PermissionKeys = append([]wire.Key(nil), p.PermissionKeys...)
+	p.ListingKeys = append([]wire.Key(nil), p.ListingKeys...)
+	if p.KeyExpires != nil {
+		copyMap := make(map[string]string, len(p.KeyExpires))
+		for kid, at := range p.KeyExpires {
+			copyMap[kid] = at
+		}
+		p.KeyExpires = copyMap
+	}
+	return p
+}
+func (g *Gateway) savePins(pins pairing.Pins) error {
+	b, err := json.Marshal(pins)
 	if err != nil {
 		return err
 	}
 	path := filepath.Join(g.Dir, "pins.json")
-	if err = os.WriteFile(path+".tmp", b, 0600); err != nil {
+	if _, err := os.Stat(filepath.Join(g.Dir, "paired")); err == nil {
+		path = filepath.Join(g.Dir, "paired", "pins.json")
+	}
+	f, err := os.OpenFile(path+".tmp", os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
+	if err != nil {
 		return err
 	}
-	return os.Rename(path+".tmp", path)
+	_, err = f.Write(b)
+	if err == nil {
+		err = f.Sync()
+	}
+	closeErr := f.Close()
+	if err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		return err
+	}
+	if err = os.Rename(path+".tmp", path); err != nil {
+		return err
+	}
+	d, err := os.Open(filepath.Dir(path))
+	if err != nil {
+		return err
+	}
+	defer d.Close()
+	return d.Sync()
 }
 
 func keyMap(keys []wire.Key) (map[string]ed25519.PublicKey, error) {
@@ -305,12 +370,17 @@ func (g *Gateway) Run(ctx context.Context, version string) error {
 			keys[kid] = key
 		}
 		return keys
-	}, GatewayKey: g.State.Private, GatewayKID: "gateway"}
+	}, GatewayKey: g.State.Private, GatewayKID: "gateway", RecoveryContext: ctx}
 	server := d.Server(g.Config.Door.Listen)
 	serverErr := make(chan error, 1)
 	go func() { serverErr <- server.ListenAndServe() }()
 	defer server.Shutdown(context.Background())
-	client := &channel.Client{State: &g.State, Log: g.Log, Version: version, Handle: g.Handle, Scan: g.Scan, Poll: g.Poll, Delivered: g.Delivered, Reconcile: g.Reconcile}
+	client := &channel.Client{State: &g.State, Log: g.Log, Version: version, Handle: g.Handle, Complete: func(ctx context.Context, iid string) error { _, err := g.Ledger.Seen(ctx, iid); return err }, Scan: g.Scan, Poll: g.Poll, Delivered: g.Delivered, Reconcile: g.Reconcile}
+	client.PinsSnapshot = func() pairing.Pins {
+		g.keyMu.RLock()
+		defer g.keyMu.RUnlock()
+		return copyPins(g.State.Pins)
+	}
 	if g.Config.Egress.ConnectProxy != "" {
 		proxyURL := &url.URL{Scheme: "http", Host: g.Config.Egress.ConnectProxy}
 		client.HTTPClient = &http.Client{Transport: &http.Transport{Proxy: http.ProxyURL(proxyURL), DialContext: (&net.Dialer{Timeout: 10 * time.Second}).DialContext}}

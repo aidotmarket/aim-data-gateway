@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/aidotmarket/aim-data-gateway/internal/wire"
@@ -41,7 +42,7 @@ func TestPairSingleUse(t *testing.T) {
 		t.Fatal("incomplete state")
 	}
 	for _, name := range []string{"identity.key", "secret.bin", "pins.json"} {
-		st, err := os.Stat(filepath.Join(dir, name))
+		st, err := os.Stat(filepath.Join(dir, "paired", name))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -57,5 +58,24 @@ func TestPairSingleUse(t *testing.T) {
 	}
 	if called != 1 {
 		t.Fatalf("pair called %d times", called)
+	}
+}
+
+func TestPartialPairingIsDistinctFromPaired(t *testing.T) {
+	dir := t.TempDir()
+	stage := filepath.Join(dir, ".pairing-staging")
+	if err := os.Mkdir(stage, 0700); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"identity.key", "secret.bin", "pins.json"} {
+		if err := os.WriteFile(filepath.Join(stage, name), []byte("partial"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Load(dir); err == nil || !strings.Contains(err.Error(), "incomplete pairing") {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if _, err := Pair(context.Background(), dir, "unused", "1", "http://invalid", http.DefaultClient); err == nil || !strings.Contains(err.Error(), "incomplete pairing") {
+			t.Fatalf("%s: %v", name, err)
+		}
 	}
 }

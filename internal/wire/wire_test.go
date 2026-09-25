@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestJWSAndInstructionKinds(t *testing.T) {
@@ -32,6 +33,52 @@ func TestJWSAndInstructionKinds(t *testing.T) {
 		parts[1] = "AA"
 		if e := Verify(strings.Join(parts, "."), typ, keys, &out); e == nil {
 			t.Fatal("tamper accepted")
+		}
+	}
+}
+func TestInstructionRejectsForeignClaimsForEveryOperation(t *testing.T) {
+	private := ed25519.NewKeyFromSeed(make([]byte, 32))
+	keys := map[string]ed25519.PublicKey{"kid": private.Public().(ed25519.PublicKey)}
+	id := "22222222-2222-4222-8222-222222222222"
+	fid := "0123456789abcdef0123456789abcdef"
+	now := time.Now().Unix()
+	optional := map[string]any{"fid": fid, "sha256": strings.Repeat("a", 64), "lvid": id, "cid": id, "exp": now + 900, "jti": id, "oid": id, "keys": []Key{{KID: "new", Alg: "EdDSA", Key: base64.RawURLEncoding.EncodeToString(keys["kid"])}}, "version": "1.0.0"}
+	byOp := map[string][]string{
+		"offer": {"fid", "sha256", "lvid"}, "unoffer": {"fid", "sha256", "lvid"},
+		"describe": {"fid", "cid", "exp"}, "revoke": {"jti"},
+		"prepare": {"oid", "fid", "sha256"}, "key_rotation": {"keys"}, "minimum_version": {"version"},
+	}
+	for op, permitted := range byOp {
+		base := map[string]any{"op": op, "aud": id, "iid": id, "iat": now}
+		allowed := make(map[string]bool)
+		for _, name := range permitted {
+			base[name] = optional[name]
+			allowed[name] = true
+		}
+		typ, _, err := (Instruction{Op: op}).Kind()
+		if err != nil {
+			t.Fatal(err)
+		}
+		token, err := Sign(typ, "kid", base, private)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := VerifyInstruction(token, keys); err != nil {
+			t.Fatalf("valid %s: %v", op, err)
+		}
+		for name, value := range optional {
+			if allowed[name] {
+				continue
+			}
+			base[name] = value
+			token, err = Sign(typ, "kid", base, private)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := VerifyInstruction(token, keys); err == nil {
+				t.Fatalf("%s accepted %s", op, name)
+			}
+			delete(base, name)
 		}
 	}
 }
