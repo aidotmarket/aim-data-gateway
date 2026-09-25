@@ -21,6 +21,12 @@ import (
 	"github.com/aidotmarket/aim-data-gateway/internal/wire"
 )
 
+func TestDefaultVersionIsPrerelease(t *testing.T) {
+	if version != "0.0.0-dev" {
+		t.Fatalf("source build version = %q, want 0.0.0-dev prerelease", version)
+	}
+}
+
 func TestApproveCommand(t *testing.T) {
 	root := t.TempDir()
 	source := filepath.Join(root, "data")

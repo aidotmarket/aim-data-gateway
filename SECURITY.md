@@ -8,7 +8,7 @@ The latest released minor version receives security fixes. Older versions may be
 
 ## Verify a release image
 
-Use the digest from the release Compose asset or the pairing response. Replace `<digest>` with its 64 hexadecimal characters and `v1.2.3` with the release tag:
+Use cosign v3.1.3 or newer. Release signatures use the cosign v3 bundle format in OCI referrers; cosign v2.x reports `no signatures found`. Use the digest from the release Compose asset or the pairing response. Replace `<digest>` with its 64 hexadecimal characters and `v1.2.3` with the release tag:
 
 ```sh
 image=ghcr.io/aidotmarket/aim-gateway@sha256:<digest>
@@ -32,7 +32,7 @@ After the first image push, an aidotmarket organization admin must make the GHCR
 
 ## Reproduce the build
 
-Check out the signed release tag. Set `SOURCE_DATE_EPOCH` to the tagged commit's Unix timestamp and build twice with Docker Buildx, `--platform linux/amd64 --provenance=false --sbom=false --build-arg SOURCE_DATE_EPOCH=<timestamp>` and `--output type=oci,dest=<path>,rewrite-timestamp=true`. Compare the `containerimage.digest` values from `--metadata-file`. `scripts/release-image.sh` implements this procedure. The Dockerfile pins both base images by digest and builds a static binary. Reproduction requires those image digests and the pinned Go module graph to remain available.
+Check out the signed release tag. Set `SOURCE_DATE_EPOCH` to the tagged commit's Unix timestamp and build twice with Docker Buildx, `--platform linux/amd64 --provenance=false --sbom=false --build-arg SOURCE_DATE_EPOCH=<timestamp> --build-arg VERSION=<tag without v>` and `--output type=oci,dest=<path>,rewrite-timestamp=true`. Compare the `containerimage.digest` values from `--metadata-file`. `scripts/release-image.sh` implements this procedure. The Dockerfile pins both base images by digest and builds a static binary. Reproduction requires those image digests and the pinned Go module graph to remain available.
 
 ## Host and update boundary
 

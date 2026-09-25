@@ -20,7 +20,7 @@ if [[ $mode == local && ${BUILD_NO_CACHE:-true} == false ]]; then
   cache_flag=--progress=auto
 fi
 for pass in 1 2; do
-  docker buildx build "$cache_flag" --platform linux/amd64 --build-arg "SOURCE_DATE_EPOCH=$epoch" \
+  docker buildx build "$cache_flag" --platform linux/amd64 --build-arg "SOURCE_DATE_EPOCH=$epoch" --build-arg "VERSION=${tag#v}" \
     --provenance=false --sbom=false \
     --output "type=oci,dest=build-check/image-$pass.oci.tar,rewrite-timestamp=true" \
     --metadata-file "build-check/image-$pass.json" .
