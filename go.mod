@@ -1,6 +1,6 @@
 module github.com/aidotmarket/aim-data-gateway
 
-go 1.25.0
+go 1.27.1
 
 require (
 	github.com/BurntSushi/toml v1.5.0

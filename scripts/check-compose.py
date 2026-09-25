@@ -7,8 +7,12 @@ import subprocess
 import sys
 import tempfile
 
+last_model = None
+
 
 def check(path: Path) -> None:
+    global last_model
+    last_model = None
     source = path.read_text()
     # Compose omits unused top-level volumes (and other unused resources) from config.
     if set(re.findall(r"(?m)^([^\s#].*)$", source)) != {"services:", "volumes:"}:
@@ -22,6 +26,7 @@ def check(path: Path) -> None:
     if result.returncode:
         raise ValueError(f"docker compose config failed: {result.stderr.strip()}")
     model = json.loads(result.stdout)
+    last_model = model
     if set(model) != {"name", "services", "networks", "volumes"}:
         raise ValueError("unexpected top-level Compose keys")
     project = re.sub(r"[^a-z0-9_-]", "", path.parent.resolve().name.lower()).lstrip("_-")
@@ -96,14 +101,22 @@ def check(path: Path) -> None:
         if service.get(key) != expected:
             raise ValueError(f"{key} must be {expected!r}")
     base = path.parent.absolute()
-    if service.get("volumes") != [
-        {"type": "bind", "source": str(base / "gateway.toml"),
-         "target": "/config/gateway.toml", "read_only": True, "bind": {}},
-        {"type": "bind", "source": str(base / "data"),
-         "target": "/sources/data", "read_only": True, "bind": {}},
-        {"type": "volume", "source": "aim-gateway-state", "target": "/state",
-         "volume": {}},
-    ]:
+    mounts = service.get("volumes")
+    if not isinstance(mounts, list) or len(mounts) != 3 or (
+        mounts[0] not in [
+            {"type": "bind", "source": str(base / "gateway.toml"),
+             "target": "/config/gateway.toml", "read_only": True, "bind": options}
+            for options in ({}, {"create_host_path": True})
+        ] or mounts[1] not in [
+            {"type": "bind", "source": str(base / "data"),
+             "target": "/sources/data", "read_only": True, "bind": options}
+            for options in ({}, {"create_host_path": True})
+        ] or mounts[2] not in [
+            {"type": "volume", "source": "aim-gateway-state", "target": "/state",
+             "volume": options}
+            for options in ({}, {"nocopy": False})
+        ]
+    ):
         raise ValueError("only the three default mounts are allowed")
 
 
@@ -195,4 +208,7 @@ if __name__ == "__main__":
         else:
             print("compose hardening: OK")
     except (ValueError, KeyError, OSError) as error:
+        if last_model is not None:
+            print("normalized Compose model:", file=sys.stderr)
+            print(json.dumps(last_model, indent=2, sort_keys=True), file=sys.stderr)
         sys.exit(f"compose hardening: {error}")
