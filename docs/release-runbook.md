@@ -19,6 +19,7 @@ changing either script or the workflow.
 
 After a release, verify the published digest from outside the workflow with
 cosign v3.1.3 or newer and GitHub CLI, then run the image to check its version:
+The attestation command below is a lighter check; use `SECURITY.md` for tag-pinned provenance and SPDX checks.
 
 ```sh
 image=ghcr.io/aidotmarket/aim-gateway@sha256:<digest>
