@@ -66,6 +66,16 @@ jobs:
         run: |
           echo "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
           bash scripts/push-release-image.sh
+      - name: Check anonymous manifest pull
+        if: github.event_name == 'push'
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          docker logout ghcr.io
+          if ! docker manifest inspect "ghcr.io/aidotmarket/aim-gateway@$DIGEST" > /dev/null; then
+            echo '::error::Anonymous GHCR pull failed. An aidotmarket org admin must make the ghcr.io/aidotmarket/aim-gateway package public, then rerun this release workflow.'
+            exit 1
+          fi
       - name: Install checksum-pinned Cosign
         if: github.event_name == 'push'
         run: |
@@ -102,20 +112,15 @@ jobs:
         env:
           DIGEST: ${{ steps.build.outputs.digest }}
           GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
         run: |
           subject="oci://ghcr.io/aidotmarket/aim-gateway@$DIGEST"
-          gh attestation verify "$subject" -R "$GITHUB_REPOSITORY" --predicate-type https://spdx.dev/Document/v2.3
-          gh attestation verify "$subject" -R "$GITHUB_REPOSITORY" --predicate-type https://slsa.dev/provenance/v1
-      - name: Check anonymous manifest pull
-        if: github.event_name == 'push'
-        env:
-          DIGEST: ${{ steps.build.outputs.digest }}
-        run: |
-          docker logout ghcr.io
-          if ! docker manifest inspect "ghcr.io/aidotmarket/aim-gateway@$DIGEST" > /dev/null; then
-            echo '::error::Anonymous GHCR pull failed. An aidotmarket org admin must make the ghcr.io/aidotmarket/aim-gateway package public, then rerun this release workflow.'
-            exit 1
-          fi
+          gh attestation verify "$subject" -R "$GITHUB_REPOSITORY" \
+            --signer-workflow aidotmarket/aim-data-gateway/.github/workflows/release.yml \
+            --source-ref "refs/tags/$TAG" --predicate-type https://spdx.dev/Document/v2.3
+          gh attestation verify "$subject" -R "$GITHUB_REPOSITORY" \
+            --signer-workflow aidotmarket/aim-data-gateway/.github/workflows/release.yml \
+            --source-ref "refs/tags/$TAG" --predicate-type https://slsa.dev/provenance/v1
       - name: Prepare verified release assets
         if: github.event_name == 'push'
         env:
