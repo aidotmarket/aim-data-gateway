@@ -9,8 +9,9 @@ def check(values: dict[str, str]) -> None:
     for name in ("GONOSUMDB", "GOPRIVATE", "GONOSUMCHECK", "GOINSECURE"):
         if values.get(name):
             raise ValueError(f"{name} must be empty")
-    module_modes = [flag for flag in shlex.split(values.get("GOFLAGS", "")) if flag.startswith("-mod=")]
-    if module_modes != ["-mod=readonly"]:
+    module_modes = [flag.lstrip("-") for flag in shlex.split(values.get("GOFLAGS", ""))
+                    if flag.startswith(("-mod=", "--mod="))]
+    if module_modes != ["mod=readonly"]:
         raise ValueError("GOFLAGS must contain exactly one -mod=readonly")
 
 
@@ -21,6 +22,9 @@ if __name__ == "__main__":
             baseline = {"GOFLAGS": "-mod=readonly"}
             for mutation in ({"GOFLAGS": ""}, {"GOFLAGS": "-mod=mod"},
                              {"GOFLAGS": "-mod=readonly -mod=mod"},
+                             {"GOFLAGS": "-mod=readonly --mod=mod"},
+                             {"GOFLAGS": "--mod=mod"},
+                             {"GOFLAGS": "--mod=readonly --mod=readonly"},
                              {"GOFLAGS": "-mod=readonly -mod=readonly"},
                              {"GONOSUMDB": "*"}, {"GOPRIVATE": "example.com"},
                              {"GONOSUMCHECK": "*"}, {"GOINSECURE": "example.com"}):
@@ -29,7 +33,7 @@ if __name__ == "__main__":
                 except ValueError:
                     continue
                 raise ValueError(f"self-check accepted {mutation}")
-            print("CI environment self-check: 8 mutations rejected")
+            print("CI environment self-check: 11 mutations rejected")
         elif sys.argv[1:]:
             raise ValueError("usage: check-ci-env.py [--self-check]")
         else:

@@ -14,25 +14,35 @@ def check(path: Path) -> None:
     )
     if result.returncode:
         raise ValueError(f"docker compose config failed: {result.stderr.strip()}")
-    services = json.loads(result.stdout)["services"]
+    model = json.loads(result.stdout)
+    networks = model.get("networks", {})
+    if set(networks) != {"default"} or networks["default"] != {
+        "name": f"{model['name']}_default", "ipam": {},
+    }:
+        raise ValueError(f"only the implicit default network is allowed: {sorted(networks)}")
+    services = model["services"]
     if set(services) != {"aim-gateway"}:
         raise ValueError("aim-gateway must be the only service")
     service = services["aim-gateway"]
+    allowed_keys = {
+        "build", "image", "command", "entrypoint", "user", "read_only",
+        "cap_drop", "security_opt", "volumes", "ports", "environment",
+        "healthcheck", "networks", "restart",
+    }
+    unknown_keys = set(service) - allowed_keys
+    if unknown_keys:
+        raise ValueError(f"forbidden service key: {sorted(unknown_keys)[0]}")
+    if service.get("networks") != {"default": None}:
+        raise ValueError("aim-gateway may use only the implicit default network")
     for key, expected in (
         ("user", "65532:65532"), ("read_only", True),
         ("cap_drop", ["ALL"]), ("security_opt", ["no-new-privileges:true"]),
     ):
         if service.get(key) != expected:
             raise ValueError(f"{key} must be {expected!r}")
-    for key in ("privileged", "cap_add", "devices"):
-        if key in service:
-            raise ValueError(f"{key} is forbidden")
-    for key in ("network_mode", "userns_mode", "pid", "ipc"):
-        if key in service:
-            raise ValueError(f"{key} is forbidden")
     mounts = service.get("volumes", [])
-    if not mounts:
-        raise ValueError("required mounts missing")
+    if len(mounts) != 3:
+        raise ValueError("exactly three required mounts expected")
     seen = set()
     for mount in mounts:
         source = mount.get("source", "")
@@ -66,6 +76,12 @@ def self_check(original: str) -> None:
         "capabilities": ("    cap_drop: [ALL]", "    cap_drop: []"),
         "new privileges": ("    security_opt: [no-new-privileges:true]", "    security_opt: []"),
         "privileged": ("    build: .", "    build: .\n    privileged: true"),
+        "host cgroup": ("    build: .", "    build: .\n    cgroup: host"),
+        "host uts": ("    build: .", "    build: .\n    uts: host"),
+        "sysctls": ("    build: .", "    build: .\n    sysctls:\n      net.ipv4.ip_forward: '1'"),
+        "tmpfs": ("    build: .", "    build: .\n    tmpfs: /tmp"),
+        "host-driver network": ("    build: .", "    build: .\n    networks: [hostile]"),
+        "host-driver default network": ("\nvolumes:\n", "\nnetworks:\n  default:\n    driver: host\n\nvolumes:\n"),
         "host network": ("    build: .", "    build: .\n    network_mode: host"),
         "shared service network": ("    build: .", "    build: .\n    network_mode: service:x"),
         "shared container network": ("    build: .", "    build: .\n    network_mode: container:x"),
@@ -83,6 +99,7 @@ def self_check(original: str) -> None:
         "docker socket": ("      - aim-gateway-state:/state", "      - /var/run/docker.sock:/var/run/docker.sock\n      - aim-gateway-state:/state"),
         "other socket": ("      - aim-gateway-state:/state", "      - /tmp/agent.sock:/state/agent.sock\n      - aim-gateway-state:/state"),
         "extra mount": ("      - aim-gateway-state:/state", "      - ./extra:/extra:ro\n      - aim-gateway-state:/state"),
+        "extra source mount": ("      - aim-gateway-state:/state", "      - ./extra:/sources/extra:ro\n      - aim-gateway-state:/state"),
         "writable config": ("./gateway.toml:/config/gateway.toml:ro", "./gateway.toml:/config/gateway.toml"),
         "writable source": ("./data:/sources/data:ro", "./data:/sources/data"),
     }
@@ -91,7 +108,12 @@ def self_check(original: str) -> None:
         for name, (before, after) in replacements.items():
             if before not in original:
                 raise ValueError(f"self-check fixture missing: {name}")
-            path.write_text(original.replace(before, after, 1))
+            mutated = original.replace(before, after, 1)
+            if name == "host-driver network":
+                mutated = mutated.replace(
+                    "\nvolumes:\n", "\nnetworks:\n  hostile:\n    driver: host\n\nvolumes:\n", 1,
+                )
+            path.write_text(mutated)
             try:
                 check(path)
             except (ValueError, KeyError):
