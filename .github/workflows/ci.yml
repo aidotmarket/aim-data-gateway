@@ -2,23 +2,43 @@ name: CI
 on:
   push:
   pull_request:
+permissions:
+  contents: read
 jobs:
   foundation:
     runs-on: ubuntu-latest
     env:
       CGO_ENABLED: '0'
       GOFLAGS: -mod=readonly
+      GONOSUMDB: ''
+      GOPRIVATE: ''
+      GONOSUMCHECK: ''
+      GOINSECURE: ''
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
           cache: true
+      - name: Verify repository is public
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: test "$(gh api repos/${{ github.repository }} --jq .visibility)" = public
+      - name: Check dependency policy
+        run: |
+          python3 scripts/check-ci-env.py --self-check
+          go mod verify
       - run: go vet ./...
       - run: go test ./...
       - run: bash scripts/check-reproducible-build.sh
-      - run: go mod verify
       - run: python3 scripts/check-module-budget.py
       - run: python3 scripts/count-lines.py
       - run: python3 scripts/check-vector-digest.py
+      - run: python3 scripts/check-compose.py --self-check
+      - run: python3 scripts/check-license.py --self-check
+      - run: python3 scripts/gen-outbound-doc.py --check
       - run: python3 scripts/check-module-budget.py --self-check && python3 scripts/count-lines.py --self-check
+      - name: Scan called Go code for vulnerabilities
+        run: |
+          go mod download -json golang.org/x/vuln@v1.7.0 | python3 -c 'import json,sys; assert json.load(sys.stdin)["Sum"] == "h1:4MQBuhmXbz2uepNJrf3v+aaZLGDqw1JluwYboegA1qg="'
+          go run golang.org/x/vuln/cmd/govulncheck@v1.7.0 ./...
