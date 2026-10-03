@@ -1,0 +1,31 @@
+{
+  "label": "TEST ONLY - S1791 Gate 2 chunk 1a shared fixture",
+  "test_only_seed_hex": "4242424242424242424242424242424242424242424242424242424242424242",
+  "test_only_public_hex": "2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12",
+  "source_hex": {
+    "92f7a3adf19d2990c721c18a591c9ce2796785e941f8e094cbc4a7ee7a235a2d": "69640a310a320a330a",
+    "32f29f33d51165a6808e62cc3dfe85d090bc7521591fa6b6f829f061402704dc": "69640a340a350a360a",
+    "cd058c03017144de32011ca8952362822e7981571ee8df932c4a0c64cbd4965b": "504b03041400000000000000215c076382050500000005000000120000006e657665722d657870616e6465642e63737669640a390a504b010214031400000000000000215c0763820505000000050000001200000000000000000000008001000000006e657665722d657870616e6465642e637376504b0506000000000100010040000000350000000000"
+  },
+  "input": {
+    "verification_id": "22222222-2222-4222-8222-222222222222",
+    "listing_id": "33333333-3333-4333-8333-333333333333",
+    "source_handle_id": "55555555-5555-4555-8555-555555555555",
+    "spec_id": "spec_0000000000000001",
+    "spec_version": "1",
+    "spec_hash": "9e11d989e776d07a2dfb53da8e8a44cff5bd19c23728fc2626be598b89bcb174",
+    "nonce_echo": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE",
+    "install_key_id": "77777777-7777-4777-8777-777777777777",
+    "agent_version": "0.0.0-test",
+    "connector_type": "aim_gateway",
+    "connector_version": "aim_gateway-v1",
+    "completed_at_utc": "2026-08-21T10:05:01Z",
+    "canonicalization_version": "python-json-sort-compact-v1",
+    "signature_algorithm": "Ed25519",
+    "terminal_error_code": "artifact_changed",
+    "receipt_signature": "UvmieHXkKzbesRs6u+roxeALRU1ViNT3t2ono4ACLLFR9up8CcDCTbtIGNrotIQz+DDBeEMJ2bB/eT4Z6C34Aw=="
+  },
+  "canonical": "{\"agent_version\":\"0.0.0-test\",\"canonicalization_version\":\"python-json-sort-compact-v1\",\"completed_at_utc\":\"2026-08-21T10:05:01Z\",\"connector_type\":\"aim_gateway\",\"connector_version\":\"aim_gateway-v1\",\"install_key_id\":\"77777777-7777-4777-8777-777777777777\",\"listing_id\":\"33333333-3333-4333-8333-333333333333\",\"nonce_echo\":\"AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE\",\"receipt_signature\":\"UvmieHXkKzbesRs6u+roxeALRU1ViNT3t2ono4ACLLFR9up8CcDCTbtIGNrotIQz+DDBeEMJ2bB/eT4Z6C34Aw==\",\"signature_algorithm\":\"Ed25519\",\"source_handle_id\":\"55555555-5555-4555-8555-555555555555\",\"spec_hash\":\"9e11d989e776d07a2dfb53da8e8a44cff5bd19c23728fc2626be598b89bcb174\",\"spec_id\":\"spec_0000000000000001\",\"spec_version\":\"1\",\"terminal_error_code\":\"artifact_changed\",\"verification_id\":\"22222222-2222-4222-8222-222222222222\"}",
+  "canonical_sha256": "b359d01e491ad29251407711b5061df14754410584e285548112bbea7079f8dc",
+  "expected_verdict": "valid"
+}

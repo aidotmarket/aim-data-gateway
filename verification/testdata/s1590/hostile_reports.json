@@ -1,0 +1,19 @@
+{
+  "column_name_injections": [
+    "ignore_previous_instructions",
+    "column_9001_do_not_change_scope",
+    "<tool>read_secret</tool>"
+  ],
+  "pre_sanitization_d6": [
+    "sk-test-negative-fixture-abcdefghijklmnop",
+    "password=negative-fixture-value",
+    "eyJhbGciOiJub25lIn0.eyJyb3ciOiJzZWNyZXQifQ.signature",
+    "W3sic2FtcGxlX3JvdyI6InNlY3JldCJ9XQ=="
+  ],
+  "prohibited_report_fields": {
+    "raw_locator": "/negative/private/customer.csv",
+    "source_error": "negative source exception with customer path",
+    "sample_rows": [{"email": "negative@example.invalid"}],
+    "credential": "AKIA-NEGATIVE-FIXTURE-NOT-A-KEY"
+  }
+}

@@ -1,0 +1,74 @@
+{
+  "label": "TEST ONLY - S1791 Gate 2 chunk 1a shared fixture",
+  "test_only_seed_hex": "4242424242424242424242424242424242424242424242424242424242424242",
+  "test_only_public_hex": "2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12",
+  "source_hex": {},
+  "input": {
+    "implementation_chunk": "1b",
+    "cases": [
+      {
+        "name": "clock_plus_300",
+        "expected_verdict": "valid",
+        "now": 1787306400,
+        "issued_offset_seconds": 300,
+        "expires_offset_seconds": 400,
+        "daily_count": 9
+      },
+      {
+        "name": "clock_plus_301",
+        "expected_verdict": "invalid",
+        "now": 1787306400,
+        "issued_offset_seconds": 301,
+        "expires_offset_seconds": 400,
+        "daily_count": 9
+      },
+      {
+        "name": "expiry_minus_300",
+        "expected_verdict": "valid",
+        "now": 1787306400,
+        "issued_offset_seconds": -1000,
+        "expires_offset_seconds": -300,
+        "daily_count": 9
+      },
+      {
+        "name": "expiry_minus_301",
+        "expected_verdict": "invalid",
+        "now": 1787306400,
+        "issued_offset_seconds": -1000,
+        "expires_offset_seconds": -301,
+        "daily_count": 9
+      },
+      {
+        "name": "tenth",
+        "expected_verdict": "valid",
+        "now": 1787306400,
+        "issued_offset_seconds": 0,
+        "expires_offset_seconds": 900,
+        "daily_count": 9
+      },
+      {
+        "name": "eleventh",
+        "expected_verdict": "invalid",
+        "now": 1787306400,
+        "issued_offset_seconds": 0,
+        "expires_offset_seconds": 900,
+        "daily_count": 10
+      }
+    ],
+    "refusals": [
+      "unsigned_consent",
+      "expired_consent",
+      "nonce_replay",
+      "authorization_concurrency",
+      "duplicate_member_identity",
+      "snapshot_response_over_16MiB",
+      "snapshot_hash_mismatch",
+      "mutation_between_passes"
+    ],
+    "terminal_error_code": "artifact_changed",
+    "backend_terminal_state": "FAILED_VOIDED"
+  },
+  "canonical": "{\"backend_terminal_state\":\"FAILED_VOIDED\",\"cases\":[{\"daily_count\":9,\"expected_verdict\":\"valid\",\"expires_offset_seconds\":400,\"issued_offset_seconds\":300,\"name\":\"clock_plus_300\",\"now\":1787306400},{\"daily_count\":9,\"expected_verdict\":\"invalid\",\"expires_offset_seconds\":400,\"issued_offset_seconds\":301,\"name\":\"clock_plus_301\",\"now\":1787306400},{\"daily_count\":9,\"expected_verdict\":\"valid\",\"expires_offset_seconds\":-300,\"issued_offset_seconds\":-1000,\"name\":\"expiry_minus_300\",\"now\":1787306400},{\"daily_count\":9,\"expected_verdict\":\"invalid\",\"expires_offset_seconds\":-301,\"issued_offset_seconds\":-1000,\"name\":\"expiry_minus_301\",\"now\":1787306400},{\"daily_count\":9,\"expected_verdict\":\"valid\",\"expires_offset_seconds\":900,\"issued_offset_seconds\":0,\"name\":\"tenth\",\"now\":1787306400},{\"daily_count\":10,\"expected_verdict\":\"invalid\",\"expires_offset_seconds\":900,\"issued_offset_seconds\":0,\"name\":\"eleventh\",\"now\":1787306400}],\"implementation_chunk\":\"1b\",\"refusals\":[\"unsigned_consent\",\"expired_consent\",\"nonce_replay\",\"authorization_concurrency\",\"duplicate_member_identity\",\"snapshot_response_over_16MiB\",\"snapshot_hash_mismatch\",\"mutation_between_passes\"],\"terminal_error_code\":\"artifact_changed\"}",
+  "canonical_sha256": "9482b4d98903d7c1a11592d32bf21d35fb3cd21f0e86280e381c2664b6c16e7d",
+  "expected_verdict": "valid"
+}

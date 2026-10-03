@@ -1,0 +1,75 @@
+{
+  "contract_version": "data-verification-lifecycle-client-v1",
+  "routes": {
+    "quote": {
+      "method": "POST",
+      "path_template": "/api/v1/data-verification/quote",
+      "expected_action": "data_verification_quote",
+      "response_schema": "QuoteResponse"
+    },
+    "start": {
+      "method": "POST",
+      "path_template": "/api/v1/data-verification/scan-spec",
+      "expected_action": "data_verification_start",
+      "response_schema": "SignedScanSpec"
+    },
+    "report_ingest": {
+      "method": "PUT",
+      "path_template": "/api/v1/data-verification/scan-spec",
+      "expected_action": null,
+      "response_schema": "ReportIngestResponse"
+    },
+    "status": {
+      "method": "GET",
+      "path_template": "/api/v1/data-verification/{verification_id}/status",
+      "expected_action": null,
+      "response_schema": "PaymentLifecycleStatus"
+    },
+    "cancel": {
+      "method": "POST",
+      "path_template": "/api/v1/data-verification/{verification_id}/cancel",
+      "expected_action": "data_verification_cancel",
+      "response_schema": "PaymentLifecycleStatus"
+    },
+    "publish": {
+      "method": "POST",
+      "path_template": "/api/v1/data-verification/{verification_id}/publish",
+      "expected_action": "data_verification_publish",
+      "response_schema": "PaymentLifecycleStatus"
+    },
+    "decline": {
+      "method": "POST",
+      "path_template": "/api/v1/data-verification/{verification_id}/decline",
+      "expected_action": "data_verification_decline",
+      "response_schema": "PaymentLifecycleStatus"
+    },
+    "withdraw": {
+      "method": "POST",
+      "path_template": "/api/v1/data-verification/{verification_id}/withdraw",
+      "expected_action": "data_verification_withdraw",
+      "response_schema": "PaymentLifecycleStatus"
+    }
+  },
+  "chunk_6_response_requirements": {
+    "grounded_result_projection": {
+      "applies_to": [
+        "ReportIngestResponse",
+        "PaymentLifecycleStatus result projection"
+      ],
+      "when": "narrative_state=grounded",
+      "must_carry_display_safe_fields": [
+        "narrative",
+        "listing_claim_comparison"
+      ],
+      "requirement": "Chunk 6 ingest/status responses MUST carry display-safe narrative and listing_claim_comparison strings for grounded results."
+    },
+    "PaymentLifecycleStatus": {
+      "must_carry_field": "withdrawn_at_utc",
+      "requirement": "Chunk 6 MUST return explicit withdrawn_at_utc in PaymentLifecycleStatus; clients prefer it over any transport Date header."
+    },
+    "carried_item": {
+      "id": "s3_pinned_archive_member_enumeration",
+      "disposition": "Chunk 6 territory; record only in Chunk 5 Fold 2"
+    }
+  }
+}

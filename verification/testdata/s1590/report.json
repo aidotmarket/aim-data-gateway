@@ -1,0 +1,67 @@
+{
+  "accepted_at_utc": "2026-08-21T09:59:00Z",
+  "agent_version": "aim-data-verification-v1",
+  "artifact_locator_commitment": "22cdb9e7313271906022a97589ab93b1daaa095621f4a508174c4d0322002a52",
+  "canonicalization_version": "python-json-sort-compact-v1",
+  "completed_at_utc": "2026-08-21T10:05:01Z",
+  "connector_type": "eolymp",
+  "connector_version": "eolymp-v1",
+  "content_sha256": "b326d3e1f7c0d0eb7cb9c26de0d04ea405c13512b61df684750873bf0280afc7",
+  "corpus_disclosure_version": "s1396-disclosure-v1",
+  "coverage": {
+    "objects_discovered": 1,
+    "objects_scanned": 1,
+    "objects_skipped_by_reason": {},
+    "skipped": []
+  },
+  "d6_description": {
+    "domain_class": "education_learning",
+    "intended_use_tags": ["analysis_reporting", "research_education"],
+    "known_limitation_tags": [],
+    "record_granularity": "entity",
+    "temporal_scope": "current_snapshot",
+    "update_cadence": "one_time"
+  },
+  "depth_class": "complete_standard_v1",
+  "distinct_algorithm_version": "hll-sha256-v1",
+  "duration_ms": 1000,
+  "fingerprint_hash": "ff905c28a6a2a14d7e850207f373779034e2dc9558b209a9ac6694cc1d849429",
+  "histogram_version": "fixed-buckets-v1",
+  "idempotency_key": "idem_0000000000000001",
+  "install_key_id": "install-fixture-key-v1",
+  "listing_id": "11111111-1111-4111-8111-111111111111",
+  "nonce_echo": "nonce_0000000000000001",
+  "numeric_bucket_version": "fixed-buckets-v1",
+  "objects": [
+    {
+      "approx_distinct_count": [
+        {"algorithm": "hll-sha256-v1", "estimate": 12, "relative_error_ppm": 91924},
+        {"algorithm": "hll-sha256-v1", "estimate": 13, "relative_error_ppm": 91924},
+        {"algorithm": "hll-sha256-v1", "estimate": 12, "relative_error_ppm": 91924}
+      ],
+      "column_names": ["problem_id", "difficulty", "accepted_count"],
+      "column_types": ["integer", "string", "integer"],
+      "length_histograms": [null, [0, 0, 0, 12, 0, 0, 0, 0, 0, 0], null],
+      "null_rate": ["0.000000", "0.000000", "0.000000"],
+      "numeric_range_buckets": ["suppressed_low_occupancy", null, "suppressed_low_occupancy"],
+      "object_id": "1d9c5b63a227f77e0ee3ce97f571d808ca62420934425f03bbd8f2770c03a698",
+      "row_count": 12,
+      "row_count_method": "exact"
+    }
+  ],
+  "owner_authorization_id": "auth_0000000000000001",
+  "payment_disclosure_version": "payment-disclosure-v1",
+  "preview_requested": true,
+  "quote_id": "quote_0000000000000001",
+  "receipt_signature": "8rR2dct7u3jamQneXGkssqhnebM690wrzIQfRntwo+vB5i2JwQBFhnIsvf/tdsS53PIxoTbcMJaHEmClMr2dBg==",
+  "requested_action": "start",
+  "row_count_algorithm_version": "exact-v1",
+  "signature_algorithm": "Ed25519",
+  "source_handle_id": "dataset-s1590-fixture",
+  "spec_hash": "f7260a2510f668fb2e6db51f158ebbf5d9b11d8334bad7dc1ea9af42b8144b7b",
+  "spec_id": "spec_0000000000000001",
+  "spec_version": "1",
+  "started_at_utc": "2026-08-21T10:05:00Z",
+  "verification_id": "22222222-2222-4222-8222-222222222222",
+  "wire_manifest_version": "data-verification-wire-v1"
+}

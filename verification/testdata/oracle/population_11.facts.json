@@ -1,0 +1,1 @@
+{"approx_distinct_count":[{"algorithm":"hll-sha256-v1","estimate":10,"relative_error_ppm":91924}],"column_names":["value"],"column_types":["integer"],"length_histograms":[null],"null_rate":["0.000000"],"numeric_range_buckets":["suppressed_low_occupancy"],"object_id":"1d9c5b63a227f77e0ee3ce97f571d808ca62420934425f03bbd8f2770c03a698","row_count":11,"row_count_method":"exact"}
