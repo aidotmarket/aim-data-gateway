@@ -280,6 +280,10 @@ func strict(data []byte, out any) error {
 
 var hex32 = regexp.MustCompile(`^[0-9a-f]{32}$`)
 var hex64 = regexp.MustCompile(`^[0-9a-f]{64}$`)
+
+// ValidUUID accepts the canonical lowercase wire UUID spelling.
+func ValidUUID(s string) bool { return uuid.MatchString(s) }
+
 var uuid = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 
 var revokeStates = []string{"active", "expired", "closed", "unknown"}

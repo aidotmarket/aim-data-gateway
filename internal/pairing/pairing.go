@@ -23,6 +23,7 @@ const PairURL = "https://api.ai.market/api/v1/gateway-channel/pair"
 type Pins struct {
 	GatewayID      string            `json:"gateway_id"`
 	PermissionKeys []wire.Key        `json:"permission_keys"`
+	ScanSpecKeys   []wire.Key        `json:"scan_spec_keys,omitempty"`
 	ListingKeys    []wire.Key        `json:"listing_keys"`
 	MinimumVersion string            `json:"minimum_version"`
 	CanaryHost     string            `json:"canary_host"`
@@ -89,7 +90,10 @@ func Pair(ctx context.Context, dir, code, version, url string, client *http.Clie
 	if pins.GatewayID == "" || len(pins.PermissionKeys) == 0 || len(pins.ListingKeys) == 0 || pins.MinimumVersion == "" || pins.CanaryHost == "" || pins.CanaryZone == "" {
 		return State{}, errors.New("incomplete pairing response")
 	}
-	for _, keys := range [][]wire.Key{pins.PermissionKeys, pins.ListingKeys} {
+	if e := wire.ValidateKeySet(pins.PermissionKeys, pins.ListingKeys, pins.ScanSpecKeys); e != nil {
+		return State{}, e
+	}
+	for _, keys := range [][]wire.Key{pins.PermissionKeys, pins.ListingKeys, pins.ScanSpecKeys} {
 		for _, k := range keys {
 			b, e := base64.RawURLEncoding.DecodeString(k.Key)
 			if k.KID == "" || k.Alg != "EdDSA" || e != nil || len(b) != ed25519.PublicKeySize {
@@ -197,6 +201,18 @@ func Load(dir string) (State, error) {
 		}
 		return s, errors.New("gateway is not paired: set AIM_PAIRING_CODE for the first run")
 	}
+	return loadStateFiles(dir)
+}
+
+// ReadOnlyState never cleans staging or writes pairing state.
+func ReadOnlyState(dir string) (State, error) {
+	if _, e := os.Stat(filepath.Join(dir, ".pairing-complete")); e != nil {
+		return State{}, e
+	}
+	return loadStateFiles(dir)
+}
+func loadStateFiles(dir string) (State, error) {
+	var s State
 	private, err := os.ReadFile(filepath.Join(dir, "identity.key"))
 	if err != nil {
 		return s, err

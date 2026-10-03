@@ -20,11 +20,12 @@ type Columns struct {
 	Drop   []string          `toml:"drop"`
 }
 type Config struct {
-	Sources      []Source           `toml:"sources"`
-	OfferCeiling []string           `toml:"offer_ceiling"`
-	Aliases      map[string]string  `toml:"aliases"`
-	Columns      map[string]Columns `toml:"columns"`
-	Door         struct {
+	VerificationEnabled bool               `toml:"verification_enabled"`
+	Sources             []Source           `toml:"sources"`
+	OfferCeiling        []string           `toml:"offer_ceiling"`
+	Aliases             map[string]string  `toml:"aliases"`
+	Columns             map[string]Columns `toml:"columns"`
+	Door                struct {
 		Listen                 string `toml:"listen"`
 		MaxConcurrentDownloads int    `toml:"max_concurrent_downloads"`
 	} `toml:"door"`
@@ -35,7 +36,7 @@ type Config struct {
 }
 
 func Load(path string) (Config, error) {
-	var c Config
+	c := Config{VerificationEnabled: true}
 	f, e := os.Open(path)
 	if e != nil {
 		return c, e

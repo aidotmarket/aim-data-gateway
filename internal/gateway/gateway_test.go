@@ -5,10 +5,13 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/aidotmarket/aim-data-gateway/internal/config"
 	"github.com/aidotmarket/aim-data-gateway/internal/inventory"
@@ -133,5 +136,49 @@ func TestOfferCrashAfterEffectBeforeSeenIsRetryable(t *testing.T) {
 	typ, _, err = g.Handle(t.Context(), i, "listing", "listing")
 	if err != nil || typ != "" {
 		t.Fatalf("completed replay was handled: %s %v", typ, err)
+	}
+}
+
+func TestExistingVolumeBootstrapAndScanRotation(t *testing.T) {
+	key := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0x42}, 32))
+	scan := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0x43}, 32))
+	next := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0x44}, 32))
+	gid := "11111111-1111-4111-8111-111111111111"
+	dir := t.TempDir()
+	state := pairing.State{Private: key, Secret: make([]byte, 32), Pins: pairing.Pins{GatewayID: gid, ListingKeys: []wire.Key{{KID: "listing", Alg: "EdDSA", Key: base64.RawURLEncoding.EncodeToString(key.Public().(ed25519.PublicKey))}}}}
+	g, e := Open(dir, config.Config{VerificationEnabled: true}, state)
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer g.Ledger.Close()
+	if e = g.InitVerification("1.2.3"); e != nil {
+		t.Fatal(e)
+	}
+	defer g.Verifier.Close()
+	at := time.Now().Unix()
+	claims := map[string]any{"op": "scan_spec", "variant": "key_bootstrap", "aud": gid, "iid": "88888888-8888-4888-8888-888888888888", "iat": at, "exp": at + 900, "keys": []wire.Key{{KID: "scan", Alg: "EdDSA", Key: base64.RawURLEncoding.EncodeToString(scan.Public().(ed25519.PublicKey))}}}
+	token, _ := wire.Sign("aim-scan-key-bootstrap+jwt", "listing", claims, key)
+	if e = g.VerificationControl(context.Background(), token); e != nil {
+		t.Fatal(e)
+	}
+	if len(g.State.Pins.ScanSpecKeys) != 1 {
+		t.Fatal("bootstrap not pinned")
+	}
+	if e = g.VerificationControl(context.Background(), token); e == nil {
+		t.Fatal("bootstrap replaced pins")
+	}
+	i := wire.Instruction{Op: "key_rotation", Audience: gid, IID: "99999999-9999-4999-8999-999999999999", IssuedAt: at, Keys: []wire.Key{{KID: "next", Alg: "EdDSA", Key: base64.RawURLEncoding.EncodeToString(next.Public().(ed25519.PublicKey))}}}
+	if _, _, e = g.Handle(context.Background(), i, "scan", "scan"); e != nil {
+		t.Fatal(e)
+	}
+	if len(g.State.Pins.ScanSpecKeys) != 2 || g.State.Pins.KeyExpires["scan"] == "" {
+		t.Fatal("rotation state")
+	}
+	if !strings.Contains(g.State.Pins.KeyExpires["scan"], "T") {
+		t.Fatal("not persisted expiry")
+	}
+	g.State.Pins.KeyExpires["scan"] = time.Now().Add(-time.Second).Format(time.RFC3339Nano)
+	if g.Verifier.ActivePins()["scan"] != nil || g.Verifier.Pins()["scan"] == nil {
+		t.Fatal("historical key retention")
 	}
 }

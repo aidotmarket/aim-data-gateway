@@ -1,7 +1,9 @@
 package audit
 
 import (
+	"bytes"
 	"crypto/ed25519"
+	"encoding/base64"
 	"errors"
 	"os"
 	"path/filepath"
@@ -301,5 +303,30 @@ func TestIndexedTailAvoidsHistoryReads(t *testing.T) {
 		if err != nil || entry.Seq != 200 {
 			t.Fatalf("tail: %+v %v", entry, err)
 		}
+	}
+}
+
+func TestScanReportBounds(t *testing.T) {
+	_, key, _ := ed25519.GenerateKey(nil)
+	log, e := Open(t.TempDir(), key)
+	if e != nil {
+		t.Fatal(e)
+	}
+	body := map[string]any{"op": "scan_report", "variant": "probe", "runner_id": "66666666-6666-4666-8666-666666666666", "iid": "88888888-8888-4888-8888-888888888888", "document_b64": base64.RawURLEncoding.EncodeToString([]byte(`{"probe_id":"test"}`))}
+	if _, e = log.Append("scan_report", body); e != nil {
+		t.Fatal(e)
+	}
+	body["document_b64"] = base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte("x"), 700*1024+1))
+	if _, e = log.Append("scan_report", body); e == nil {
+		t.Fatal("decoded cap not enforced")
+	}
+	body["document_b64"] = "e30="
+	if _, e = log.Append("scan_report", body); e == nil {
+		t.Fatal("padded b64 accepted")
+	}
+	body["document_b64"] = "e30"
+	body["path"] = "/private"
+	if _, e = log.Append("scan_report", body); e == nil {
+		t.Fatal("unknown field accepted")
 	}
 }

@@ -43,8 +43,11 @@ type Client struct {
 	Log          *audit.Log
 	Version      string
 	// Handle processes a verified, unseen instruction and returns an audit answer.
-	Handle   func(context.Context, wire.Instruction, string, string) (string, any, error)
-	Complete func(context.Context, string) error
+	Verification func(context.Context, string) error
+	// VerificationRefused must enqueue a digest without storage I/O or blocking.
+	VerificationRefused func(context.Context, string) error
+	Handle              func(context.Context, wire.Instruction, string, string) (string, any, error)
+	Complete            func(context.Context, string) error
 	// Scan appends an inventory generation after each successful resume.
 	Scan   func(context.Context) error
 	Canary func(context.Context) error
@@ -70,7 +73,9 @@ func (c *Client) keys(class string) (map[string]ed25519.PublicKey, error) {
 }
 func keys(pinned pairing.Pins, class string) (map[string]ed25519.PublicKey, error) {
 	var pins []wire.Key
-	if class == "permission" {
+	if class == "scan" {
+		pins = pinned.ScanSpecKeys
+	} else if class == "permission" {
 		pins = pinned.PermissionKeys
 	} else {
 		pins = pinned.ListingKeys
@@ -120,10 +125,15 @@ func (c *Client) verify(token string) (wire.Instruction, string, string, error) 
 	}
 	if class == "outgoing" {
 		// A rotation may be signed by either outgoing key class.
-		for _, kind := range []string{"listing", "permission"} {
+		for _, kind := range []string{"listing", "permission", "scan"} {
 			keys, e := keys(pinned, kind)
 			if e == nil {
-				if i, e = wire.VerifyInstruction(token, keys); e == nil {
+				if kind == "scan" {
+					i, e = wire.VerifyScanRotation(token, keys)
+				} else {
+					i, e = wire.VerifyInstruction(token, keys)
+				}
+				if e == nil {
 					class = kind
 					err = nil
 					break
@@ -329,6 +339,26 @@ func (c *Client) Connect(ctx context.Context) error {
 	}
 	go worker(jobs)
 	go worker(descriptions)
+	verificationControls := make(chan string, 1)
+	if c.Verification != nil {
+		go func() {
+			for {
+				select {
+				case <-workCtx.Done():
+					return
+				case token := <-verificationControls:
+					if e := c.Verification(workCtx, token); e != nil {
+						log.Printf("verification request refused")
+					}
+					select {
+					case wake <- struct{}{}:
+					default:
+					}
+				}
+			}
+		}()
+	}
+
 	queue := func(lane chan<- func() error, job func() error) error {
 		select {
 		case lane <- job:
@@ -487,6 +517,25 @@ func (c *Client) Connect(ctx context.Context) error {
 				continue
 			}
 			token := string(raw)
+			parts := strings.Split(token, ".")
+			if len(parts) > 0 && c.Verification != nil {
+				h, e := base64.RawURLEncoding.DecodeString(parts[0])
+				var header wire.Header
+				if e == nil && json.Unmarshal(h, &header) == nil && (header.Type == "aim-scan-spec+jwt" || header.Type == "aim-scan-key-bootstrap+jwt" || header.Type == "aim-scan-runner-ack+jwt") {
+					// Admission does metadata/control I/O only. The runner owns its single
+					// worker and one pending slot, independently of channel delivery lanes.
+					select {
+					case verificationControls <- token:
+					default:
+						if c.VerificationRefused == nil {
+							return errors.New("verification refusal handler unavailable")
+						}
+						// The process owner only enqueues hash-only evidence here.
+						_ = c.VerificationRefused(ctx, wire.Digest([]byte(token)))
+					}
+					continue
+				}
+			}
 			if err = queue(jobs, func() error {
 				i, class, signer, e := c.verify(token)
 				if e != nil {

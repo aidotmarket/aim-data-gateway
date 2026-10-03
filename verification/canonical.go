@@ -219,3 +219,9 @@ func requireCanonical(raw []byte) (any, error) {
 	}
 	return v, nil
 }
+
+// Canonical encodes the frozen Python-compatible fact and receipt format.
+func Canonical(v any) ([]byte, error) { return canonical(v) }
+
+// ParseCanonical rejects alternate encodings, duplicates and trailing bytes.
+func ParseCanonical(raw []byte) (any, error) { return requireCanonical(raw) }

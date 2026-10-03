@@ -6,7 +6,7 @@
   "input": {
     "probe_id": "88888888-8888-4888-8888-888888888888",
     "spec_id": "spec_0000000000000001",
-    "spec_hash": "cd5b9ea67d279337a008b4382d89e8e9ca3278e1e20221b0479e600ae73cf9a7",
+    "spec_hash": "60726ce2437ef9b93f1ef8b28bc3d918c9e4d3f3bb6a3f2ac633f8e129d7ae57",
     "nonce_echo": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE",
     "install_key_id": "77777777-7777-4777-8777-777777777777",
     "probe": {
@@ -24,14 +24,14 @@
         "fixed_bucket_aggregates",
         "exact_or_declared_estimated_row_counts"
       ],
-      "estimated_max_input_tokens": 1024,
+      "estimated_max_input_tokens": 1032,
       "preview_requested": true
     },
     "affected_file_ids": [],
     "signature_algorithm": "Ed25519",
-    "receipt_signature": "v2iVE2U9Nm5TJtS4f2PRTfpX9Df2Rp9Kcve9TV6squPQ+g1BiGqsRQLElKpfdZiqxr5+F2ugabaJzHDIj7MNBA=="
+    "receipt_signature": "OEUmnU6+bec9BkVxZCyL8fKWVXBRIG2jIHzflSTzImW14abx4pFFDSvXtC9aFRRfXSKfhnxNx5fA3iEzyGumBg=="
   },
-  "canonical": "{\"affected_file_ids\":[],\"install_key_id\":\"77777777-7777-4777-8777-777777777777\",\"nonce_echo\":\"AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE\",\"probe\":{\"connector_type\":\"aim_gateway\",\"connector_version\":\"aim_gateway-v1\",\"estimated_max_input_tokens\":1024,\"listing_id\":\"33333333-3333-4333-8333-333333333333\",\"objects_discovered\":3,\"owner_consent\":true,\"preview_requested\":true,\"size_class\":\"small\",\"source_handle_id\":\"55555555-5555-4555-8555-555555555555\",\"source_reachable\":true,\"supported_capabilities\":[\"complete_traversal\",\"deterministic_object_order\",\"fixed_bucket_aggregates\",\"exact_or_declared_estimated_row_counts\"]},\"probe_id\":\"88888888-8888-4888-8888-888888888888\",\"receipt_signature\":\"v2iVE2U9Nm5TJtS4f2PRTfpX9Df2Rp9Kcve9TV6squPQ+g1BiGqsRQLElKpfdZiqxr5+F2ugabaJzHDIj7MNBA==\",\"signature_algorithm\":\"Ed25519\",\"spec_hash\":\"cd5b9ea67d279337a008b4382d89e8e9ca3278e1e20221b0479e600ae73cf9a7\",\"spec_id\":\"spec_0000000000000001\"}",
-  "canonical_sha256": "dee1bb17856c46d6621580b82b0ba390d974234935e67e8be670442fffea5cdd",
+  "canonical": "{\"affected_file_ids\":[],\"install_key_id\":\"77777777-7777-4777-8777-777777777777\",\"nonce_echo\":\"AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE\",\"probe\":{\"connector_type\":\"aim_gateway\",\"connector_version\":\"aim_gateway-v1\",\"estimated_max_input_tokens\":1032,\"listing_id\":\"33333333-3333-4333-8333-333333333333\",\"objects_discovered\":3,\"owner_consent\":true,\"preview_requested\":true,\"size_class\":\"small\",\"source_handle_id\":\"55555555-5555-4555-8555-555555555555\",\"source_reachable\":true,\"supported_capabilities\":[\"complete_traversal\",\"deterministic_object_order\",\"fixed_bucket_aggregates\",\"exact_or_declared_estimated_row_counts\"]},\"probe_id\":\"88888888-8888-4888-8888-888888888888\",\"receipt_signature\":\"OEUmnU6+bec9BkVxZCyL8fKWVXBRIG2jIHzflSTzImW14abx4pFFDSvXtC9aFRRfXSKfhnxNx5fA3iEzyGumBg==\",\"signature_algorithm\":\"Ed25519\",\"spec_hash\":\"60726ce2437ef9b93f1ef8b28bc3d918c9e4d3f3bb6a3f2ac633f8e129d7ae57\",\"spec_id\":\"spec_0000000000000001\"}",
+  "canonical_sha256": "a30aa31f1f61c40152c1c4917770f3fb985d88646574f779d370e00876e5738d",
   "expected_verdict": "valid"
 }

@@ -79,9 +79,13 @@ def check(path: Path) -> None:
         raise ValueError("only the default gateway healthcheck is allowed")
     environment = service.get("environment", {})
     if not isinstance(environment, dict) or set(environment) - {
-        "AIM_PAIRING_CODE", "AIM_GATEWAY_CONFIG", "AIM_GATEWAY_STATE",
+        "AIM_PAIRING_CODE", "AIM_GATEWAY_CONFIG", "AIM_GATEWAY_STATE", "AIM_GATEWAY_IMAGE_DIGEST",
     }:
         raise ValueError("unexpected environment variable")
+    if "image" in service and environment.get("AIM_GATEWAY_IMAGE_DIGEST") != service["image"].split("@", 1)[1]:
+        raise ValueError("release provenance digest must match the pinned image")
+    if "build" in service and "AIM_GATEWAY_IMAGE_DIGEST" in environment:
+        raise ValueError("local build cannot claim released image provenance")
     if "AIM_PAIRING_CODE" in environment and not isinstance(
         environment["AIM_PAIRING_CODE"], str
     ):

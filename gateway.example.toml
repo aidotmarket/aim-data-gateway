@@ -6,6 +6,9 @@ offer_ceiling = []
 aliases = {}
 # Require `aim-gateway approve <file-id>` before an offer can be served.
 offer_requires_local_approval = false
+# Seller-requested probes/scans. Turning this off refuses new verification;
+# retain the volume, keys, consent ledger and report outbox.
+verification_enabled = true
 
 [door]
 # Plain HTTP; terminate TLS at the seller's reverse proxy.

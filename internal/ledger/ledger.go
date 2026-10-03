@@ -119,7 +119,7 @@ func open(path string, key ed25519.PrivateKey, kid string, recoverRequests bool)
 		return nil, e
 	}
 	db.SetMaxOpenConns(1)
-	for _, q := range []string{"PRAGMA journal_mode=WAL", "PRAGMA synchronous=FULL", "PRAGMA busy_timeout=5000", schema} {
+	for _, q := range []string{"PRAGMA journal_mode=WAL", "PRAGMA synchronous=FULL", "PRAGMA busy_timeout=5000", schema, verificationSchema} {
 		if _, e = db.Exec(q); e != nil {
 			db.Close()
 			return nil, e

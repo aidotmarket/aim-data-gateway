@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/ed25519"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -20,6 +22,7 @@ import (
 	"github.com/aidotmarket/aim-data-gateway/internal/pairing"
 	"github.com/aidotmarket/aim-data-gateway/internal/profile"
 	"github.com/aidotmarket/aim-data-gateway/internal/selfcheck"
+	verifier "github.com/aidotmarket/aim-data-gateway/internal/verification"
 	"github.com/aidotmarket/aim-data-gateway/internal/wire"
 )
 
@@ -58,7 +61,12 @@ func execute(args []string) error {
 	if cmd != "run" && cmd != "preview" && cmd != "approve" {
 		return errors.New("usage: aim-gateway [run|preview <file-id>|approve <file-id>|healthcheck|version]")
 	}
-	if (cmd == "run" && len(args) != 1) || (cmd != "run" && len(args) != 2) {
+	verifyPreview := cmd == "preview" && len(args) >= 3 && args[1] == "--verify"
+	if verifyPreview {
+		if len(args) != 3 && (len(args) != 5 || args[3] != "--spec-id") {
+			return errors.New("usage: preview --verify <file-id> [--spec-id <id>]")
+		}
+	} else if (cmd == "run" && len(args) != 1) || (cmd != "run" && len(args) != 2) {
 		return errors.New("invalid arguments")
 	}
 	if cmd == "run" {
@@ -136,6 +144,41 @@ func execute(args []string) error {
 		}
 		defer g.Ledger.Close()
 		return g.Run(ctx, version)
+	}
+	if verifyPreview {
+		dir := gateway.StateDir()
+		state, err := pairing.ReadOnlyState(dir)
+		if err != nil {
+			return err
+		}
+		l, err := ledger.OpenVerificationPreview(filepath.Join(dir, "gateway.db"))
+		if err != nil {
+			return errors.New(verifier.Guidance)
+		}
+		defer l.Close()
+		k, err := verifier.LoadPreviewKeys(dir)
+		if err != nil {
+			return errors.New(verifier.Guidance)
+		}
+		pins := map[string]ed25519.PublicKey{}
+		for _, p := range state.Pins.ScanSpecKeys {
+			b, e := base64.RawURLEncoding.DecodeString(p.Key)
+			if e != nil || len(b) != 32 {
+				return wire.ErrVerification
+			}
+			pins[p.KID] = b
+		}
+		r := verifier.Runner{Ledger: l, Keys: k, GatewayID: state.Pins.GatewayID, Version: version, Config: func() config.Config { return c }, Pins: func() map[string]ed25519.PublicKey { return pins }}
+		id := ""
+		if len(args) == 5 {
+			id = args[4]
+		}
+		raw, err := r.Preview(context.Background(), args[2], id)
+		if err != nil {
+			return err
+		}
+		fmt.Println(string(raw))
+		return nil
 	}
 	secretPath := os.Getenv("AIM_GATEWAY_SECRET")
 	if secretPath == "" {

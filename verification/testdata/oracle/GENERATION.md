@@ -33,3 +33,11 @@ non-zero, Python microsecond precision otherwise. Without pandas the same
 connector refuses those values, which is why pandas is required here.
 Overflow and positive/negative infinity refuse during canonicalization with
 ValueError and no facts.
+
+S1791 chunk 1b adds `nanosecond_parquet` and `nanosecond_utc_parquet` pairs
+using the same unchanged connector and canonicalizer. Both have a declared
+Parquet timestamp[ns] column and forty values with non-zero sub-microsecond
+parts; one is timezone-naive and one uses UTC. The generator asserts these
+properties and writes input and expected-fact digests into the manifest.
+The existing Go oracle test compares both complete canonical objects byte
+for byte. No production scanner change was needed.

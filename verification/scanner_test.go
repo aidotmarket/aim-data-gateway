@@ -35,7 +35,7 @@ type memorySource struct {
 }
 
 func sourceFor(data []byte, format string) *memorySource {
-	m := Member{Identity: strings.Repeat("1", 64), Size: int64(len(data)), SHA256: sha256.Sum256(data), Format: format}
+	m := Member{Identity: strings.Repeat("1", 32), Size: int64(len(data)), SHA256: sha256.Sum256(data), Format: format}
 	return &memorySource{[]Member{m}, map[string][]byte{m.Identity: data}, map[string]int{}, nil, nil}
 }
 func (s *memorySource) Members() []Member { return s.members }
@@ -264,7 +264,7 @@ func TestCompleteTraversalAndVoidedMutation(t *testing.T) {
 	for _, mode := range []string{"before", "between", "missing", "append", "unsupported_mutation", "late_supported"} {
 		t.Run(mode, func(t *testing.T) {
 			src := sourceFor([]byte("n\n"+strings.Repeat("123456789\n", 20000)), "csv")
-			second := Member{Identity: strings.Repeat("2", 64), Format: "zip", Size: 4, SHA256: sha256.Sum256([]byte("zip!"))}
+			second := Member{Identity: strings.Repeat("2", 32), Format: "zip", Size: 4, SHA256: sha256.Sum256([]byte("zip!"))}
 			src.members = append(src.members, second)
 			src.data[second.Identity] = []byte("zip!")
 			if mode == "late_supported" {
@@ -305,7 +305,7 @@ func TestCompleteTraversalAndVoidedMutation(t *testing.T) {
 		})
 	}
 	src := sourceFor([]byte("n\n"+strings.Repeat("12\n", 20)), "csv")
-	second := Member{Identity: strings.Repeat("2", 64), Format: "zip", Size: 4, SHA256: sha256.Sum256([]byte("zip!"))}
+	second := Member{Identity: strings.Repeat("2", 32), Format: "zip", Size: 4, SHA256: sha256.Sum256([]byte("zip!"))}
 	src.members = append(src.members, second)
 	src.data[second.Identity] = []byte("zip!")
 	f, e := Scan(context.Background(), src, testPolicy())
@@ -420,7 +420,7 @@ func TestLargeTextMemoryAndDownloadConcurrency(t *testing.T) {
 			}
 			f.Close()
 			st, _ := os.Stat(path)
-			m := Member{strings.Repeat("1", 64), st.Size(), [32]byte(h.Sum(nil)), format}
+			m := Member{strings.Repeat("1", 32), st.Size(), [32]byte(h.Sum(nil)), format}
 			// Existing eight delivery buffers remain live during the measurement.
 			downloads := make([][]byte, 8)
 			for i := range downloads {
@@ -462,5 +462,57 @@ func TestLargeTextMemoryAndDownloadConcurrency(t *testing.T) {
 				t.Fatalf("memory ceiling exceeded: %d", additional)
 			}
 		})
+	}
+}
+
+func TestGatewayFIDWidthErratum(t *testing.T) {
+	for _, id := range []string{strings.Repeat("a", 31), strings.Repeat("a", 33), strings.Repeat("a", 64), strings.Repeat("A", 32)} {
+		src := sourceFor([]byte("n\n12\n"), "csv")
+		src.members[0].Identity = id
+		if _, e := Scan(context.Background(), src, testPolicy()); e == nil {
+			t.Fatal("invalid FID accepted", id)
+		}
+		if len(src.opens) != 0 {
+			t.Fatal("invalid FID opened source")
+		}
+	}
+}
+
+func TestDiscoverSchemaMatchesScanner(t *testing.T) {
+	for _, tc := range []struct {
+		kind, path string
+		data       []byte
+	}{
+		{"csv", "", []byte("\ufeffid,name\n1,value\n")},
+		{"tsv", "", []byte("\ufeffid\tname\n1\tvalue\n")},
+		{"jsonl", "testdata/oracle/json_new_field.jsonl", nil},
+		{"parquet", "testdata/oracle/all_approved_types.parquet", nil},
+	} {
+		t.Run(tc.kind, func(t *testing.T) {
+			data := tc.data
+			if tc.path != "" {
+				data = read(t, tc.path)
+			}
+			names, e := DiscoverSchema(context.Background(), &randomBytes{bytes.NewReader(data)}, tc.kind)
+			if e != nil {
+				t.Fatal(e)
+			}
+			facts, e := Scan(context.Background(), sourceFor(data, tc.kind), testPolicy())
+			if e != nil || !reflect.DeepEqual(names, facts.Objects[0].Names) {
+				t.Fatal("schema drift", names, facts, e)
+			}
+			if tc.kind == "jsonl" && !reflect.DeepEqual(names, []string{"a", "b"}) {
+				t.Fatal("late field missing", names)
+			}
+		})
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, e := DiscoverSchema(ctx, &randomBytes{bytes.NewReader([]byte("{\"a\":1}\n"))}, "jsonl"); e == nil {
+		t.Fatal("discovery ignored cancellation")
+	}
+	oversized := []byte("id" + strings.Repeat("x", 16<<20) + "\n")
+	if _, e := DiscoverSchema(context.Background(), &randomBytes{bytes.NewReader(oversized)}, "csv"); e == nil {
+		t.Fatal("unbounded header")
 	}
 }

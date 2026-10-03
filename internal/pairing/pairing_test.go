@@ -112,3 +112,17 @@ func TestLoadMissingCompletionMarker(t *testing.T) {
 		})
 	}
 }
+
+func TestReadOnlyStateDoesNotCleanStaging(t *testing.T) {
+	dir := t.TempDir()
+	if e := os.Mkdir(filepath.Join(dir, ".pairing-staging"), 0700); e != nil {
+		t.Fatal(e)
+	}
+	if e := os.WriteFile(filepath.Join(dir, ".pairing-complete"), []byte("paired"), 0600); e != nil {
+		t.Fatal(e)
+	}
+	_, _ = ReadOnlyState(dir)
+	if _, e := os.Stat(filepath.Join(dir, ".pairing-staging")); e != nil {
+		t.Fatal("read-only load changed staging", e)
+	}
+}

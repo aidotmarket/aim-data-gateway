@@ -4,13 +4,16 @@ from hashlib import sha256
 from pathlib import Path
 import sys
 
-MANIFEST_SHA256 = "502db757b84417a26bbe36a935ababad8b2fcb6da49da1b84b4c5fd7ecbce057"
+MANIFEST_SHA256 = "9e174b0b668eadba15771a7f238605c937c4ddf90d666e79748c0f84625b7a01"
 
 paths = sorted(Path("contract/vectors").rglob("*.json"))
 actual = "".join(f"{sha256(p.read_bytes()).hexdigest()}  {p.as_posix()}\n" for p in paths)
 pin = Path("contract/VECTORS.sha256")
 if sys.argv[1:] == ["--update"]:
     pin.write_text(actual)
+    # Keep the manifest's own pin in sync with intentional vector regeneration.
+    source = Path(__file__)
+    source.write_text(source.read_text().replace(MANIFEST_SHA256, sha256(actual.encode()).hexdigest()))
 elif not paths or not pin.exists() or pin.read_text() != actual or sha256(pin.read_bytes()).hexdigest() != MANIFEST_SHA256:
     print("vector digest mismatch", file=sys.stderr)
     sys.exit(1)

@@ -1,6 +1,7 @@
 package channel
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"encoding/base64"
@@ -8,15 +9,20 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/aidotmarket/aim-data-gateway/internal/audit"
+	"github.com/aidotmarket/aim-data-gateway/internal/ledger"
 	"github.com/aidotmarket/aim-data-gateway/internal/pairing"
 	"github.com/aidotmarket/aim-data-gateway/internal/profile"
+	verifier "github.com/aidotmarket/aim-data-gateway/internal/verification"
 	"github.com/aidotmarket/aim-data-gateway/internal/wire"
 	"github.com/coder/websocket"
 )
@@ -557,5 +563,365 @@ func TestForgedAckCorrectedByNextResume(t *testing.T) {
 	entries, _ := c.Log.Entries()
 	if len(entries) != 2 {
 		t.Fatal("ack pruned log")
+	}
+}
+
+func TestVerificationLaneDoesNotBlockControlOrHeartbeat(t *testing.T) {
+	c, _ := fixture(t)
+	key := ed25519.NewKeyFromSeed(bytesRepeat(0x42, 32))
+	c.State.Pins.ListingKeys = []wire.Key{{KID: "listing", Alg: "EdDSA", Key: base64.RawURLEncoding.EncodeToString(key.Public().(ed25519.PublicKey))}}
+	started := make(chan struct{})
+	stopped := make(chan struct{})
+	c.Verification = func(ctx context.Context, token string) error {
+		close(started)
+		<-ctx.Done()
+		close(stopped)
+		return ctx.Err()
+	}
+	c.heartbeatEvery = 20 * time.Millisecond
+	c.Handle = func(ctx context.Context, i wire.Instruction, _, _ string) (string, any, error) {
+		return "offer_ack", wire.OfferAck{IID: i.IID, FileID: i.FileID, Ready: true}, nil
+	}
+	i := wire.Instruction{Op: "offer", Audience: c.State.Pins.GatewayID, IID: "44444444-4444-4444-8444-444444444444", IssuedAt: time.Now().Unix(), FileID: "0123456789abcdef0123456789abcdef", SHA256: strings.Repeat("a", 64), ListingVersionID: "33333333-3333-4333-8333-333333333333"}
+	offer, _ := wire.Sign("aim-offer+jwt", "listing", i, key)
+	scan, _ := wire.Sign("aim-scan-spec+jwt", "scan", map[string]any{"variant": "scan"}, key)
+	s := server(t, func(ctx context.Context, ws *websocket.Conn) {
+		ws.Write(ctx, websocket.MessageText, []byte(`{"resume":{"seq":0,"entry_hash":""}}`))
+		for range 2 {
+			ws.Read(ctx)
+		}
+		ws.Write(ctx, websocket.MessageText, []byte(scan))
+		<-started
+		ws.Write(ctx, websocket.MessageText, []byte(offer))
+		_, raw, e := ws.Read(ctx)
+		if e != nil {
+			t.Error(e)
+			return
+		}
+		var a audit.Entry
+		if json.Unmarshal(raw, &a) != nil || a.MessageType != "offer_ack" {
+			t.Error("verification blocked control", string(raw))
+		}
+		ws.Close(websocket.StatusNormalClosure, "done")
+	})
+	defer s.Close()
+	c.URL = "ws" + strings.TrimPrefix(s.URL, "http")
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	defer cancel()
+	c.Connect(ctx)
+	select {
+	case <-stopped:
+	case <-time.After(time.Second):
+		t.Fatal("disconnect did not cancel verification")
+	}
+}
+func TestScanRotationUsesOutgoingScanClass(t *testing.T) {
+	c, _ := fixture(t)
+	key := ed25519.NewKeyFromSeed(bytesRepeat(0x42, 32))
+	c.State.Pins.ScanSpecKeys = []wire.Key{{KID: "scan", Alg: "EdDSA", Key: base64.RawURLEncoding.EncodeToString(key.Public().(ed25519.PublicKey))}}
+	i := wire.Instruction{Op: "key_rotation", Audience: c.State.Pins.GatewayID, IID: "44444444-4444-4444-8444-444444444444", IssuedAt: time.Now().Unix(), Keys: c.State.Pins.ScanSpecKeys}
+	token, _ := wire.Sign("aim-keys+jwt", "scan", i, key)
+	_, class, _, e := c.verify(token)
+	if e != nil || class != "scan" {
+		t.Fatal(class, e)
+	}
+}
+
+func TestVerificationControlOverflowRecordsEveryToken(t *testing.T) {
+	c, _ := fixture(t)
+	dir := t.TempDir()
+	l, e := ledger.Open(filepath.Join(dir, "gateway.db"), c.State.Private, "gateway")
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer l.Close()
+	local, e := verifier.OpenLocalAudit(dir, c.State.Private)
+	if e != nil {
+		t.Fatal(e)
+	}
+	r := &verifier.Runner{Ledger: l, Audit: local, Log: c.Log, OpenFile: func(ledger.File) (*os.File, error) { t.Error("overflow opened source"); return nil, os.ErrPermission }}
+	received := make(chan struct{}, 12)
+	record := func(ctx context.Context, token string) error {
+		e := r.RefuseControl(ctx, token)
+		if e == nil {
+			received <- struct{}{}
+		}
+		return e
+	}
+	if e = r.Start(context.Background(), dir); e != nil {
+		t.Fatal(e)
+	}
+	defer r.Close()
+	c.VerificationRefused = r.QueueRefusal
+	entered, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	c.Verification = func(ctx context.Context, token string) error {
+		if e := record(ctx, wire.Digest([]byte(token))); e != nil {
+			return e
+		}
+		once.Do(func() {
+			close(entered)
+			select {
+			case <-release:
+			case <-ctx.Done():
+			}
+		})
+		return nil
+	}
+	key := ed25519.NewKeyFromSeed(bytesRepeat(0x42, 32))
+	token, _ := wire.Sign("aim-scan-spec+jwt", "scan", map[string]any{"sample": "PRIVATE_CELL", "path": "PRIVATE_PATH", "schema": "PRIVATE_SCHEMA"}, key)
+	// A recognizable verification header with a malformed body/signature is also
+	// routed to hash-only refusal instead of silently escaping the bounded lane.
+	malformed := strings.Split(token, ".")[0] + ".malformed"
+	tokens := []string{token, token, malformed, token, malformed, token, token, token, token, token, token, token}
+	c.heartbeatEvery = time.Second
+	polled := make(chan struct{}, 1)
+	c.Poll = func(ctx context.Context) error {
+		select {
+		case polled <- struct{}{}:
+		default:
+		}
+		return nil
+	}
+	s := server(t, func(ctx context.Context, ws *websocket.Conn) {
+		ws.Write(ctx, websocket.MessageText, []byte(`{"resume":{"seq":0,"entry_hash":""}}`))
+		for range 2 {
+			ws.Read(ctx)
+		}
+		// Keep reading so websocket ping/pong remains active while controls overflow.
+		go func() {
+			for {
+				if _, _, e := ws.Read(ctx); e != nil {
+					return
+				}
+			}
+		}()
+		ws.Write(ctx, websocket.MessageText, []byte(tokens[0]))
+		select {
+		case <-entered:
+		case <-ctx.Done():
+			return
+		}
+		for _, token := range tokens[1:] {
+			ws.Write(ctx, websocket.MessageText, []byte(token))
+		}
+		// First control is blocked and one is queued; all ten excess controls must
+		// already have durable refusal records without releasing the worker.
+		waitRefusalEvents(t, ctx, l, 11)
+		select {
+		case <-polled:
+		case <-ctx.Done():
+			t.Error("overflow blocked channel polling")
+			return
+		}
+		if e := ws.Ping(ctx); e != nil {
+			t.Error("overflow blocked heartbeat", e)
+		}
+		close(release)
+		waitRefusalEvents(t, ctx, l, 12)
+		ws.Close(websocket.StatusNormalClosure, "done")
+	})
+	defer s.Close()
+	c.URL = "ws" + strings.TrimPrefix(s.URL, "http")
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	defer cancel()
+	c.Connect(ctx)
+	r.Close()
+	events, e := l.VerificationEvents(context.Background(), 0)
+	if e != nil || len(events) != len(tokens) {
+		t.Fatal("lost verification control", len(events), e)
+	}
+	for _, event := range events {
+		if event.Result != "refused" || event.RefusalCode != "queue_full" || event.SpecID != "" || len(event.SpecHash) != 64 {
+			t.Fatal(event)
+		}
+	}
+	raw, e := os.ReadFile(filepath.Join(dir, "verification-audit.jsonl"))
+	if e != nil {
+		t.Fatal(e)
+	}
+	for _, marker := range []string{"PRIVATE_CELL", "PRIVATE_PATH", "PRIVATE_SCHEMA", "malformed"} {
+		if bytes.Contains(raw, []byte(marker)) {
+			t.Fatal("overflow leaked content")
+		}
+	}
+	var n int
+	l.DB.QueryRow("SELECT count(*) FROM verification_admissions").Scan(&n)
+	if n != 0 {
+		t.Fatal("overflow admitted", n)
+	}
+}
+
+func TestOverflowAuditSyncDoesNotBlockChannel(t *testing.T) {
+	c, entries := fixture(t)
+	dir := t.TempDir()
+	l, e := ledger.Open(filepath.Join(dir, "gateway.db"), c.State.Private, "gateway")
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer l.Close()
+	local, e := verifier.OpenLocalAudit(dir, c.State.Private)
+	if e != nil {
+		t.Fatal(e)
+	}
+	entered, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	r := &verifier.Runner{Ledger: l, Audit: local, Log: c.Log, OpenFile: func(ledger.File) (*os.File, error) { t.Error("source opened"); return nil, os.ErrPermission }}
+	if e = r.Start(context.Background(), dir); e != nil {
+		t.Fatal(e)
+	}
+	defer r.Close()
+	local.Sync = func(f *os.File) error { once.Do(func() { close(entered); <-release }); return f.Sync() }
+	c.VerificationRefused = r.QueueRefusal
+	var onceAdmission sync.Once
+	admissionEntered := make(chan struct{})
+	c.Verification = func(ctx context.Context, token string) error {
+		onceAdmission.Do(func() { close(admissionEntered) })
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	c.heartbeatEvery = 20 * time.Millisecond
+	polled, acked, revoked := make(chan struct{}, 1), make(chan struct{}, 1), make(chan struct{}, 1)
+	c.Poll = func(context.Context) error {
+		select {
+		case polled <- struct{}{}:
+		default:
+		}
+		return nil
+	}
+	c.Delivered = func(context.Context, audit.Entry) error {
+		select {
+		case acked <- struct{}{}:
+		default:
+		}
+		return nil
+	}
+	c.Handle = func(_ context.Context, i wire.Instruction, _, _ string) (string, any, error) {
+		if i.Op == "revoke" {
+			revoked <- struct{}{}
+		}
+		return "", nil, nil
+	}
+	key := ed25519.NewKeyFromSeed(bytesRepeat(0x42, 32))
+	c.State.Pins.PermissionKeys = []wire.Key{{KID: "permission", Alg: "EdDSA", Key: base64.RawURLEncoding.EncodeToString(key.Public().(ed25519.PublicKey))}}
+	token, _ := wire.Sign("aim-scan-spec+jwt", "scan", map[string]any{"secret": "PRIVATE_CELL"}, key)
+	revoke, e := wire.Sign("aim-revoke+jwt", "permission", wire.Instruction{Op: "revoke", Audience: c.State.Pins.GatewayID, IID: "44444444-4444-4444-8444-444444444444", IssuedAt: time.Now().Unix(), JTI: "22222222-2222-4222-8222-222222222222"}, key)
+	if e != nil {
+		t.Fatal(e)
+	}
+	var connections atomic.Int64
+	s := server(t, func(ctx context.Context, ws *websocket.Conn) {
+		ws.Write(ctx, websocket.MessageText, []byte(`{"resume":{"seq":0,"entry_hash":""}}`))
+		for range len(entries) {
+			ws.Read(ctx)
+		}
+		go func() {
+			for {
+				if _, _, e := ws.Read(ctx); e != nil {
+					return
+				}
+			}
+		}()
+		if connections.Add(1) == 2 {
+			select {
+			case <-polled:
+			case <-ctx.Done():
+				t.Error("reconnect polling stalled")
+				return
+			}
+			if e := ws.Ping(ctx); e != nil {
+				t.Error("reconnect heartbeat blocked", e)
+			}
+			close(release)
+			waitRefusalEvents(t, ctx, l, 100)
+			return
+		}
+		ws.Write(ctx, websocket.MessageText, []byte(token))
+		select {
+		case <-admissionEntered:
+		case <-ctx.Done():
+			t.Error("admission not blocked")
+			return
+		}
+		// One queued control and 100 overflow refusals.
+		for range 101 {
+			ws.Write(ctx, websocket.MessageText, []byte(token))
+		}
+		select {
+		case <-entered:
+		case <-ctx.Done():
+			t.Error("audit did not block")
+			return
+		}
+		ws.Write(ctx, websocket.MessageText, []byte(`{"ack":2}`))
+		ws.Write(ctx, websocket.MessageText, []byte(revoke))
+		for _, ch := range []chan struct{}{acked, revoked, polled} {
+			select {
+			case <-ch:
+			case <-ctx.Done():
+				t.Error("channel stalled on audit")
+				close(release)
+				return
+			}
+		}
+		// Poll fires after one second, beyond the old refusal deadline. Storage is
+		// still blocked, but ping/pong and ordinary controls remain responsive.
+		if e := ws.Ping(ctx); e != nil {
+			t.Error("heartbeat blocked", e)
+		}
+		ws.CloseNow() // Replace the connection while refusal storage is blocked.
+	})
+	defer s.Close()
+	c.URL = "ws" + strings.TrimPrefix(s.URL, "http")
+	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
+	defer cancel()
+	c.Connect(ctx)
+	c.Connect(ctx)
+	r.Close()
+	events, e := l.VerificationEvents(context.Background(), 0)
+	if e != nil || len(events) != 100 {
+		t.Fatal(len(events), e)
+	}
+	counted := 0
+	for _, v := range events {
+		if v.SpecHash == "" {
+			counted++
+		} else if v.SpecHash != wire.Digest([]byte(token)) {
+			t.Fatal(v)
+		}
+		if v.Result != "refused" || v.RefusalCode != "queue_full" || v.SpecID != "" {
+			t.Fatal(v)
+		}
+	}
+	if counted == 0 {
+		t.Fatal("bounded counter was not exercised")
+	}
+	raw, _ := os.ReadFile(filepath.Join(dir, "verification-audit.jsonl"))
+	if bytes.Contains(raw, []byte("PRIVATE_CELL")) {
+		t.Fatal("raw control leaked")
+	}
+}
+
+func waitRefusalEvents(t *testing.T, ctx context.Context, l *ledger.Ledger, want int) {
+	t.Helper()
+	for {
+		var n int
+		if e := l.DB.QueryRowContext(ctx, "SELECT count(*) FROM verification_local_events").Scan(&n); e != nil {
+			t.Error(e)
+			return
+		}
+		if n == want {
+			return
+		}
+		if n > want {
+			t.Errorf("duplicate events: %d > %d", n, want)
+			return
+		}
+		select {
+		case <-ctx.Done():
+			t.Error("missing refusal evidence", n, want)
+			return
+		case <-time.After(10 * time.Millisecond):
+		}
 	}
 }

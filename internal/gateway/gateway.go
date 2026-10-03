@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -22,10 +23,12 @@ import (
 	"github.com/aidotmarket/aim-data-gateway/internal/ledger"
 	"github.com/aidotmarket/aim-data-gateway/internal/pairing"
 	"github.com/aidotmarket/aim-data-gateway/internal/profile"
+	verifier "github.com/aidotmarket/aim-data-gateway/internal/verification"
 	"github.com/aidotmarket/aim-data-gateway/internal/wire"
 )
 
 type Gateway struct {
+	Verifier        *verifier.Runner
 	Config          config.Config
 	State           pairing.State
 	Dir             string
@@ -168,6 +171,9 @@ func (g *Gateway) Poll(ctx context.Context) error {
 	return nil
 }
 func (g *Gateway) Delivered(ctx context.Context, entry audit.Entry) error {
+	if entry.MessageType == "scan_report" {
+		return g.Ledger.ReconcileVerification(ctx, entry.Seq)
+	}
 	if entry.MessageType != "receipt" {
 		return nil
 	}
@@ -178,6 +184,9 @@ func (g *Gateway) Delivered(ctx context.Context, entry audit.Entry) error {
 	return g.Ledger.MarkReceiptDelivered(ctx, receipt.Seq)
 }
 func (g *Gateway) Reconcile(ctx context.Context, seq uint64) error {
+	if e := g.Ledger.ReconcileVerification(ctx, seq); e != nil {
+		return e
+	}
 	return g.Ledger.ReconcileReceipts(ctx, seq)
 }
 
@@ -243,6 +252,20 @@ func (g *Gateway) Handle(ctx context.Context, i wire.Instruction, class, signer 
 		return "prepare_ack", a, e
 	case "key_rotation":
 		// The channel verifies the outgoing key before this update.
+		for _, added := range i.Keys {
+			for _, existing := range g.State.Pins.ScanSpecKeys {
+				if class != "scan" && added.KID == existing.KID {
+					return "", nil, wire.ErrVerification
+				}
+			}
+			if class == "scan" {
+				for _, existing := range append(g.State.Pins.PermissionKeys, g.State.Pins.ListingKeys...) {
+					if added.KID == existing.KID {
+						return "", nil, wire.ErrVerification
+					}
+				}
+			}
+		}
 		g.keyMu.Lock()
 		pins := copyPins(g.State.Pins)
 		if pins.KeyExpires == nil {
@@ -255,6 +278,8 @@ func (g *Gateway) Handle(ctx context.Context, i wire.Instruction, class, signer 
 		if class == "permission" {
 			pins.PermissionKeys = appendUniqueKeys(pins.PermissionKeys, i.Keys)
 			permissionKeys, err = keyMap(pins.PermissionKeys)
+		} else if class == "scan" {
+			pins.ScanSpecKeys = appendUniqueKeys(pins.ScanSpecKeys, i.Keys)
 		} else {
 			pins.ListingKeys = appendUniqueKeys(pins.ListingKeys, i.Keys)
 		}
@@ -301,6 +326,7 @@ func appendUniqueKeys(existing, added []wire.Key) []wire.Key {
 func copyPins(p pairing.Pins) pairing.Pins {
 	p.PermissionKeys = append([]wire.Key(nil), p.PermissionKeys...)
 	p.ListingKeys = append([]wire.Key(nil), p.ListingKeys...)
+	p.ScanSpecKeys = append([]wire.Key(nil), p.ScanSpecKeys...)
 	if p.KeyExpires != nil {
 		copyMap := make(map[string]string, len(p.KeyExpires))
 		for kid, at := range p.KeyExpires {
@@ -346,7 +372,7 @@ func keyMap(keys []wire.Key) (map[string]ed25519.PublicKey, error) {
 	out := make(map[string]ed25519.PublicKey)
 	for _, k := range keys {
 		b, err := base64.RawURLEncoding.DecodeString(k.Key)
-		if err != nil || len(b) != ed25519.PublicKeySize {
+		if err != nil || k.Alg != "EdDSA" || k.KID == "" || len(b) != ed25519.PublicKeySize {
 			return nil, errors.New("invalid key")
 		}
 		out[k.KID] = b
@@ -378,6 +404,17 @@ func (g *Gateway) Run(ctx context.Context, version string) error {
 		}
 		return keys
 	}, GatewayKey: g.State.Private, GatewayKID: "gateway", RecoveryContext: ctx}
+	_, retainedVerification := os.Stat(filepath.Join(g.Dir, "verification-receipt.key"))
+	if g.Config.VerificationEnabled || retainedVerification == nil {
+		if err = g.InitVerification(version); err != nil {
+			return err
+		}
+		if err = g.Verifier.Start(ctx, g.Dir); err != nil {
+			g.Verifier.Close()
+			return err
+		}
+		defer g.Verifier.Close()
+	}
 	server := d.Server(g.Config.Door.Listen)
 	health := door.HealthServer()
 	serverErr := make(chan error, 1)
@@ -386,6 +423,10 @@ func (g *Gateway) Run(ctx context.Context, version string) error {
 	defer server.Shutdown(context.Background())
 	defer health.Shutdown(context.Background())
 	client := &channel.Client{State: &g.State, Log: g.Log, Version: version, Handle: g.Handle, Complete: func(ctx context.Context, iid string) error { _, err := g.Ledger.Seen(ctx, iid); return err }, Scan: g.Scan, Poll: g.Poll, Delivered: g.Delivered, Reconcile: g.Reconcile}
+	if g.Verifier != nil {
+		client.Verification = g.VerificationControl
+		client.VerificationRefused = g.Verifier.QueueRefusal
+	}
 	client.Canary = func(ctx context.Context) error {
 		g.keyMu.RLock()
 		host, zone := g.State.Pins.CanaryHost, g.State.Pins.CanaryZone
@@ -404,6 +445,14 @@ func (g *Gateway) Run(ctx context.Context, version string) error {
 	}
 	if g.Config.Egress.ConnectProxy != "" {
 		client.HTTPClient = channel.ProxyClient(g.Config.Egress.ConnectProxy)
+	}
+	if g.Verifier != nil {
+		g.Verifier.HTTP = client.HTTPClient
+		if g.Config.VerificationEnabled {
+			if err = g.RegisterVerification(); err != nil {
+				return err
+			}
+		}
 	}
 	go func() { serverErr <- client.Run(ctx) }()
 	select {
@@ -432,4 +481,115 @@ func LoadOrPair(ctx context.Context, dir, code, version string, client *http.Cli
 		return pairing.Pair(ctx, dir, code, version, pairing.PairURL, client)
 	}
 	return pairing.Load(dir)
+}
+
+// InitVerification also supports read-only preview; Start is exclusively live.
+func (g *Gateway) InitVerification(version string) error {
+	k, e := verifier.OpenKeys(g.Dir, version, os.Getenv("AIM_GATEWAY_IMAGE_DIGEST"))
+	if e != nil {
+		return e
+	}
+	lock, e := verifier.LockRunner(g.Dir)
+	if e != nil {
+		return e
+	}
+	a, e := verifier.OpenLocalAudit(g.Dir, g.State.Private)
+	if e != nil {
+		lock.Close()
+		return e
+	}
+	g.Verifier = &verifier.Runner{Ledger: g.Ledger, Audit: a, Log: g.Log, Keys: k, GatewayID: g.State.Pins.GatewayID, Version: version, Config: func() config.Config { return g.Config }, Pins: func() map[string]ed25519.PublicKey {
+		g.keyMu.RLock()
+		defer g.keyMu.RUnlock()
+		keys, _ := keyMap(g.State.Pins.ScanSpecKeys)
+		return keys
+	}}
+	if k.Snapshot().Ack != "" {
+		if e = k.VerifyBinding(g.State.Pins.GatewayID, g.Verifier.Pins()); e != nil {
+			lock.Close()
+			return e
+		}
+	}
+	g.Verifier.SetLock(lock)
+	g.Verifier.ActivePins = func() map[string]ed25519.PublicKey {
+		g.keyMu.RLock()
+		defer g.keyMu.RUnlock()
+		keys, _ := keyMap(g.State.Pins.ScanSpecKeys)
+		for kid, at := range g.State.Pins.KeyExpires {
+			t, e := time.Parse(time.RFC3339Nano, at)
+			if e != nil || !time.Now().Before(t) {
+				delete(keys, kid)
+			}
+		}
+		return keys
+	}
+	return nil
+}
+func (g *Gateway) RegisterVerification() error {
+	if g.Verifier.Keys.Snapshot().Ack != "" {
+		return nil
+	}
+	body, e := g.Verifier.Keys.Registration(g.State.Pins.GatewayID, time.Now())
+	if e != nil {
+		return e
+	}
+	// An image digest is release provenance, never synthesized from a version.
+	if os.Getenv("AIM_GATEWAY_IMAGE_DIGEST") == "" {
+		return nil
+	}
+	_, e = g.Log.Append("scan_report", body)
+	return e
+}
+func (g *Gateway) VerificationControl(ctx context.Context, token string) error {
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 {
+		return wire.ErrVerification
+	}
+	raw, e := base64.RawURLEncoding.DecodeString(parts[0])
+	if e != nil {
+		return wire.ErrVerification
+	}
+	var h wire.Header
+	if json.Unmarshal(raw, &h) != nil {
+		return wire.ErrVerification
+	}
+	if h.Type == "aim-scan-spec+jwt" {
+		return g.Verifier.Submit(ctx, token)
+	}
+	if h.Type == "aim-scan-runner-ack+jwt" {
+		return g.Verifier.Keys.Acknowledge(token, g.State.Pins.GatewayID, g.Verifier.Pins(), time.Now())
+	}
+	if h.Type != "aim-scan-key-bootstrap+jwt" {
+		return wire.ErrVerification
+	}
+	g.keyMu.Lock()
+	defer g.keyMu.Unlock()
+	pins := copyPins(g.State.Pins)
+	if len(pins.ScanSpecKeys) > 0 {
+		return wire.ErrVerification
+	}
+
+	keys, e := keyMap(pins.ListingKeys)
+	if e != nil {
+		return e
+	}
+	for kid, expiry := range pins.KeyExpires {
+		deadline, e := time.Parse(time.RFC3339Nano, expiry)
+		if e != nil || !time.Now().Before(deadline) {
+			delete(keys, kid)
+		}
+	}
+	b, e := wire.VerifyScanBootstrap(token, keys, pins.GatewayID, time.Now())
+	if e != nil {
+		return e
+	}
+	if e = wire.ValidateKeySet(pins.PermissionKeys, pins.ListingKeys, b.Keys); e != nil {
+		return e
+	}
+	pins.ScanSpecKeys = b.Keys
+	if e = g.savePins(pins); e != nil {
+		return e
+	}
+	g.State.Pins = pins
+	return nil
 }
