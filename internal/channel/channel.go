@@ -43,9 +43,10 @@ type Client struct {
 	Log          *audit.Log
 	Version      string
 	// Handle processes a verified, unseen instruction and returns an audit answer.
-	Verification func(context.Context, string) error
-	Handle       func(context.Context, wire.Instruction, string, string) (string, any, error)
-	Complete     func(context.Context, string) error
+	Verification        func(context.Context, string) error
+	VerificationRefused func(context.Context, string) error
+	Handle              func(context.Context, wire.Instruction, string, string) (string, any, error)
+	Complete            func(context.Context, string) error
 	// Scan appends an inventory generation after each successful resume.
 	Scan   func(context.Context) error
 	Canary func(context.Context) error
@@ -516,7 +517,7 @@ func (c *Client) Connect(ctx context.Context) error {
 			}
 			token := string(raw)
 			parts := strings.Split(token, ".")
-			if len(parts) == 3 && c.Verification != nil {
+			if len(parts) > 0 && c.Verification != nil {
 				h, e := base64.RawURLEncoding.DecodeString(parts[0])
 				var header wire.Header
 				if e == nil && json.Unmarshal(h, &header) == nil && (header.Type == "aim-scan-spec+jwt" || header.Type == "aim-scan-key-bootstrap+jwt" || header.Type == "aim-scan-runner-ack+jwt") {
@@ -525,7 +526,15 @@ func (c *Client) Connect(ctx context.Context) error {
 					select {
 					case verificationControls <- token:
 					default:
-						log.Printf("verification control queue full")
+						if c.VerificationRefused == nil {
+							return errors.New("verification refusal handler unavailable")
+						}
+						refusalCtx, cancel := context.WithTimeout(workCtx, time.Second)
+						e := c.VerificationRefused(refusalCtx, token)
+						cancel()
+						if e != nil {
+							return e
+						}
 					}
 					continue
 				}

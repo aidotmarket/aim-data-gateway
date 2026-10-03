@@ -1,6 +1,7 @@
 package channel
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"encoding/base64"
@@ -8,6 +9,8 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -15,8 +18,10 @@ import (
 	"time"
 
 	"github.com/aidotmarket/aim-data-gateway/internal/audit"
+	"github.com/aidotmarket/aim-data-gateway/internal/ledger"
 	"github.com/aidotmarket/aim-data-gateway/internal/pairing"
 	"github.com/aidotmarket/aim-data-gateway/internal/profile"
+	verifier "github.com/aidotmarket/aim-data-gateway/internal/verification"
 	"github.com/aidotmarket/aim-data-gateway/internal/wire"
 	"github.com/coder/websocket"
 )
@@ -618,5 +623,138 @@ func TestScanRotationUsesOutgoingScanClass(t *testing.T) {
 	_, class, _, e := c.verify(token)
 	if e != nil || class != "scan" {
 		t.Fatal(class, e)
+	}
+}
+
+func TestVerificationControlOverflowRecordsEveryToken(t *testing.T) {
+	c, _ := fixture(t)
+	dir := t.TempDir()
+	l, e := ledger.Open(filepath.Join(dir, "gateway.db"), c.State.Private, "gateway")
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer l.Close()
+	local, e := verifier.OpenLocalAudit(dir, c.State.Private)
+	if e != nil {
+		t.Fatal(e)
+	}
+	r := &verifier.Runner{Ledger: l, Audit: local, Log: c.Log, OpenFile: func(ledger.File) (*os.File, error) { t.Error("overflow opened source"); return nil, os.ErrPermission }}
+	received := make(chan struct{}, 12)
+	record := func(ctx context.Context, token string) error {
+		e := r.RefuseControl(ctx, token)
+		if e == nil {
+			received <- struct{}{}
+		}
+		return e
+	}
+	c.VerificationRefused = record
+	entered, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	c.Verification = func(ctx context.Context, token string) error {
+		if e := record(ctx, token); e != nil {
+			return e
+		}
+		once.Do(func() {
+			close(entered)
+			select {
+			case <-release:
+			case <-ctx.Done():
+			}
+		})
+		return nil
+	}
+	key := ed25519.NewKeyFromSeed(bytesRepeat(0x42, 32))
+	token, _ := wire.Sign("aim-scan-spec+jwt", "scan", map[string]any{"sample": "PRIVATE_CELL", "path": "PRIVATE_PATH", "schema": "PRIVATE_SCHEMA"}, key)
+	// A recognizable verification header with a malformed body/signature is also
+	// routed to hash-only refusal instead of silently escaping the bounded lane.
+	malformed := strings.Split(token, ".")[0] + ".malformed"
+	tokens := []string{token, token, malformed, token, malformed, token, token, token, token, token, token, token}
+	c.heartbeatEvery = time.Second
+	polled := make(chan struct{}, 1)
+	c.Poll = func(ctx context.Context) error {
+		e := r.Flush(ctx)
+		select {
+		case polled <- struct{}{}:
+		default:
+		}
+		return e
+	}
+	s := server(t, func(ctx context.Context, ws *websocket.Conn) {
+		ws.Write(ctx, websocket.MessageText, []byte(`{"resume":{"seq":0,"entry_hash":""}}`))
+		for range 2 {
+			ws.Read(ctx)
+		}
+		// Keep reading so websocket ping/pong remains active while controls overflow.
+		go func() {
+			for {
+				if _, _, e := ws.Read(ctx); e != nil {
+					return
+				}
+			}
+		}()
+		ws.Write(ctx, websocket.MessageText, []byte(tokens[0]))
+		select {
+		case <-entered:
+		case <-ctx.Done():
+			return
+		}
+		for _, token := range tokens[1:] {
+			ws.Write(ctx, websocket.MessageText, []byte(token))
+		}
+		// First control is blocked and one is queued; all ten excess controls must
+		// already have durable refusal records without releasing the worker.
+		for range 11 {
+			select {
+			case <-received:
+			case <-ctx.Done():
+				t.Error("missing overflow refusal")
+				return
+			}
+		}
+		select {
+		case <-polled:
+		case <-ctx.Done():
+			t.Error("overflow blocked channel polling")
+			return
+		}
+		if e := ws.Ping(ctx); e != nil {
+			t.Error("overflow blocked heartbeat", e)
+		}
+		close(release)
+		select {
+		case <-received:
+		case <-ctx.Done():
+			t.Error("queued token missing")
+			return
+		}
+		ws.Close(websocket.StatusNormalClosure, "done")
+	})
+	defer s.Close()
+	c.URL = "ws" + strings.TrimPrefix(s.URL, "http")
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	defer cancel()
+	c.Connect(ctx)
+	events, e := l.VerificationEvents(context.Background(), 0)
+	if e != nil || len(events) != len(tokens) {
+		t.Fatal("lost verification control", len(events), e)
+	}
+	for _, event := range events {
+		if event.Result != "refused" || event.RefusalCode != "queue_full" || event.SpecID != "" || len(event.SpecHash) != 64 {
+			t.Fatal(event)
+		}
+	}
+	raw, e := os.ReadFile(filepath.Join(dir, "verification-audit.jsonl"))
+	if e != nil {
+		t.Fatal(e)
+	}
+	for _, marker := range []string{"PRIVATE_CELL", "PRIVATE_PATH", "PRIVATE_SCHEMA", "malformed"} {
+		if bytes.Contains(raw, []byte(marker)) {
+			t.Fatal("overflow leaked content")
+		}
+	}
+	var n int
+	l.DB.QueryRow("SELECT count(*) FROM verification_admissions").Scan(&n)
+	if n != 0 {
+		t.Fatal("overflow admitted", n)
 	}
 }
