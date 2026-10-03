@@ -2,6 +2,7 @@
 import sys, types, importlib.util, hashlib, json, argparse
 from pathlib import Path
 import pyarrow as pa
+import pyarrow.parquet as pq
 parser=argparse.ArgumentParser()
 parser.add_argument('--connector', required=True)
 parser.add_argument('--signer', required=True)
@@ -54,5 +55,21 @@ for name,(fmt,values) in cases.items():
  (root/(name+'.'+fmt)).write_bytes(data);(root/(name+'.facts.json')).write_bytes(expected)
  entry=dict(name=name,input=name+'.'+fmt,format=fmt,seed='00'*32,expected=name+'.facts.json',input_sha256=hashlib.sha256(data).hexdigest(),expected_sha256=hashlib.sha256(expected).hexdigest())
  if refusal:entry['refusal']=True
+ manifest['files']=[v for v in manifest['files'] if v['name']!=name]+[entry]
+(root/'manifest.json').write_bytes(signer.canonical_json_bytes(manifest)+b'\n')
+# Parquet timestamp[ns] exercises pandas' nine-digit isoformat path, independently
+# of the CSV inference oracle. Preserve the unchanged connector/canonicalizer.
+for name, zone in [('nanosecond_parquet', None), ('nanosecond_utc_parquet', 'UTC')]:
+ values=[1767261600123456780+i for i in range(40)]
+ assert all(value % 1000 != 0 for value in values)
+ sink=pa.BufferOutputStream()
+ pq.write_table(pa.table({'n':pa.array(values,type=pa.timestamp('ns',tz=zone))}),sink,compression='NONE',version='2.6')
+ data=sink.getvalue().to_pybytes()
+ obj=scan(name+'.parquet',data)['objects'][0]
+ assert obj['column_types'] == ['datetime']
+ expected=signer.canonical_json_bytes(obj)
+ (root/(name+'.parquet')).write_bytes(data)
+ (root/(name+'.facts.json')).write_bytes(expected)
+ entry=dict(name=name,input=name+'.parquet',format='parquet',seed='00'*32,expected=name+'.facts.json',input_sha256=hashlib.sha256(data).hexdigest(),expected_sha256=hashlib.sha256(expected).hexdigest())
  manifest['files']=[v for v in manifest['files'] if v['name']!=name]+[entry]
 (root/'manifest.json').write_bytes(signer.canonical_json_bytes(manifest)+b'\n')
