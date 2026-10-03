@@ -13,6 +13,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/aidotmarket/aim-data-gateway/internal/inventory"
+
 	"github.com/apache/arrow-go/v18/parquet"
 	"github.com/apache/arrow-go/v18/parquet/file"
 	"github.com/apache/arrow-go/v18/parquet/schema"
@@ -70,7 +72,7 @@ func TestLargeParquetMemory(t *testing.T) {
 	m := Member{strings.Repeat("1", 64), size, [32]byte(h.Sum(nil)), "parquet"}
 	downloads := make([][]byte, 8)
 	for i := range downloads {
-		downloads[i] = make([]byte, 64<<10)
+		downloads[i] = make([]byte, inventory.BlockSize)
 	}
 	runtime.GC()
 	var baseline runtime.MemStats
@@ -95,7 +97,8 @@ func TestLargeParquetMemory(t *testing.T) {
 	}()
 	got, e := Scan(context.Background(), diskSource{m, path, nil}, testPolicy())
 	close(done)
-	additional := (<-peak) - baseline.HeapAlloc
+	maxHeap := <-peak
+	additional := maxHeap - baseline.HeapAlloc
 	runtime.KeepAlive(downloads)
 	if e != nil {
 		t.Fatal(e)
@@ -103,7 +106,7 @@ func TestLargeParquetMemory(t *testing.T) {
 	if got.Objects[0].Rows != 2000000 {
 		t.Fatal("footer-only/truncated traversal")
 	}
-	t.Logf("parquet: file=%d bytes, 100 row groups, 2,000,000 rows, peak additional heap=%d bytes, eight download buffers live", size, additional)
+	t.Logf("parquet: file=%d bytes, 100 row groups, 2,000,000 rows, peak additional heap=%d bytes, delivery buffers=%d bytes, combined peak heap=%d bytes", size, additional, 8*inventory.BlockSize, maxHeap)
 	if additional > 128<<20 {
 		t.Fatalf("memory ceiling %d", additional)
 	}

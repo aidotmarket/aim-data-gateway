@@ -18,6 +18,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/aidotmarket/aim-data-gateway/internal/inventory"
 )
 
 func testPolicy() Policy {
@@ -422,7 +424,7 @@ func TestLargeTextMemoryAndDownloadConcurrency(t *testing.T) {
 			// Existing eight delivery buffers remain live during the measurement.
 			downloads := make([][]byte, 8)
 			for i := range downloads {
-				downloads[i] = make([]byte, 64<<10)
+				downloads[i] = make([]byte, inventory.BlockSize)
 			}
 			runtime.GC()
 			var base, peak runtime.MemStats
@@ -455,7 +457,7 @@ func TestLargeTextMemoryAndDownloadConcurrency(t *testing.T) {
 				t.Fatal("truncated scan")
 			}
 			additional := maxHeap - base.HeapAlloc
-			t.Logf("%s: file=%d bytes, 2,000,000 rows, peak additional heap=%d bytes, eight download buffers live", format, st.Size(), additional)
+			t.Logf("%s: file=%d bytes, 2,000,000 rows, peak additional heap=%d bytes, delivery buffers=%d bytes, combined peak heap=%d bytes", format, st.Size(), additional, 8*inventory.BlockSize, maxHeap)
 			if additional > 128<<20 {
 				t.Fatalf("memory ceiling exceeded: %d", additional)
 			}
