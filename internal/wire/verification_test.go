@@ -34,7 +34,9 @@ func vector(t *testing.T, name string) scanVector {
 func testKeys(t *testing.T) map[string]ed25519.PublicKey {
 	v := vector(t, "scan_spec")
 	pub, _ := hex.DecodeString(v.Public)
-	return map[string]ed25519.PublicKey{"test-only-scan-key": pub, "test-only-listing-key": pub}
+	listing := vector(t, "key_bootstrap")
+	listingPub, _ := hex.DecodeString(listing.Public)
+	return map[string]ed25519.PublicKey{"test-only-scan-key": pub, "test-only-listing-key": listingPub}
 }
 func testJob(t *testing.T, name string, now time.Time) (ScanJob, error) {
 	v := vector(t, name)
@@ -136,5 +138,51 @@ func TestD6Strict(t *testing.T) {
 		if _, e := ValidateD6([]byte(b)); e == nil {
 			t.Fatal("D6 accepted")
 		}
+	}
+}
+
+func TestSharedControlVectorsAndNegativeSignatures(t *testing.T) {
+	at := time.Date(2026, 8, 21, 10, 0, 0, 0, time.UTC)
+	for _, name := range []string{"scan_spec", "probe_spec", "snapshot", "key_bootstrap", "key_rotation", "runner_ack"} {
+		v := vector(t, name)
+		raw, _ := os.ReadFile("../../contract/vectors/verification/" + name + ".json")
+		var negatives struct {
+			Cases []struct{ Name, Token string } `json:"negative_cases"`
+		}
+		json.Unmarshal(raw, &negatives)
+		check := func(token string) error {
+			switch name {
+			case "scan_spec", "probe_spec":
+				_, e := VerifyScan(token, testKeys(t), v.Input["aud"].(string), v.Input["runner_id"].(string), "1.2.3", at)
+				return e
+			case "snapshot":
+				j, e := testJob(t, "scan_spec", at)
+				if e != nil {
+					return e
+				}
+				_, e = VerifySnapshot(token, testKeys(t), j)
+				return e
+			case "key_bootstrap":
+				_, e := VerifyScanBootstrap(token, map[string]ed25519.PublicKey{"test-only-listing-key": testKeys(t)["test-only-listing-key"]}, v.Input["aud"].(string), at)
+				return e
+			case "key_rotation":
+				_, e := VerifyScanRotation(token, testKeys(t))
+				return e
+			default:
+				var out map[string]any
+				_, e := VerifyControl(token, "aim-scan-runner-ack+jwt", "op variant aud iid iat registration_nonce runner_id receipt_key_id scanner_version image_digest", testKeys(t), &out, 4096)
+				return e
+			}
+		}
+		t.Run(name, func(t *testing.T) {
+			if e := check(v.Token); e != nil {
+				t.Fatal("valid vector", e)
+			}
+			for _, n := range negatives.Cases {
+				if e := check(n.Token); e == nil {
+					t.Fatal("negative accepted", n.Name)
+				}
+			}
+		})
 	}
 }
