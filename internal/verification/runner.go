@@ -2,7 +2,6 @@
 package verification
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"crypto/ed25519"
@@ -10,8 +9,6 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/base64"
-	"encoding/binary"
-	"encoding/csv"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -19,12 +16,10 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
-	"unicode/utf8"
 
 	"github.com/aidotmarket/aim-data-gateway/internal/audit"
 	"github.com/aidotmarket/aim-data-gateway/internal/config"
@@ -32,12 +27,7 @@ import (
 	"github.com/aidotmarket/aim-data-gateway/internal/ledger"
 	"github.com/aidotmarket/aim-data-gateway/internal/wire"
 	core "github.com/aidotmarket/aim-data-gateway/verification"
-	"github.com/apache/arrow-go/v18/parquet/file"
 )
-
-var uuidPattern = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
-
-func uuidID(s string) bool { return uuidPattern.MatchString(s) }
 
 var ErrE7 = errors.New("columns_hidden")
 
@@ -46,6 +36,7 @@ const Guidance = "Request verification on the website before using preview --ver
 
 type Runner struct {
 	failed             error
+	failureMu          sync.Mutex
 	ActivePins         func() map[string]ed25519.PublicKey
 	Ledger             *ledger.Ledger
 	Audit              *LocalAudit
@@ -121,10 +112,7 @@ func (r *Runner) Start(ctx context.Context, dir string) error {
 				stop()
 				cancel()
 				if e != nil {
-					r.mu.Lock()
-					r.failed = e
-					r.mu.Unlock()
-					r.cancel()
+					r.fail(e)
 					return
 				}
 			}
@@ -147,17 +135,40 @@ func (r *Runner) Close() {
 func (r *Runner) admission(j wire.ScanJob, snapshot string) ledger.Admission {
 	return ledger.Admission{ReceiptKeyID: r.Keys.Snapshot().ReceiptKeyID, ScannerVersion: r.Version, SpecID: j.Text("spec_id"), RunnerID: j.Envelope.RunnerID, ListingID: j.Text("listing_id"), VersionID: j.Text("listing_version_id"), ManifestHash: j.Text("manifest_hash"), SpecHash: j.Envelope.SpecHash, Nonce: j.Text("nonce"), AuthorizationID: j.Text("owner_authorization_id"), Variant: j.Envelope.Variant, IID: j.Envelope.IID, Accepted: j.Accepted.Unix(), Issued: j.Issued.Unix(), Expires: j.Expires.Unix(), Spec: []byte(j.Token), Snapshot: []byte(snapshot)}
 }
-func (r *Runner) record(ctx context.Context, a ledger.Admission, result, code string) error {
-	if e := r.Ledger.VerificationEvent(ctx, a, result, code, r.now()); e != nil {
+func (r *Runner) health() error {
+	r.failureMu.Lock()
+	defer r.failureMu.Unlock()
+	return r.failed
+}
+func (r *Runner) fail(e error) {
+	r.failureMu.Lock()
+	defer r.failureMu.Unlock()
+	r.failed = e
+	if r.cancel != nil {
+		r.cancel()
+	}
+}
+func (r *Runner) mirror(ctx context.Context) error {
+	if e := r.Audit.Mirror(ctx, r.Ledger); e != nil {
+		r.fail(e)
 		return e
 	}
-	return r.Audit.Mirror(ctx, r.Ledger)
+	return nil
+}
+func (r *Runner) record(ctx context.Context, a ledger.Admission, result, code string) error {
+	r.outboxMu.Lock()
+	defer r.outboxMu.Unlock()
+	if e := r.Ledger.VerificationEvent(ctx, a, result, code, r.now()); e != nil {
+		r.fail(e)
+		return e
+	}
+	return r.mirror(ctx)
 }
 func (r *Runner) Submit(ctx context.Context, token string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.failed != nil {
-		return errors.New("verification_unavailable")
+	if e := r.health(); e != nil {
+		return e
 	}
 	binding := r.Keys.Snapshot()
 	if binding.ScannerVersion != r.Version || binding.Ack == "" {
@@ -215,14 +226,17 @@ func (r *Runner) Submit(ctx context.Context, token string) error {
 		return r.refusal(ctx, a, "source_unavailable")
 	}
 	a = r.admission(j, snapshotToken)
-	fresh, e := r.Ledger.Admit(ctx, a, r.now())
+	fresh, e := r.Ledger.Admit(ctx, a, r.now(), r.now)
 	if e != nil {
 		return r.refusal(ctx, a, "consent_refused")
 	}
 	if !fresh {
 		return r.Flush(ctx)
 	}
-	if e = r.Audit.Mirror(ctx, r.Ledger); e != nil {
+	r.outboxMu.Lock()
+	e = r.mirror(ctx)
+	r.outboxMu.Unlock()
+	if e != nil {
 		return r.refusal(ctx, a, "audit_unavailable")
 	}
 	select {
@@ -232,15 +246,23 @@ func (r *Runner) Submit(ctx context.Context, token string) error {
 		return r.refusal(ctx, a, "queue_full")
 	}
 }
+
+// RefuseControl records overflow without trusting or echoing inbound claims.
+// Channel frames are bounded; hash-only evidence also covers malformed tokens.
+func (r *Runner) RefuseControl(ctx context.Context, token string) error {
+	return r.record(ctx, ledger.Admission{SpecHash: wire.Digest([]byte(token))}, "refused", "queue_full")
+}
 func (r *Runner) refusal(ctx context.Context, a ledger.Admission, code string) error {
 	// Fixed code only; no parser/path/schema error can escape.
 	_ = r.record(ctx, a, "refused", code)
-	if a.SpecID != "" {
+	if a.SpecID != "" && (code == "consent_refused" || code == "ledger_unavailable" || code == "audit_unavailable") {
 		_, _ = r.Log.Append("error", wire.GatewayError{Code: code, Message: code})
 	}
 	return errors.New(code)
 }
 func (r *Runner) fetchSnapshot(ctx context.Context, j wire.ScanJob) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
 	b := r.Keys.Snapshot()
 	path := "/api/v1/verification-runners/" + b.RunnerID + "/snapshot/" + j.Text("manifest_hash")
 	nonce, e := random32()
@@ -261,6 +283,7 @@ func (r *Runner) fetchSnapshot(ctx context.Context, j wire.ScanJob) (string, err
 		client = r.HTTP
 	}
 	copyClient := *client
+	copyClient.Timeout = 30 * time.Second
 	copyClient.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	resp, e := copyClient.Do(req)
 	if e != nil {
@@ -298,6 +321,7 @@ func (r *Runner) run(ctx context.Context, j wire.ScanJob, s wire.Snapshot) error
 	defer cancel()
 	src := &source{runner: r, snapshot: s}
 	affected, e := src.eligibility(ctx)
+	code := ""
 	var document map[string]any
 	variant := j.Envelope.Variant
 	if j.Envelope.Variant == "probe" {
@@ -321,7 +345,8 @@ func (r *Runner) run(ctx context.Context, j wire.ScanJob, s wire.Snapshot) error
 			e = ctx.Err()
 		}
 		if e != nil {
-			document = r.terminal(j, errorCode(e), completed)
+			code = errorCode(e)
+			document = r.terminal(j, code, completed)
 			variant = "terminal"
 		} else {
 			document = r.report(j, facts, started, completed)
@@ -346,12 +371,10 @@ func (r *Runner) run(ctx context.Context, j wire.ScanJob, s wire.Snapshot) error
 	if e = r.Ledger.SaveVerification(context.Background(), j.Text("spec_id"), state, rawBody); e != nil {
 		return e
 	}
-	if e = r.record(context.Background(), r.admission(j, ""), state, func() string {
-		if len(affected) > 0 {
-			return "columns_hidden"
-		}
-		return ""
-	}()); e != nil {
+	if len(affected) > 0 {
+		code = "columns_hidden"
+	}
+	if e = r.record(context.Background(), r.admission(j, ""), state, code); e != nil {
 		return e
 	}
 	return r.Flush(context.Background())
@@ -407,7 +430,7 @@ func (r *Runner) report(j wire.ScanJob, f core.Facts, start, end time.Time) map[
 	d["artifact_locator_commitment"], d["content_sha256"], d["coverage"], d["objects"], d["fingerprint_hash"], d["d6_description"] = f.LocatorCommitment, f.ContentSHA256, f.Coverage, f.Objects, f.FingerprintHash, j.D6
 	return d
 }
-func signReceipt(d map[string]any, key ed25519.PrivateKey, variant string) error {
+func receiptBinding(d map[string]any, variant string) map[string]any {
 	binding := d
 	if variant == "scan" {
 		binding = map[string]any{}
@@ -415,6 +438,10 @@ func signReceipt(d map[string]any, key ed25519.PrivateKey, variant string) error
 			binding[k] = d[k]
 		}
 	}
+	return binding
+}
+func signReceipt(d map[string]any, key ed25519.PrivateKey, variant string) error {
+	binding := receiptBinding(d, variant)
 	raw, e := core.Canonical(binding)
 	if e != nil {
 		return e
@@ -425,32 +452,40 @@ func signReceipt(d map[string]any, key ed25519.PrivateKey, variant string) error
 func reportBody(j wire.ScanJob, variant string, raw []byte) map[string]any {
 	return map[string]any{"op": "scan_report", "variant": variant, "runner_id": j.Envelope.RunnerID, "iid": j.Envelope.IID, "document_b64": base64.RawURLEncoding.EncodeToString(raw)}
 }
-func (r *Runner) Flush(ctx context.Context) error {
+func (r *Runner) Flush(ctx context.Context) error { return r.flush(ctx, false) }
+func (r *Runner) flush(ctx context.Context, recoverHistory bool) error {
 	r.outboxMu.Lock()
 	defer r.outboxMu.Unlock()
-	jobs, e := r.Ledger.Verifications(ctx)
+	if e := r.health(); e != nil {
+		return e
+	}
+	if e := r.mirror(ctx); e != nil {
+		return e
+	}
+	pending, e := r.Ledger.UnlinkedVerifications(ctx)
 	if e != nil {
 		return e
 	}
-	// Reconcile append-before-SQL crash by stable iid and exact body, never append twice.
-	byIID := map[string]audit.Entry{}
-	if e = r.Log.Walk(func(a audit.Entry) error {
-		if a.MessageType == "scan_report" {
-			var body struct {
-				IID string `json:"iid"`
-			}
-			if json.Unmarshal(a.Body, &body) == nil && body.IID != "" {
-				byIID[body.IID] = a
-			}
-		}
+	if len(pending) == 0 {
 		return nil
-	}); e != nil {
-		return e
 	}
-	for _, a := range jobs {
-		if len(a.Result) == 0 || a.AuditSeq.Valid {
-			continue
+	byIID := map[string]audit.Entry{}
+	if recoverHistory {
+		if e = r.Log.Walk(func(a audit.Entry) error {
+			if a.MessageType == "scan_report" {
+				var body struct {
+					IID string `json:"iid"`
+				}
+				if json.Unmarshal(a.Body, &body) == nil && body.IID != "" {
+					byIID[body.IID] = a
+				}
+			}
+			return nil
+		}); e != nil {
+			return e
 		}
+	}
+	for _, a := range pending {
 		entry, exists := byIID[a.IID]
 		if exists {
 			if !bytes.Equal(entry.Body, a.Result) {
@@ -459,10 +494,12 @@ func (r *Runner) Flush(ctx context.Context) error {
 		} else {
 			entry, e = r.Log.Append("scan_report", json.RawMessage(a.Result))
 			if e != nil {
+				r.fail(e)
 				return e
 			}
 		}
 		if e = r.Ledger.AuditVerification(ctx, a.SpecID, entry.Seq); e != nil {
+			r.fail(e)
 			return e
 		}
 	}
@@ -509,15 +546,19 @@ func (r *Runner) Recover(ctx context.Context) error {
 			return e
 		}
 	}
-	return r.Flush(ctx)
+	if e = r.flush(ctx, true); e != nil {
+		return e
+	}
+	pruneCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	return r.Ledger.PruneVerification(pruneCtx, r.now())
 }
 
-// source retains only identities and original schema names. Metadata checks never open bytes.
+// source retains pinned identities. Metadata checks never open bytes.
 type source struct {
 	index    map[string]wire.SnapshotMember
 	runner   *Runner
 	snapshot wire.Snapshot
-	names    map[string][]string
 }
 
 func (s *source) metadata(ctx context.Context) error {
@@ -560,9 +601,6 @@ func (s *source) check(ctx context.Context, id string) (ledger.File, error) {
 	if n > 0 {
 		return f, core.ErrArtifactChanged
 	}
-	if names := s.names[id]; names != nil && affected(cfg.ColumnRule(f.Source, f.RelativePath), names) {
-		return f, ErrE7
-	}
 	return f, nil
 }
 func (s *source) Members() []core.Member {
@@ -587,6 +625,9 @@ func format(path string) string {
 	return strings.TrimPrefix(ext, ".")
 }
 func (s *source) open(ctx context.Context, id string) (*os.File, error) {
+	if e := s.runner.health(); e != nil {
+		return nil, e
+	}
 	if e := ctx.Err(); e != nil {
 		return nil, e
 	}
@@ -599,7 +640,42 @@ func (s *source) open(ctx context.Context, id string) (*os.File, error) {
 	}
 	return (inventory.Record{Root: f.Root, RelativePath: f.RelativePath}).Open()
 }
-func (s *source) Open(ctx context.Context, id string) (io.ReadCloser, error) { return s.open(ctx, id) }
+func (s *source) checkedOpen(ctx context.Context, id string) (*os.File, error) {
+	f, e := s.open(ctx, id)
+	if e != nil {
+		return nil, e
+	}
+	names, e := s.schema(ctx, f, id)
+	if e == nil {
+		v, err := s.runner.Ledger.File(ctx, id)
+		e = err
+		if e == nil && affected(s.runner.Config().ColumnRule(v.Source, v.RelativePath), names) {
+			e = ErrE7
+		}
+	}
+	if e == nil {
+		_, e = f.Seek(0, io.SeekStart)
+	}
+	if e != nil {
+		f.Close()
+		return nil, e
+	}
+	return f, nil
+}
+func (s *source) schema(ctx context.Context, f *os.File, id string) ([]string, error) {
+	v, e := s.runner.Ledger.File(ctx, id)
+	if e != nil {
+		return nil, e
+	}
+	st, e := f.Stat()
+	if e != nil {
+		return nil, e
+	}
+	return core.DiscoverSchema(ctx, randomFile{f, st.Size()}, format(v.RelativePath))
+}
+func (s *source) Open(ctx context.Context, id string) (io.ReadCloser, error) {
+	return s.checkedOpen(ctx, id)
+}
 
 type randomFile struct {
 	*os.File
@@ -608,7 +684,7 @@ type randomFile struct {
 
 func (f randomFile) Size() int64 { return f.size }
 func (s *source) OpenAt(ctx context.Context, id string) (core.RandomAccess, error) {
-	f, e := s.open(ctx, id)
+	f, e := s.checkedOpen(ctx, id)
 	if e != nil {
 		return nil, e
 	}
@@ -633,7 +709,6 @@ func affected(rule config.Columns, names []string) bool {
 	return false
 }
 func (s *source) eligibility(ctx context.Context) ([]string, error) {
-	s.names = map[string][]string{}
 	out := []string{}
 	bound := 512
 	for _, m := range s.snapshot.Members {
@@ -650,13 +725,12 @@ func (s *source) eligibility(ctx context.Context) ([]string, error) {
 			return out, e
 		}
 		stop := context.AfterFunc(ctx, func() { handle.Close() })
-		names, e := schema(handle, kind)
+		names, e := s.schema(ctx, handle, m.FileID)
 		stop()
 		handle.Close()
 		if e != nil {
 			return out, e
 		}
-		s.names[m.FileID] = names
 		bound += 512
 		for _, n := range names {
 			bound += len(n)*6 + 768
@@ -669,93 +743,6 @@ func (s *source) eligibility(ctx context.Context) ([]string, error) {
 		}
 	}
 	return out, nil
-}
-func schema(f *os.File, kind string) ([]string, error) {
-	var names []string
-	var magic [4]byte
-	if n, _ := f.ReadAt(magic[:], 0); n == 4 && string(magic[:2]) == "PK" {
-		return nil, nil
-	}
-	switch kind {
-	case "csv", "tsv":
-		reader := csv.NewReader(io.LimitReader(f, 16<<20+1))
-		if kind == "tsv" {
-			reader.Comma = '\t'
-		}
-		var e error
-		names, e = reader.Read()
-		if e != nil {
-			return nil, core.ErrUnsupported
-		}
-	case "jsonl":
-		sc := bufio.NewScanner(f)
-		sc.Buffer(make([]byte, 64<<10), 16<<20+1)
-		if !sc.Scan() {
-			return nil, core.ErrUnsupported
-		}
-		d := json.NewDecoder(bytes.NewReader(sc.Bytes()))
-		d.UseNumber()
-		tok, e := d.Token()
-		if e != nil || tok != json.Delim('{') {
-			return nil, core.ErrUnsupported
-		}
-		for d.More() {
-			tok, e = d.Token()
-			if e != nil {
-				return nil, core.ErrUnsupported
-			}
-			n, ok := tok.(string)
-			if !ok {
-				return nil, core.ErrUnsupported
-			}
-			names = append(names, n)
-			tok, e = d.Token()
-			if e != nil {
-				return nil, core.ErrUnsupported
-			}
-			if _, nested := tok.(json.Delim); nested {
-				return nil, core.ErrUnsupported
-			}
-		}
-		if _, e = d.Token(); e != nil {
-			return nil, core.ErrUnsupported
-		}
-		if _, e = d.Token(); e != io.EOF {
-			return nil, core.ErrUnsupported
-		}
-	case "parquet":
-		st, e := f.Stat()
-		if e != nil || st.Size() < 12 {
-			return nil, core.ErrUnsupported
-		}
-		var tail [8]byte
-		if _, e = f.ReadAt(tail[:], st.Size()-8); e != nil || string(tail[4:]) != "PAR1" || binary.LittleEndian.Uint32(tail[:4]) > 1<<20 {
-			return nil, core.ErrUnsupported
-		}
-		p, e := file.NewParquetReader(f)
-		if e != nil {
-			return nil, core.ErrUnsupported
-		}
-		defer p.Close()
-		n := p.MetaData().Schema.NumColumns()
-		if n > 1000 {
-			return nil, core.ErrBudget
-		}
-		for i := 0; i < n; i++ {
-			names = append(names, p.MetaData().Schema.Column(i).Name())
-		}
-	}
-	if len(names) == 0 || len(names) > 1000 {
-		return nil, core.ErrUnsupported
-	}
-	seen := map[string]bool{}
-	for _, n := range names {
-		if n == "" || !utf8.ValidString(n) || utf8.RuneCountInString(n) > 256 || seen[n] {
-			return nil, core.ErrUnsupported
-		}
-		seen[n] = true
-	}
-	return names, nil
 }
 
 // Preview reads retained state only; it never admits, audits, sends or fetches.
@@ -866,13 +853,7 @@ func (r *Runner) savedPreview(ctx context.Context, a ledger.Admission, s wire.Sn
 		return nil, e
 	}
 	delete(d, "receipt_signature")
-	binding := d
-	if body.Variant == "scan" {
-		binding = map[string]any{}
-		for _, k := range strings.Fields("spec_hash nonce_echo install_key_id artifact_locator_commitment content_sha256 started_at_utc completed_at_utc duration_ms coverage fingerprint_hash") {
-			binding[k] = d[k]
-		}
-	}
+	binding := receiptBinding(d, body.Variant)
 	signed, e := core.Canonical(binding)
 	if e != nil || !ed25519.Verify(r.Keys.Private.Public().(ed25519.PublicKey), signed, sig) {
 		return nil, wire.ErrVerification

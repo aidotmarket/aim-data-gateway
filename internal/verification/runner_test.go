@@ -249,9 +249,9 @@ func TestLivePreviewParityReplayAndOutbox(t *testing.T) {
 	if f.opens.Load() != n || seq != f.r.Log.Sequence() {
 		t.Fatal("duplicate opens/appends")
 	}
-	// Simulate an append-before-SQL crash and recover the same sequence.
+	// Simulate an append-before-SQL crash: full history reconciliation is recovery-only.
 	f.r.Ledger.DB.Exec("UPDATE verification_admissions SET audit_seq=NULL")
-	if e = f.r.Flush(ctx); e != nil {
+	if e = f.r.Recover(ctx); e != nil {
 		t.Fatal(e)
 	}
 	if f.r.Log.Sequence() != seq {

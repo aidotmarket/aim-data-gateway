@@ -36,7 +36,7 @@ the Buildx setup step ran before the build and that its builder is selected.
 
 ## S1791 gateway verification release
 
-Before publishing a scanner-capable image, run `go vet ./...`, `gofmt -l .`, `go test ./...`, and `go test -race ./internal/ledger ./internal/verification ./internal/channel ./internal/audit` (allow up to fifteen minutes). Run reproducibility, line/module budgets, vector digest, generated outbound documentation and Compose/license self-checks, plus the existing SBOM/vulnerability, Cosign and attestation workflow. Report actual non-test line count even if it exceeds 7,250; do not edit the counter or exclude scanner code.
+Before publishing a scanner-capable image, run `go vet ./...`, `gofmt -l .`, `go test ./...`, and `go test -race ./internal/ledger ./internal/verification ./internal/channel ./internal/audit` (allow up to fifteen minutes). Run reproducibility, line/module budgets, vector digest, generated outbound documentation and Compose/license self-checks, plus the existing SBOM/vulnerability, Cosign and attestation workflow. Enforce Amendment A’s inclusive 9,250 non-test Go line cap and report the actual count; keep the counting rules unchanged.
 
 The release Compose renderer supplies `AIM_GATEWAY_IMAGE_DIGEST` from the same verified pinned image digest used for the service. The hardening check requires an exact match; local builds cannot claim a released digest. This is automatic release provenance, not a seller-entered trust key. Backend registration still enforces version/digest allowlists. A source-built development gateway without release provenance does not register for paid work.
 

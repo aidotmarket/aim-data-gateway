@@ -477,3 +477,42 @@ func TestGatewayFIDWidthErratum(t *testing.T) {
 		}
 	}
 }
+
+func TestDiscoverSchemaMatchesScanner(t *testing.T) {
+	for _, tc := range []struct {
+		kind, path string
+		data       []byte
+	}{
+		{"csv", "", []byte("\ufeffid,name\n1,value\n")},
+		{"tsv", "", []byte("\ufeffid\tname\n1\tvalue\n")},
+		{"jsonl", "testdata/oracle/json_new_field.jsonl", nil},
+		{"parquet", "testdata/oracle/all_approved_types.parquet", nil},
+	} {
+		t.Run(tc.kind, func(t *testing.T) {
+			data := tc.data
+			if tc.path != "" {
+				data = read(t, tc.path)
+			}
+			names, e := DiscoverSchema(context.Background(), &randomBytes{bytes.NewReader(data)}, tc.kind)
+			if e != nil {
+				t.Fatal(e)
+			}
+			facts, e := Scan(context.Background(), sourceFor(data, tc.kind), testPolicy())
+			if e != nil || !reflect.DeepEqual(names, facts.Objects[0].Names) {
+				t.Fatal("schema drift", names, facts, e)
+			}
+			if tc.kind == "jsonl" && !reflect.DeepEqual(names, []string{"a", "b"}) {
+				t.Fatal("late field missing", names)
+			}
+		})
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, e := DiscoverSchema(ctx, &randomBytes{bytes.NewReader([]byte("{\"a\":1}\n"))}, "jsonl"); e == nil {
+		t.Fatal("discovery ignored cancellation")
+	}
+	oversized := []byte("id" + strings.Repeat("x", 16<<20) + "\n")
+	if _, e := DiscoverSchema(context.Background(), &randomBytes{bytes.NewReader(oversized)}, "csv"); e == nil {
+		t.Fatal("unbounded header")
+	}
+}

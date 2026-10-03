@@ -40,7 +40,7 @@ type LocalEvent struct {
 
 // Admit uses BEGIN IMMEDIATE on a dedicated connection: duplicate, replay, clock
 // high-water, quota and authorization consumption are one FULL durable commit.
-func (l *Ledger) Admit(ctx context.Context, a Admission, at time.Time) (bool, error) {
+func (l *Ledger) Admit(ctx context.Context, a Admission, at time.Time, clock ...func() time.Time) (bool, error) {
 	c, e := l.DB.Conn(ctx)
 	if e != nil {
 		return false, e
@@ -66,7 +66,12 @@ func (l *Ledger) Admit(ctx context.Context, a Admission, at time.Time) (bool, er
 	if e != nil && e != sql.ErrNoRows {
 		return false, e
 	}
-	if at.Unix() < last-300 {
+	// Read the live clock after acquiring the transaction, including lock waits.
+	if len(clock) > 0 {
+		at = clock[0]()
+	}
+	now := at.Unix()
+	if a.Accepted > a.Issued || a.Issued >= a.Expires || a.Expires-a.Issued > 86400 || time.Unix(a.Issued, 0).After(at.Add(300*time.Second)) || time.Unix(a.Issued, 0).Before(at.Add(-86700*time.Second)) || time.Unix(a.Accepted, 0).Before(at.Add(-86700*time.Second)) || time.Unix(a.Expires, 0).Before(at.Add(-300*time.Second)) || now < last-300 {
 		return false, ErrConsent
 	}
 	day := at.UTC().Format("2006-01-02")
@@ -130,7 +135,13 @@ func (l *Ledger) Verification(ctx context.Context, id string) (Admission, error)
 	return scanAdmission(l.DB.QueryRowContext(ctx, admissionSelect+" WHERE spec_id=?", id))
 }
 func (l *Ledger) Verifications(ctx context.Context) ([]Admission, error) {
-	rows, e := l.DB.QueryContext(ctx, admissionSelect+" ORDER BY committed_at,spec_id")
+	return l.verifications(ctx, "")
+}
+func (l *Ledger) UnlinkedVerifications(ctx context.Context) ([]Admission, error) {
+	return l.verifications(ctx, " WHERE result_bytes IS NOT NULL AND audit_seq IS NULL")
+}
+func (l *Ledger) verifications(ctx context.Context, where string) ([]Admission, error) {
+	rows, e := l.DB.QueryContext(ctx, admissionSelect+where+" ORDER BY committed_at,spec_id")
 	if e != nil {
 		return nil, e
 	}
@@ -169,12 +180,15 @@ func (l *Ledger) InterruptVerifications(ctx context.Context) error {
 	_, e := l.DB.ExecContext(ctx, "UPDATE verification_admissions SET state='interrupted' WHERE state IN ('accepted','running')")
 	return e
 }
+
+// Paid scans are retained until settlement is known: channel acknowledgment only
+// proves storage, and the current protocol provides no hold-settlement signal.
 func (l *Ledger) PruneVerification(ctx context.Context, at time.Time) error {
 	cutoff := at.Add(-30 * 24 * time.Hour).Unix()
 	return tx(ctx, l.DB, func(t *sql.Tx) error {
 		for _, q := range []string{
-			`DELETE FROM verification_local_events WHERE received_at<? AND NOT EXISTS(SELECT 1 FROM verification_admissions a WHERE a.spec_id=verification_local_events.spec_id AND (a.delivered=0 OR a.state IN ('accepted','running')))`,
-			`DELETE FROM verification_admissions WHERE committed_at<? AND state IN ('reported','refused','interrupted') AND delivered=1`,
+			`DELETE FROM verification_local_events WHERE received_at<? AND NOT EXISTS(SELECT 1 FROM verification_admissions a WHERE a.spec_id=verification_local_events.spec_id AND (a.variant='scan' OR a.delivered=0 OR a.state IN ('accepted','running')))`,
+			`DELETE FROM verification_admissions WHERE committed_at<? AND variant='probe' AND state IN ('reported','refused','interrupted') AND delivered=1`,
 			`DELETE FROM verification_daily WHERE utc_day<date(?,'unixepoch') AND NOT EXISTS(SELECT 1 FROM verification_admissions a WHERE a.listing_id=verification_daily.listing_id AND a.utc_day=verification_daily.utc_day)`} {
 			if _, e := t.ExecContext(ctx, q, cutoff); e != nil {
 				return e

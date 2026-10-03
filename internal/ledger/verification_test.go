@@ -22,12 +22,12 @@ func verificationLedger(t *testing.T, path string) *Ledger {
 	return l
 }
 func admissionFixture(i int) Admission {
-	return Admission{SpecID: fmt.Sprint("spec", i), RunnerID: "runner", ListingID: "listing", VersionID: "version", ManifestHash: "manifest", SpecHash: fmt.Sprint("hash", i), Nonce: fmt.Sprint("nonce", i), AuthorizationID: fmt.Sprint("auth", i), Variant: "scan", IID: fmt.Sprint("iid", i), Spec: []byte("signed"), Snapshot: []byte("snapshot"), Accepted: 1, Issued: 2, Expires: 3}
+	return Admission{SpecID: fmt.Sprint("spec", i), RunnerID: "runner", ListingID: "listing", VersionID: "version", ManifestHash: "manifest", SpecHash: fmt.Sprint("hash", i), Nonce: fmt.Sprint("nonce", i), AuthorizationID: fmt.Sprint("auth", i), Variant: "scan", IID: fmt.Sprint("iid", i), Spec: []byte("signed"), Snapshot: []byte("snapshot"), Accepted: time.Now().Unix() - 60, Issued: time.Now().Unix() - 30, Expires: time.Now().Unix() + 3600}
 }
 func TestVerificationAdmissionAtomic(t *testing.T) {
 	ctx := context.Background()
 	l := verificationLedger(t, filepath.Join(t.TempDir(), "db"))
-	at := time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC)
+	at := time.Now()
 	for i := 0; i < 10; i++ {
 		fresh, e := l.Admit(ctx, admissionFixture(i), at)
 		if e != nil || !fresh {
@@ -122,7 +122,9 @@ func TestVerificationReadOnlyAndRetention(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "db")
 	l := verificationLedger(t, path)
 	a := admissionFixture(1)
+	a.Variant = "probe"
 	old := time.Now().Add(-31 * 24 * time.Hour)
+	a.Accepted, a.Issued, a.Expires = old.Unix()-60, old.Unix()-30, old.Unix()+3600
 	if _, e := l.Admit(ctx, a, old); e != nil {
 		t.Fatal(e)
 	}
@@ -148,5 +150,27 @@ func TestVerificationReadOnlyAndRetention(t *testing.T) {
 	defer ro.Close()
 	if _, e = ro.DB.Exec("DELETE FROM verification_clock"); e == nil {
 		t.Fatal("preview writable")
+	}
+}
+
+func TestConsentFreshnessAtTransactionTime(t *testing.T) {
+	ctx := context.Background()
+	l := verificationLedger(t, filepath.Join(t.TempDir(), "db"))
+	at := time.Now()
+	a := admissionFixture(1)
+	var called bool
+	clock := func() time.Time {
+		called = true
+		// BEGIN IMMEDIATE is already held when the injected live clock is read.
+		return time.Unix(a.Expires+301, 0)
+	}
+	if fresh, e := l.Admit(ctx, a, at, clock); e != ErrConsent || fresh || !called {
+		t.Fatal(fresh, e, called)
+	}
+	for _, table := range []string{"verification_admissions", "verification_daily", "verification_clock"} {
+		var n int
+		if e := l.DB.QueryRow("SELECT count(*) FROM " + table).Scan(&n); e != nil || n != 0 {
+			t.Fatal("stale consent mutated", table, n, e)
+		}
 	}
 }

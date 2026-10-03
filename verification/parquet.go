@@ -155,25 +155,18 @@ func parquetObject(ctx context.Context, s Source, x *pinned, p Policy, b *budget
 		}
 	}
 	sch := pf.MetaData().Schema
-	if sch.NumColumns() > p.MaxColumns || sch.NumColumns() == 0 || sch.Root().NumFields() != sch.NumColumns() {
-		return o, ErrUnsupported
+	names, e := parquetNames(sch, p)
+	if e != nil {
+		return o, e
 	}
-	names := make([]string, sch.NumColumns())
 	acc := make([]*aggregate, len(names))
 	for i := range names {
-		if _, ok := sch.Root().Field(i).(*schema.PrimitiveNode); !ok {
-			return o, ErrUnsupported
-		}
 		c := sch.Column(i)
 		kind, e := parquetKind(c)
 		if e != nil {
 			return o, e
 		}
-		names[i] = c.Name()
 		acc[i] = newAggregate(kind, i, p)
-	}
-	if e = nameOK(names, p); e != nil {
-		return o, e
 	}
 	if e = b.reserve(int64(len(acc)) * 2048); e != nil {
 		return o, e
