@@ -383,12 +383,10 @@ func scalar(c cell, kind string) ([]byte, int, float64, bool, error) {
 		if !ok {
 			e = ErrUnsupported
 		} else {
-			// Arrow CSV retains its inferred precision; without pandas the pinned
-			// Python oracle refuses sub-microsecond values. JSON uses seconds UTC
-			// with no timezone metadata, even when the input has an offset.
-			if !c.json && t.Nanosecond()%1000 != 0 {
-				return nil, 0, 0, false, ErrUnsupported
-			}
+			// Arrow CSV retains its inferred precision; the legacy runtime has
+			// pandas, so sub-microsecond values become pandas Timestamps whose
+			// isoformat keeps nine digits. JSON uses seconds UTC with no
+			// timezone metadata, even when the input has an offset.
 			if tz {
 				t = t.UTC()
 			}
@@ -404,7 +402,9 @@ func scalar(c cell, kind string) ([]byte, int, float64, bool, error) {
 }
 func isoPython(t time.Time, tz, frac bool) string {
 	s := t.Format("2006-01-02T15:04:05")
-	if frac {
+	if frac && t.Nanosecond()%1000 != 0 {
+		s += fmt.Sprintf(".%09d", t.Nanosecond()) // pandas Timestamp.isoformat
+	} else if frac {
 		s += fmt.Sprintf(".%06d", t.Nanosecond()/1000)
 	}
 	if tz {

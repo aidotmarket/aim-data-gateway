@@ -12,6 +12,10 @@ spec=importlib.util.spec_from_file_location('app.services.marketplace_action_sig
 spec=importlib.util.spec_from_file_location('oracle',args.connector);oracle=importlib.util.module_from_spec(spec);spec.loader.exec_module(oracle)
 root=Path('verification/testdata/oracle'); manifest=json.loads((root/'manifest.json').read_bytes())
 assert pa.__version__ == manifest['pyarrow_version']
+# The legacy runtime (aim-data Dockerfile python:3.11, requirements pandas==2.1.4)
+# has pandas, which changes how Arrow hands sub-microsecond timestamps to Python.
+import pandas
+assert sys.version_info[:2] == (3, 11) and pandas.__version__ == '2.1.4'
 assert hashlib.sha256(Path(args.connector).read_bytes()).hexdigest()==manifest['connector_sha256']
 kwargs=dict(commitment_key=bytes.fromhex(manifest['commitment_key_hex']),source_binding=bytes.fromhex(manifest['source_binding_hex']),deterministic_seed='00'*32,minimum_aggregate_occupancy=10,length_bounds=(0,1,4,8,16,32,64,128,256),numeric_boundaries=(-1000.,-100.,-10.,0.,10.,100.,1000.),max_inference_input_tokens=8192,preview_requested=True)
 def scan(name,data):return oracle.EolympConnectorV1().scan_bytes(artifact_name=name,payload=data,**kwargs)
