@@ -138,11 +138,6 @@ func (g *Gateway) outbox(ctx context.Context) ([]ledger.QueuedReceipt, error) {
 	return g.Ledger.PendingReceipts(ctx)
 }
 func (g *Gateway) Poll(ctx context.Context) error {
-	if g.Verifier != nil {
-		if e := g.Verifier.Flush(ctx); e != nil {
-			return e
-		}
-	}
 	queued, err := g.outbox(ctx)
 	if err != nil {
 		return err
