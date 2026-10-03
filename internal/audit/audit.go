@@ -196,6 +196,11 @@ func (l *Log) Append(messageType string, body any) (Entry, error) {
 	if e != nil {
 		return entry, e
 	}
+	if messageType == "scan_report" {
+		if e = wire.ValidateScanReportBody(b); e != nil {
+			return entry, e
+		}
+	}
 	u := unsigned{l.seq + 1, time.Now().UTC().Format(time.RFC3339Nano), messageType, b, l.prev}
 	raw, e := wire.Canonical(u)
 	if e != nil {
@@ -205,6 +210,9 @@ func (l *Log) Append(messageType string, body any) (Entry, error) {
 	line, e := wire.Canonical(entry)
 	if e != nil {
 		return entry, e
+	}
+	if messageType == "scan_report" && len(line) > 1<<20 {
+		return Entry{}, errors.New("scan_report exceeds 1 MiB")
 	}
 	if _, e = ValidateRaw(line, l.private.Public().(ed25519.PublicKey)); e != nil {
 		return Entry{}, e
@@ -305,7 +313,7 @@ func (l *Log) Read(seq uint64) (Entry, error) {
 	return Entry{}, errors.New("audit sequence missing")
 }
 func allowed(s string) bool {
-	for _, x := range strings.Fields("inventory description receipt canary_result revocation_ack offer_ack prepare_ack error") {
+	for _, x := range strings.Fields("inventory description receipt canary_result revocation_ack offer_ack prepare_ack error scan_report") {
 		if x == s {
 			return true
 		}
@@ -395,6 +403,14 @@ func ValidateRaw(raw []byte, public ed25519.PublicKey) (Entry, error) {
 	}
 	if entry.Seq == 0 || entry.MessageType == "" {
 		return entry, errors.New("invalid audit entry")
+	}
+	if entry.MessageType == "scan_report" {
+		if len(raw) > 1<<20 {
+			return entry, errors.New("scan_report exceeds 1 MiB")
+		}
+		if err = wire.ValidateScanReportBody(entry.Body); err != nil {
+			return entry, err
+		}
 	}
 	unsignedRaw, err := wire.Canonical(unsigned{entry.Seq, entry.Time, entry.MessageType, entry.Body, entry.PrevHash})
 	if err != nil {
