@@ -134,6 +134,9 @@ func scanAdmission(row interface{ Scan(...any) error }) (a Admission, e error) {
 func (l *Ledger) Verification(ctx context.Context, id string) (Admission, error) {
 	return scanAdmission(l.DB.QueryRowContext(ctx, admissionSelect+" WHERE spec_id=?", id))
 }
+func (l *Ledger) VerificationToken(ctx context.Context, token string) (Admission, error) {
+	return scanAdmission(l.DB.QueryRowContext(ctx, admissionSelect+" WHERE spec_bytes=? LIMIT 1", []byte(token)))
+}
 func (l *Ledger) Verifications(ctx context.Context) ([]Admission, error) {
 	return l.verifications(ctx, "")
 }

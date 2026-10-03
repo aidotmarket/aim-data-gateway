@@ -178,17 +178,13 @@ func (r *Runner) Submit(ctx context.Context, token string) error {
 	if e != nil {
 		// Expired signed redelivery returns only its durable outbox/status. It
 		// cannot re-enter admission or read a source, even after key retirement.
-		saved, readErr := r.Ledger.Verifications(ctx)
+		a, readErr := r.Ledger.VerificationToken(ctx, token)
 		if readErr == nil {
-			for _, a := range saved {
-				if bytes.Equal(a.Spec, []byte(token)) {
-					if _, verifyErr := wire.VerifyScan(token, r.Pins(), r.GatewayID, a.RunnerID, r.Version, time.Unix(a.Committed, 0)); verifyErr == nil {
-						return r.Flush(ctx)
-					}
-				}
+			if _, verifyErr := wire.VerifyScan(token, r.Pins(), r.GatewayID, a.RunnerID, r.Version, time.Unix(a.Committed, 0)); verifyErr == nil {
+				return r.Flush(ctx)
 			}
 		}
-		a := ledger.Admission{SpecHash: wire.Digest([]byte(token))}
+		a = ledger.Admission{SpecHash: wire.Digest([]byte(token))}
 		_ = r.record(ctx, a, "refused", "invalid_spec")
 		return wire.ErrVerification
 	}
@@ -248,9 +244,9 @@ func (r *Runner) Submit(ctx context.Context, token string) error {
 }
 
 // RefuseControl records overflow without trusting or echoing inbound claims.
-// Channel frames are bounded; hash-only evidence also covers malformed tokens.
-func (r *Runner) RefuseControl(ctx context.Context, token string) error {
-	return r.record(ctx, ledger.Admission{SpecHash: wire.Digest([]byte(token))}, "refused", "queue_full")
+// The channel supplies only a digest; an empty hash denotes counted overflow.
+func (r *Runner) RefuseControl(ctx context.Context, hash string) error {
+	return r.record(ctx, ledger.Admission{SpecHash: hash}, "refused", "queue_full")
 }
 func (r *Runner) refusal(ctx context.Context, a ledger.Admission, code string) error {
 	// Fixed code only; no parser/path/schema error can escape.
