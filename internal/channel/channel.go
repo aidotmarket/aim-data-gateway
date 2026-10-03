@@ -16,6 +16,7 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/aidotmarket/aim-data-gateway/internal/audit"
@@ -43,7 +44,8 @@ type Client struct {
 	Log          *audit.Log
 	Version      string
 	// Handle processes a verified, unseen instruction and returns an audit answer.
-	Verification        func(context.Context, string) error
+	Verification func(context.Context, string) error
+	// VerificationRefused receives a token digest, or empty for counted overflow.
 	VerificationRefused func(context.Context, string) error
 	Handle              func(context.Context, wire.Instruction, string, string) (string, any, error)
 	Complete            func(context.Context, string) error
@@ -339,6 +341,29 @@ func (c *Client) Connect(ctx context.Context) error {
 	go worker(jobs)
 	go worker(descriptions)
 	verificationControls := make(chan string, 1)
+	refusals := make(chan string, 64)
+	var excess atomic.Uint64
+	if c.VerificationRefused != nil {
+		go func() {
+			for {
+				select {
+				case <-workCtx.Done():
+					return
+				case hash := <-refusals:
+					// Storage waits stay on this verification-only worker. Beyond the
+					// hash buffer, retain a bounded counter instead of inbound bytes.
+					if e := c.VerificationRefused(workCtx, hash); e != nil {
+						log.Printf("verification refusal audit unavailable")
+					}
+					for n := excess.Swap(0); n > 0 && workCtx.Err() == nil; n-- {
+						if e := c.VerificationRefused(workCtx, ""); e != nil {
+							log.Printf("verification refusal audit unavailable")
+						}
+					}
+				}
+			}
+		}()
+	}
 	if c.Verification != nil {
 		go func() {
 			for {
@@ -529,11 +554,10 @@ func (c *Client) Connect(ctx context.Context) error {
 						if c.VerificationRefused == nil {
 							return errors.New("verification refusal handler unavailable")
 						}
-						refusalCtx, cancel := context.WithTimeout(workCtx, time.Second)
-						e := c.VerificationRefused(refusalCtx, token)
-						cancel()
-						if e != nil {
-							return e
+						select {
+						case refusals <- wire.Digest([]byte(token)):
+						default:
+							excess.Add(1)
 						}
 					}
 					continue
