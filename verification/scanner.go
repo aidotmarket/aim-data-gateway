@@ -156,6 +156,13 @@ func prepare(ctx context.Context, s Source, p Policy, b *budget) ([]pinned, erro
 		} else {
 			_, e = io.CopyBuffer(io.Discard, br, make([]byte, blockSize))
 		}
+		// Resource refusal stops reading immediately; successful scans still
+		// verify every byte, and shape errors drain to detect mutation.
+		if e == ErrBudget {
+			stop()
+			r.Close()
+			return nil, e
+		}
 		parserError := e
 		if e != nil {
 			_, e = io.CopyBuffer(io.Discard, br, make([]byte, blockSize))

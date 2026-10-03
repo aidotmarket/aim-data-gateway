@@ -40,22 +40,46 @@ func nameOK(names []string, p Policy) error {
 	return nil
 }
 
-// limitRecords refuses a physical line before encoding/csv can allocate an
-// unbounded record. InputOffset also bounds quoted records spanning many lines.
+// limitRecords tracks CSV logical boundaries before encoding/csv buffers them.
+// State: field start, unquoted field, quoted field, closing/escaped quote.
 type limitRecords struct {
 	r         io.Reader
-	max, line int
+	max, size int
+	state     byte
+	comma     byte
 }
 
 func (l *limitRecords) Read(p []byte) (int, error) {
-	n, e := l.r.Read(p[:min(len(p), blockSize)])
+	n, e := l.r.Read(p[:min(len(p), blockSize, l.max-l.size+1)])
 	for _, c := range p[:n] {
-		l.line++
-		if l.line > l.max {
+		l.size++
+		if l.size > l.max {
 			return 0, ErrBudget
 		}
-		if c == '\n' {
-			l.line = 0
+		switch l.state {
+		case 0:
+			if c == '"' {
+				l.state = 2
+			} else if c != l.comma && c != '\n' {
+				l.state = 1
+			}
+		case 1:
+			if c == l.comma {
+				l.state = 0
+			}
+		case 2:
+			if c == '"' {
+				l.state = 3
+			}
+		case 3:
+			if c == '"' {
+				l.state = 2
+			} else if c == l.comma {
+				l.state = 0
+			}
+		}
+		if c == '\n' && l.state != 2 {
+			l.size, l.state = 0, 0
 		}
 	}
 	return n, e
@@ -131,10 +155,12 @@ func walkText(ctx context.Context, r io.Reader, format string, p Policy, visit f
 		}
 		return nil
 	}
-	cr := csv.NewReader(&limitRecords{r: r, max: p.MaxRecordBytes})
+	comma := byte(',')
 	if format == "tsv" {
-		cr.Comma = '\t'
+		comma = '\t'
 	}
+	cr := csv.NewReader(&limitRecords{r: r, max: p.MaxRecordBytes, comma: comma})
+	cr.Comma = rune(comma)
 	cr.FieldsPerRecord = -1
 	cr.ReuseRecord = true
 	names, e := cr.Read()
