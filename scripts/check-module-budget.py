@@ -19,7 +19,7 @@ if sys.argv[1:] == ["--self-check"]:
     sys.exit(0)
 
 env = dict(os.environ, CGO_ENABLED="0", GOFLAGS="-mod=readonly")
-result = subprocess.run(["rtk", "proxy", "go", "list", "-deps", "-json", "./cmd/aim-gateway"], env=env,
+result = subprocess.run(["go", "list", "-deps", "-json", "./cmd/aim-gateway"], env=env,
                         text=True, capture_output=True, check=True)
 decoder = json.JSONDecoder()
 data = result.stdout
@@ -42,13 +42,13 @@ for module in sorted(modules):
     print(f"  {module}")
 if bad:
     print("forbidden compiled packages: " + ", ".join(bad), file=sys.stderr)
-all_packages = subprocess.run(["rtk", "proxy", "go", "list", "-json", "./..."], env=env,
+all_packages = subprocess.run(["go", "list", "-json", "./..."], env=env,
                               text=True, capture_output=True, check=True).stdout
 while all_packages.strip():
     package, used = decoder.raw_decode(all_packages.lstrip())
     all_packages = all_packages[len(all_packages) - len(all_packages.lstrip()) + used:]
     imports.update(package.get("Imports", []))
-mod = json.loads(subprocess.run(["rtk", "proxy", "go", "mod", "edit", "-json"], env=env,
+mod = json.loads(subprocess.run(["go", "mod", "edit", "-json"], env=env,
                                 text=True, capture_output=True, check=True).stdout)
 direct = {entry["Path"] for entry in mod["Require"] if not entry.get("Indirect")}
 used_direct = {path for path in direct if any(p == path or p.startswith(path + "/") for p in imports)}
