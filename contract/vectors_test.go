@@ -218,25 +218,24 @@ func TestVerificationSharedVectors(t *testing.T) {
 				if e = d.Decode(&body); e != nil {
 					t.Fatal(e)
 				}
-				token, e := wire.Sign(v.Typ, "test-only-scan-key", body, private)
+				parts := strings.Split(v.Token, ".")
+				header, _ := base64.RawURLEncoding.DecodeString(parts[0])
+				var h wire.Header
+				json.Unmarshal(header, &h)
+				token, e := wire.Sign(v.Typ, h.KID, body, private)
 				if e != nil || token != v.Token {
 					t.Fatalf("Python/Go JWS bytes differ: %v", e)
 				}
+
+				names := []string{}
+				for k := range body {
+					names = append(names, k)
+				}
+				sort.Strings(names)
 				valid := func(token string) bool {
-					parts := strings.Split(token, ".")
-					if len(parts) != 3 {
-						return false
-					}
-					header, e := base64.RawURLEncoding.DecodeString(parts[0])
-					if e != nil {
-						return false
-					}
-					var h struct{ Alg, Kid, Typ string }
-					if json.Unmarshal(header, &h) != nil || h.Alg != "EdDSA" || h.Kid != "test-only-scan-key" || h.Typ != v.Typ {
-						return false
-					}
-					signature, e := base64.RawURLEncoding.DecodeString(parts[2])
-					return e == nil && ed25519.Verify(public, []byte(parts[0]+"."+parts[1]), signature)
+					var out map[string]any
+					_, e := wire.VerifyControl(token, v.Typ, strings.Join(names, " "), map[string]ed25519.PublicKey{h.KID: public}, &out, 16<<20)
+					return e == nil
 				}
 				if !valid(v.Token) {
 					t.Fatal("valid shared JWS refused")

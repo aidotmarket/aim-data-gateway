@@ -4,7 +4,7 @@ from hashlib import sha256
 from pathlib import Path
 import sys
 
-MANIFEST_SHA256 = "720943c8a1779a4440896b4199768ee333b274de5dcb1aa75abb38b88110a3a0"
+MANIFEST_SHA256 = "9e174b0b668eadba15771a7f238605c937c4ddf90d666e79748c0f84625b7a01"
 
 paths = sorted(Path("contract/vectors").rglob("*.json"))
 actual = "".join(f"{sha256(p.read_bytes()).hexdigest()}  {p.as_posix()}\n" for p in paths)
