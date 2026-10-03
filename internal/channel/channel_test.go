@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -647,7 +648,11 @@ func TestVerificationControlOverflowRecordsEveryToken(t *testing.T) {
 		}
 		return e
 	}
-	c.VerificationRefused = record
+	if e = r.Start(context.Background(), dir); e != nil {
+		t.Fatal(e)
+	}
+	defer r.Close()
+	c.VerificationRefused = r.QueueRefusal
 	entered, release := make(chan struct{}), make(chan struct{})
 	var once sync.Once
 	c.Verification = func(ctx context.Context, token string) error {
@@ -702,14 +707,7 @@ func TestVerificationControlOverflowRecordsEveryToken(t *testing.T) {
 		}
 		// First control is blocked and one is queued; all ten excess controls must
 		// already have durable refusal records without releasing the worker.
-		for range 11 {
-			select {
-			case <-received:
-			case <-ctx.Done():
-				t.Error("missing overflow refusal")
-				return
-			}
-		}
+		waitRefusalEvents(t, ctx, l, 11)
 		select {
 		case <-polled:
 		case <-ctx.Done():
@@ -720,12 +718,7 @@ func TestVerificationControlOverflowRecordsEveryToken(t *testing.T) {
 			t.Error("overflow blocked heartbeat", e)
 		}
 		close(release)
-		select {
-		case <-received:
-		case <-ctx.Done():
-			t.Error("queued token missing")
-			return
-		}
+		waitRefusalEvents(t, ctx, l, 12)
 		ws.Close(websocket.StatusNormalClosure, "done")
 	})
 	defer s.Close()
@@ -733,6 +726,7 @@ func TestVerificationControlOverflowRecordsEveryToken(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
 	defer cancel()
 	c.Connect(ctx)
+	r.Close()
 	events, e := l.VerificationEvents(context.Background(), 0)
 	if e != nil || len(events) != len(tokens) {
 		t.Fatal("lost verification control", len(events), e)
@@ -772,18 +766,19 @@ func TestOverflowAuditSyncDoesNotBlockChannel(t *testing.T) {
 	}
 	entered, release := make(chan struct{}), make(chan struct{})
 	var once sync.Once
-	local.Sync = func(f *os.File) error { once.Do(func() { close(entered); <-release }); return f.Sync() }
 	r := &verifier.Runner{Ledger: l, Audit: local, Log: c.Log, OpenFile: func(ledger.File) (*os.File, error) { t.Error("source opened"); return nil, os.ErrPermission }}
-	recorded := make(chan struct{}, 100)
-	c.VerificationRefused = func(ctx context.Context, hash string) error {
-		e := r.RefuseControl(ctx, hash)
-		if e == nil {
-			recorded <- struct{}{}
-		}
-		return e
+	if e = r.Start(context.Background(), dir); e != nil {
+		t.Fatal(e)
 	}
+	defer r.Close()
+	local.Sync = func(f *os.File) error { once.Do(func() { close(entered); <-release }); return f.Sync() }
+	c.VerificationRefused = r.QueueRefusal
+	var onceAdmission sync.Once
+	admissionEntered := make(chan struct{})
 	c.Verification = func(ctx context.Context, token string) error {
-		return c.VerificationRefused(ctx, wire.Digest([]byte(token)))
+		onceAdmission.Do(func() { close(admissionEntered) })
+		<-ctx.Done()
+		return ctx.Err()
 	}
 	c.heartbeatEvery = 20 * time.Millisecond
 	polled, acked, revoked := make(chan struct{}, 1), make(chan struct{}, 1), make(chan struct{}, 1)
@@ -814,6 +809,7 @@ func TestOverflowAuditSyncDoesNotBlockChannel(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
+	var connections atomic.Int64
 	s := server(t, func(ctx context.Context, ws *websocket.Conn) {
 		ws.Write(ctx, websocket.MessageText, []byte(`{"resume":{"seq":0,"entry_hash":""}}`))
 		for range len(entries) {
@@ -826,15 +822,36 @@ func TestOverflowAuditSyncDoesNotBlockChannel(t *testing.T) {
 				}
 			}
 		}()
+		if connections.Add(1) == 2 {
+			select {
+			case <-polled:
+			case <-ctx.Done():
+				t.Error("reconnect polling stalled")
+				return
+			}
+			if e := ws.Ping(ctx); e != nil {
+				t.Error("reconnect heartbeat blocked", e)
+			}
+			close(release)
+			waitRefusalEvents(t, ctx, l, 100)
+			return
+		}
 		ws.Write(ctx, websocket.MessageText, []byte(token))
+		select {
+		case <-admissionEntered:
+		case <-ctx.Done():
+			t.Error("admission not blocked")
+			return
+		}
+		// One queued control and 100 overflow refusals.
+		for range 101 {
+			ws.Write(ctx, websocket.MessageText, []byte(token))
+		}
 		select {
 		case <-entered:
 		case <-ctx.Done():
 			t.Error("audit did not block")
 			return
-		}
-		for range 99 {
-			ws.Write(ctx, websocket.MessageText, []byte(token))
 		}
 		ws.Write(ctx, websocket.MessageText, []byte(`{"ack":2}`))
 		ws.Write(ctx, websocket.MessageText, []byte(revoke))
@@ -852,21 +869,15 @@ func TestOverflowAuditSyncDoesNotBlockChannel(t *testing.T) {
 		if e := ws.Ping(ctx); e != nil {
 			t.Error("heartbeat blocked", e)
 		}
-		close(release)
-		for range 100 {
-			select {
-			case <-recorded:
-			case <-ctx.Done():
-				t.Error("refusal evidence lost")
-				return
-			}
-		}
+		ws.CloseNow() // Replace the connection while refusal storage is blocked.
 	})
 	defer s.Close()
 	c.URL = "ws" + strings.TrimPrefix(s.URL, "http")
-	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
 	defer cancel()
 	c.Connect(ctx)
+	c.Connect(ctx)
+	r.Close()
 	events, e := l.VerificationEvents(context.Background(), 0)
 	if e != nil || len(events) != 100 {
 		t.Fatal(len(events), e)
@@ -888,5 +899,29 @@ func TestOverflowAuditSyncDoesNotBlockChannel(t *testing.T) {
 	raw, _ := os.ReadFile(filepath.Join(dir, "verification-audit.jsonl"))
 	if bytes.Contains(raw, []byte("PRIVATE_CELL")) {
 		t.Fatal("raw control leaked")
+	}
+}
+
+func waitRefusalEvents(t *testing.T, ctx context.Context, l *ledger.Ledger, want int) {
+	t.Helper()
+	for {
+		var n int
+		if e := l.DB.QueryRowContext(ctx, "SELECT count(*) FROM verification_local_events").Scan(&n); e != nil {
+			t.Error(e)
+			return
+		}
+		if n == want {
+			return
+		}
+		if n > want {
+			t.Errorf("duplicate events: %d > %d", n, want)
+			return
+		}
+		select {
+		case <-ctx.Done():
+			t.Error("missing refusal evidence", n, want)
+			return
+		case <-time.After(10 * time.Millisecond):
+		}
 	}
 }

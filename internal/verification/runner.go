@@ -18,6 +18,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -47,14 +48,18 @@ type Runner struct {
 	Config             func() config.Config
 	HTTP               *http.Client
 	// OpenFile is an instrumentable, contained source open; never called at admission.
-	OpenFile func(ledger.File) (*os.File, error)
-	Now      func() time.Time
-	mu       sync.Mutex
-	queue    chan work
-	lock     *os.File
-	cancel   context.CancelFunc
-	done     chan struct{}
-	outboxMu sync.Mutex
+	OpenFile      func(ledger.File) (*os.File, error)
+	Now           func() time.Time
+	mu            sync.Mutex
+	queue         chan work
+	lock          *os.File
+	cancel        context.CancelFunc
+	done          chan struct{}
+	outboxMu      sync.Mutex
+	refusals      chan string
+	excess        atomic.Uint64
+	refusalCancel context.CancelFunc
+	refusalDone   chan struct{}
 }
 type work struct {
 	job      wire.ScanJob
@@ -95,6 +100,10 @@ func (r *Runner) Start(ctx context.Context, dir string) error {
 		r.lock = nil
 		return e
 	}
+	refusalCtx, cancel := context.WithCancel(ctx)
+	r.refusalCancel, r.refusalDone = cancel, make(chan struct{})
+	r.refusals = make(chan string, 64)
+	go r.drainRefusals(refusalCtx)
 	ctx, r.cancel = context.WithCancel(ctx)
 	r.queue = make(chan work, 1)
 	r.done = make(chan struct{})
@@ -123,10 +132,15 @@ func (r *Runner) Start(ctx context.Context, dir string) error {
 func (r *Runner) Close() {
 	r.mu.Lock()
 	cancel, done, lock := r.cancel, r.done, r.lock
+	refusalCancel, refusalDone := r.refusalCancel, r.refusalDone
 	r.mu.Unlock()
 	if cancel != nil {
 		cancel()
 		<-done
+	}
+	if refusalCancel != nil {
+		refusalCancel()
+		<-refusalDone
 	}
 	if lock != nil {
 		lock.Close()
@@ -246,7 +260,51 @@ func (r *Runner) Submit(ctx context.Context, token string) error {
 // RefuseControl records overflow without trusting or echoing inbound claims.
 // The channel supplies only a digest; an empty hash denotes counted overflow.
 func (r *Runner) RefuseControl(ctx context.Context, hash string) error {
-	return r.record(ctx, ledger.Admission{SpecHash: hash}, "refused", "queue_full")
+	r.outboxMu.Lock()
+	defer r.outboxMu.Unlock()
+	if e := r.Ledger.VerificationEvent(ctx, ledger.Admission{SpecHash: hash}, "refused", "queue_full", r.now()); e != nil {
+		r.fail(e)
+		return e
+	}
+	// Mirroring can fail after insertion; the durable event must not be retried.
+	_ = r.mirror(ctx)
+	return nil
+}
+
+// QueueRefusal retains bounded hash-only evidence for the process lifetime.
+func (r *Runner) QueueRefusal(_ context.Context, hash string) error {
+	select {
+	case r.refusals <- hash:
+	default:
+		r.excess.Add(1)
+	}
+	return nil
+}
+func (r *Runner) drainRefusals(ctx context.Context) {
+	defer close(r.refusalDone)
+	tick := time.NewTicker(time.Second)
+	defer tick.Stop()
+	for {
+		var hash string
+		counted := r.excess.Load() > 0
+		if !counted {
+			select {
+			case <-ctx.Done():
+				return
+			case hash = <-r.refusals:
+			}
+		}
+		for r.RefuseControl(ctx, hash) != nil {
+			select {
+			case <-ctx.Done():
+				return
+			case <-tick.C:
+			}
+		}
+		if counted {
+			r.excess.Add(^uint64(0))
+		}
+	}
 }
 func (r *Runner) refusal(ctx context.Context, a ledger.Admission, code string) error {
 	// Fixed code only; no parser/path/schema error can escape.

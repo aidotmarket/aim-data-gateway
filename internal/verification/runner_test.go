@@ -569,3 +569,74 @@ func TestRuntimeScanReportMatchesPythonContractBytes(t *testing.T) {
 		t.Fatalf("runtime/contract report differs\n%s\n%s", actual, v.Canonical)
 	}
 }
+
+func TestPendingRefusalsRetryInsertOnly(t *testing.T) {
+	for _, mirrorFailure := range []bool{false, true} {
+		t.Run(fmt.Sprint("mirror=", mirrorFailure), func(t *testing.T) {
+			f := newRunner(t)
+			f.start(t)
+			r := f.r
+			if mirrorFailure {
+				r.Audit.Sync = func(*os.File) error { return errors.New("injected mirror failure") }
+			} else if _, e := r.Ledger.DB.Exec(`CREATE TRIGGER fail_refusal BEFORE INSERT ON verification_local_events BEGIN SELECT RAISE(FAIL, 'injected insert failure'); END`); e != nil {
+				t.Fatal(e)
+			}
+			r.outboxMu.Lock()
+			for i := 0; i < 100; i++ {
+				r.QueueRefusal(context.Background(), wire.Digest([]byte(fmt.Sprint(i))))
+			}
+			r.outboxMu.Unlock()
+			deadline := time.Now().Add(5 * time.Second)
+			for r.health() == nil && time.Now().Before(deadline) {
+				time.Sleep(10 * time.Millisecond)
+			}
+			if r.health() == nil {
+				t.Fatal("failure not injected")
+			}
+			if !mirrorFailure {
+				var n int
+				r.Ledger.DB.QueryRow("SELECT count(*) FROM verification_local_events").Scan(&n)
+				if n != 0 {
+					t.Fatal("insert unexpectedly succeeded", n)
+				}
+				if _, e := r.Ledger.DB.Exec("DROP TRIGGER fail_refusal"); e != nil {
+					t.Fatal(e)
+				}
+			}
+			for time.Now().Before(deadline) {
+				events, e := r.Ledger.VerificationEvents(context.Background(), 0)
+				if e != nil {
+					t.Fatal(e)
+				}
+				if len(events) == 100 {
+					break
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+			// Wait beyond another retry tick to detect duplicate inserts after mirror failure.
+			time.Sleep(1100 * time.Millisecond)
+			events, e := r.Ledger.VerificationEvents(context.Background(), 0)
+			if e != nil || len(events) != 100 {
+				t.Fatal("lost or duplicated evidence", len(events), e)
+			}
+			hashes := map[string]bool{}
+			counted := 0
+			for _, event := range events {
+				if event.SpecHash == "" {
+					counted++
+					continue
+				}
+				if hashes[event.SpecHash] {
+					t.Fatal("duplicate hash", event.SpecHash)
+				}
+				hashes[event.SpecHash] = true
+			}
+			if counted == 0 || len(hashes) < 64 {
+				t.Fatal("bounded backlog missing", len(hashes), counted)
+			}
+			if f.opens.Load() != 0 {
+				t.Fatal("refusal opened source")
+			}
+		})
+	}
+}

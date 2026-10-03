@@ -425,7 +425,7 @@ func (g *Gateway) Run(ctx context.Context, version string) error {
 	client := &channel.Client{State: &g.State, Log: g.Log, Version: version, Handle: g.Handle, Complete: func(ctx context.Context, iid string) error { _, err := g.Ledger.Seen(ctx, iid); return err }, Scan: g.Scan, Poll: g.Poll, Delivered: g.Delivered, Reconcile: g.Reconcile}
 	if g.Verifier != nil {
 		client.Verification = g.VerificationControl
-		client.VerificationRefused = g.Verifier.RefuseControl
+		client.VerificationRefused = g.Verifier.QueueRefusal
 	}
 	client.Canary = func(ctx context.Context) error {
 		g.keyMu.RLock()
