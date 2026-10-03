@@ -464,3 +464,16 @@ func TestLargeTextMemoryAndDownloadConcurrency(t *testing.T) {
 		})
 	}
 }
+
+func TestGatewayFIDWidthErratum(t *testing.T) {
+	for _, id := range []string{strings.Repeat("a", 31), strings.Repeat("a", 33), strings.Repeat("a", 64), strings.Repeat("A", 32)} {
+		src := sourceFor([]byte("n\n12\n"), "csv")
+		src.members[0].Identity = id
+		if _, e := Scan(context.Background(), src, testPolicy()); e == nil {
+			t.Fatal("invalid FID accepted", id)
+		}
+		if len(src.opens) != 0 {
+			t.Fatal("invalid FID opened source")
+		}
+	}
+}

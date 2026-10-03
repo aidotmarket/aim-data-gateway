@@ -165,9 +165,14 @@ func TestDialSites(t *testing.T) {
 		"internal/gateway/gateway.go:LoadOrPair:http.DefaultClient",
 		// Pairing POST to api.ai.market.
 		"internal/pairing/pairing.go:Pair:client.Do",
+		// Verification uses only the pinned API snapshot GET and channel proxy client.
+		"internal/verification/runner.go:<package>:http.Client",
+		"internal/verification/runner.go:fetchSnapshot:copyClient.Do",
+		"internal/verification/runner.go:fetchSnapshot:http.DefaultClient",
 		// Pairing client argument type.
 		"internal/pairing/pairing.go:Pair:http.Client",
 	}
+	sort.Strings(want)
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("dial-site inventory changed:\ngot:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
 	}

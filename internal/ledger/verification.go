@@ -16,7 +16,7 @@ CREATE TABLE IF NOT EXISTS verification_admissions (
  accepted_at INTEGER NOT NULL,issued_at INTEGER NOT NULL,expires_at INTEGER NOT NULL,committed_at INTEGER NOT NULL,
  utc_day TEXT NOT NULL,variant TEXT NOT NULL CHECK(variant IN ('probe','scan')),
  state TEXT NOT NULL CHECK(state IN ('accepted','running','reported','refused','interrupted')),
- spec_bytes BLOB NOT NULL,result_bytes BLOB,audit_seq INTEGER,snapshot_bytes BLOB NOT NULL,iid TEXT NOT NULL,delivered INTEGER NOT NULL DEFAULT 0);
+ spec_bytes BLOB NOT NULL,result_bytes BLOB,audit_seq INTEGER,snapshot_bytes BLOB NOT NULL,iid TEXT NOT NULL,delivered INTEGER NOT NULL DEFAULT 0,receipt_key_id TEXT NOT NULL,scanner_version TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS verification_daily(listing_id TEXT NOT NULL,utc_day TEXT NOT NULL,accepted_count INTEGER NOT NULL CHECK(accepted_count BETWEEN 0 AND 10),PRIMARY KEY(listing_id,utc_day));
 CREATE TABLE IF NOT EXISTS verification_clock(singleton INTEGER PRIMARY KEY CHECK(singleton=1),last_utc INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS verification_local_events(event_id INTEGER PRIMARY KEY AUTOINCREMENT,received_at INTEGER NOT NULL,spec_hash TEXT,spec_id TEXT,result TEXT NOT NULL,refusal_code TEXT,authorization_id TEXT,nonce TEXT,spec_bytes BLOB);
@@ -24,6 +24,7 @@ CREATE TABLE IF NOT EXISTS verification_local_events(event_id INTEGER PRIMARY KE
 
 type Admission struct {
 	SpecID, RunnerID, ListingID, VersionID, ManifestHash, SpecHash, Nonce, AuthorizationID, Variant, State, IID string
+	ReceiptKeyID, ScannerVersion                                                                                string
 	Accepted, Issued, Expires, Committed                                                                        int64
 	Spec, Snapshot, Result                                                                                      []byte
 	AuditSeq                                                                                                    sql.NullInt64
@@ -83,7 +84,7 @@ func (l *Ledger) Admit(ctx context.Context, a Admission, at time.Time) (bool, er
 	if n != 1 {
 		return false, ErrConsent
 	}
-	_, e = c.ExecContext(ctx, `INSERT INTO verification_admissions(spec_id,runner_id,listing_id,listing_version_id,manifest_hash,spec_hash,nonce,owner_authorization_id,accepted_at,issued_at,expires_at,committed_at,utc_day,variant,state,spec_bytes,snapshot_bytes,iid) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,'accepted',?,?,?)`, a.SpecID, a.RunnerID, a.ListingID, a.VersionID, a.ManifestHash, a.SpecHash, a.Nonce, a.AuthorizationID, a.Accepted, a.Issued, a.Expires, at.Unix(), day, a.Variant, a.Spec, a.Snapshot, a.IID)
+	_, e = c.ExecContext(ctx, `INSERT INTO verification_admissions(spec_id,runner_id,listing_id,listing_version_id,manifest_hash,spec_hash,nonce,owner_authorization_id,accepted_at,issued_at,expires_at,committed_at,utc_day,variant,state,spec_bytes,snapshot_bytes,iid,receipt_key_id,scanner_version) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,'accepted',?,?,?,?,?)`, a.SpecID, a.RunnerID, a.ListingID, a.VersionID, a.ManifestHash, a.SpecHash, a.Nonce, a.AuthorizationID, a.Accepted, a.Issued, a.Expires, at.Unix(), day, a.Variant, a.Spec, a.Snapshot, a.IID, a.ReceiptKeyID, a.ScannerVersion)
 	if e != nil {
 		return false, ErrConsent
 	}
@@ -119,10 +120,10 @@ func (l *Ledger) VerificationEvents(ctx context.Context, after int64) ([]LocalEv
 	return out, rows.Err()
 }
 
-const admissionSelect = `SELECT spec_id,runner_id,listing_id,listing_version_id,manifest_hash,spec_hash,nonce,owner_authorization_id,variant,state,iid,accepted_at,issued_at,expires_at,committed_at,spec_bytes,snapshot_bytes,result_bytes,audit_seq FROM verification_admissions`
+const admissionSelect = `SELECT spec_id,runner_id,listing_id,listing_version_id,manifest_hash,spec_hash,nonce,owner_authorization_id,variant,state,iid,accepted_at,issued_at,expires_at,committed_at,spec_bytes,snapshot_bytes,result_bytes,audit_seq,receipt_key_id,scanner_version FROM verification_admissions`
 
 func scanAdmission(row interface{ Scan(...any) error }) (a Admission, e error) {
-	e = row.Scan(&a.SpecID, &a.RunnerID, &a.ListingID, &a.VersionID, &a.ManifestHash, &a.SpecHash, &a.Nonce, &a.AuthorizationID, &a.Variant, &a.State, &a.IID, &a.Accepted, &a.Issued, &a.Expires, &a.Committed, &a.Spec, &a.Snapshot, &a.Result, &a.AuditSeq)
+	e = row.Scan(&a.SpecID, &a.RunnerID, &a.ListingID, &a.VersionID, &a.ManifestHash, &a.SpecHash, &a.Nonce, &a.AuthorizationID, &a.Variant, &a.State, &a.IID, &a.Accepted, &a.Issued, &a.Expires, &a.Committed, &a.Spec, &a.Snapshot, &a.Result, &a.AuditSeq, &a.ReceiptKeyID, &a.ScannerVersion)
 	return
 }
 func (l *Ledger) Verification(ctx context.Context, id string) (Admission, error) {

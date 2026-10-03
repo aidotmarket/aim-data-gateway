@@ -559,3 +559,64 @@ func TestForgedAckCorrectedByNextResume(t *testing.T) {
 		t.Fatal("ack pruned log")
 	}
 }
+
+func TestVerificationLaneDoesNotBlockControlOrHeartbeat(t *testing.T) {
+	c, _ := fixture(t)
+	key := ed25519.NewKeyFromSeed(bytesRepeat(0x42, 32))
+	c.State.Pins.ListingKeys = []wire.Key{{KID: "listing", Alg: "EdDSA", Key: base64.RawURLEncoding.EncodeToString(key.Public().(ed25519.PublicKey))}}
+	started := make(chan struct{})
+	stopped := make(chan struct{})
+	c.Verification = func(ctx context.Context, token string) error {
+		close(started)
+		<-ctx.Done()
+		close(stopped)
+		return ctx.Err()
+	}
+	c.heartbeatEvery = 20 * time.Millisecond
+	c.Handle = func(ctx context.Context, i wire.Instruction, _, _ string) (string, any, error) {
+		return "offer_ack", wire.OfferAck{IID: i.IID, FileID: i.FileID, Ready: true}, nil
+	}
+	i := wire.Instruction{Op: "offer", Audience: c.State.Pins.GatewayID, IID: "44444444-4444-4444-8444-444444444444", IssuedAt: time.Now().Unix(), FileID: "0123456789abcdef0123456789abcdef", SHA256: strings.Repeat("a", 64), ListingVersionID: "33333333-3333-4333-8333-333333333333"}
+	offer, _ := wire.Sign("aim-offer+jwt", "listing", i, key)
+	scan, _ := wire.Sign("aim-scan-spec+jwt", "scan", map[string]any{"variant": "scan"}, key)
+	s := server(t, func(ctx context.Context, ws *websocket.Conn) {
+		ws.Write(ctx, websocket.MessageText, []byte(`{"resume":{"seq":0,"entry_hash":""}}`))
+		for range 2 {
+			ws.Read(ctx)
+		}
+		ws.Write(ctx, websocket.MessageText, []byte(scan))
+		<-started
+		ws.Write(ctx, websocket.MessageText, []byte(offer))
+		_, raw, e := ws.Read(ctx)
+		if e != nil {
+			t.Error(e)
+			return
+		}
+		var a audit.Entry
+		if json.Unmarshal(raw, &a) != nil || a.MessageType != "offer_ack" {
+			t.Error("verification blocked control", string(raw))
+		}
+		ws.Close(websocket.StatusNormalClosure, "done")
+	})
+	defer s.Close()
+	c.URL = "ws" + strings.TrimPrefix(s.URL, "http")
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	defer cancel()
+	c.Connect(ctx)
+	select {
+	case <-stopped:
+	case <-time.After(time.Second):
+		t.Fatal("disconnect did not cancel verification")
+	}
+}
+func TestScanRotationUsesOutgoingScanClass(t *testing.T) {
+	c, _ := fixture(t)
+	key := ed25519.NewKeyFromSeed(bytesRepeat(0x42, 32))
+	c.State.Pins.ScanSpecKeys = []wire.Key{{KID: "scan", Alg: "EdDSA", Key: base64.RawURLEncoding.EncodeToString(key.Public().(ed25519.PublicKey))}}
+	i := wire.Instruction{Op: "key_rotation", Audience: c.State.Pins.GatewayID, IID: "44444444-4444-4444-8444-444444444444", IssuedAt: time.Now().Unix(), Keys: c.State.Pins.ScanSpecKeys}
+	token, _ := wire.Sign("aim-keys+jwt", "scan", i, key)
+	_, class, _, e := c.verify(token)
+	if e != nil || class != "scan" {
+		t.Fatal(class, e)
+	}
+}

@@ -34,13 +34,14 @@ type ScanEnvelope struct {
 	D6Hash   string `json:"d6_hash,omitempty"`
 }
 type ScanJob struct {
-	Envelope                  ScanEnvelope
-	Payload                   map[string]any
-	Raw                       []byte
-	D6                        map[string]any
-	Token                     string
-	KID                       string
-	Accepted, Issued, Expires time.Time
+	ScannerVersion, ReceiptKeyID string
+	Envelope                     ScanEnvelope
+	Payload                      map[string]any
+	Raw                          []byte
+	D6                           map[string]any
+	Token                        string
+	KID                          string
+	Accepted, Issued, Expires    time.Time
 }
 
 func (j ScanJob) Text(k string) string { v, _ := j.Payload[k].(string); return v }
@@ -80,6 +81,10 @@ func VerifyControl(token, typ, names string, keys map[string]ed25519.PublicKey, 
 	}
 	parts := strings.Split(token, ".")
 	if len(parts) != 3 {
+		return "", ErrVerification
+	}
+	sig, e := DecodeDocument(parts[2], 64)
+	if e != nil || len(sig) != 64 {
 		return "", ErrVerification
 	}
 	h, e := DecodeDocument(parts[0], 512)
@@ -376,4 +381,61 @@ func ValidateScanReportBody(raw []byte) error {
 	}
 	_, e = core.ParseCanonical(b)
 	return e
+}
+
+// VerifyScanRotation keeps the scan class strict without changing legacy key handlers.
+func VerifyScanRotation(token string, keys map[string]ed25519.PublicKey) (Instruction, error) {
+	var i Instruction
+	_, e := VerifyControl(token, "aim-keys+jwt", "op aud iid iat keys", keys, &i, 4096)
+	if e != nil {
+		return i, e
+	}
+	if i.Op != "key_rotation" || !uuid.MatchString(i.Audience) || !uuid.MatchString(i.IID) || len(i.Keys) == 0 {
+		return i, ErrVerification
+	}
+	seen := map[string]bool{}
+	for _, k := range i.Keys {
+		b, e := DecodeDocument(k.Key, 32)
+		if e != nil || len(b) != 32 || k.Alg != "EdDSA" || !identifier.MatchString(k.KID) || seen[k.KID] {
+			return i, ErrVerification
+		}
+		seen[k.KID] = true
+	}
+	return i, nil
+}
+
+func ValidateKeySet(groups ...[]Key) error {
+	seen := map[string]bool{}
+	for _, group := range groups {
+		for _, k := range group {
+			raw, e := DecodeDocument(k.Key, 32)
+			if e != nil || len(raw) != 32 || k.Alg != "EdDSA" || !identifier.MatchString(k.KID) || seen[k.KID] {
+				return ErrVerification
+			}
+			seen[k.KID] = true
+		}
+	}
+	return nil
+}
+
+type ScanBootstrap struct {
+	Op       string `json:"op"`
+	Variant  string `json:"variant"`
+	Audience string `json:"aud"`
+	IID      string `json:"iid"`
+	Issued   int64  `json:"iat"`
+	Expires  int64  `json:"exp"`
+	Keys     []Key  `json:"keys"`
+}
+
+func VerifyScanBootstrap(token string, keys map[string]ed25519.PublicKey, gateway string, at time.Time) (ScanBootstrap, error) {
+	var b ScanBootstrap
+	_, e := VerifyControl(token, "aim-scan-key-bootstrap+jwt", "op variant aud iid iat exp keys", keys, &b, 4096)
+	if e != nil {
+		return b, e
+	}
+	if b.Op != "scan_spec" || b.Variant != "key_bootstrap" || b.Audience != gateway || !uuid.MatchString(b.IID) || b.Expires != b.Issued+900 || b.Issued > at.Unix()+300 || b.Expires < at.Unix()-300 || len(b.Keys) == 0 {
+		return b, ErrVerification
+	}
+	return b, ValidateKeySet(b.Keys)
 }
