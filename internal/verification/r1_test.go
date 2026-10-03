@@ -244,11 +244,12 @@ func TestAuditFailureStopsWorkAndRetainsOutbox(t *testing.T) {
 	open := f.r.OpenFile
 	entered, release := make(chan struct{}), make(chan struct{})
 	f.r.OpenFile = func(v ledger.File) (*os.File, error) {
-		if f.opens.Load() == 0 {
+		handle, e := open(v)
+		if f.opens.Load() == 1 {
 			close(entered)
 			<-release
 		}
-		return open(v)
+		return handle, e
 	}
 	f.start(t)
 	tokenA, jA := f.job(t, 1, "scan")
@@ -367,5 +368,75 @@ func TestE7RecheckedAtEveryMemberOpen(t *testing.T) {
 	}
 	if handle, e := src.OpenAt(context.Background(), snapshot.Members[0].FileID); !errors.Is(e, ErrE7) || handle != nil {
 		t.Fatal("random member open bypassed E7", handle, e)
+	}
+}
+
+func TestAppendBeforeSQLFailureRecoversOnlyAtRestart(t *testing.T) {
+	f := newRunner(t)
+	ctx := context.Background()
+	_, j := f.job(t, 1, "scan")
+	snapshotToken := loadVector(t, "snapshot").Token
+	snapshot, e := wire.VerifySnapshot(snapshotToken, f.r.Pins(), j)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if _, e = f.r.Ledger.Admit(ctx, f.r.admission(j, snapshotToken), f.at); e != nil {
+		t.Fatal(e)
+	}
+	if e = f.r.Audit.Mirror(ctx, f.r.Ledger); e != nil {
+		t.Fatal(e)
+	}
+	if _, e = f.r.Ledger.DB.Exec(`CREATE TRIGGER fail_outbox_link BEFORE UPDATE OF audit_seq ON verification_admissions BEGIN SELECT RAISE(ABORT,'injected link failure'); END`); e != nil {
+		t.Fatal(e)
+	}
+	if e = f.r.run(ctx, j, snapshot); e == nil {
+		t.Fatal("link failure ignored")
+	}
+	seq := f.r.Log.Sequence()
+	if seq != 1 {
+		t.Fatal("missing durable append", seq)
+	}
+	if e = f.r.Flush(ctx); e == nil || f.r.Log.Sequence() != seq {
+		t.Fatal("poll retried append", e)
+	}
+	if _, e = f.r.Ledger.DB.Exec("DROP TRIGGER fail_outbox_link"); e != nil {
+		t.Fatal(e)
+	}
+	recovered := &Runner{Ledger: f.r.Ledger, Audit: f.r.Audit, Log: f.r.Log, Keys: f.r.Keys, GatewayID: f.r.GatewayID, Version: f.r.Version, Pins: f.r.Pins, Config: f.r.Config, Now: f.r.Now}
+	if e = recovered.Recover(ctx); e != nil {
+		t.Fatal(e)
+	}
+	a, e := f.r.Ledger.Verification(ctx, j.Text("spec_id"))
+	if e != nil || !a.AuditSeq.Valid || f.r.Log.Sequence() != seq {
+		t.Fatal("duplicate/lost recovered append", a, e)
+	}
+}
+
+func TestFreshConsentCannotReuseAuthorizationOrNonce(t *testing.T) {
+	f := newRunner(t)
+	ctx := context.Background()
+	_, first := f.job(t, 1, "scan")
+	a := f.r.admission(first, loadVector(t, "snapshot").Token)
+	if _, e := f.r.Ledger.Admit(ctx, a, f.at); e != nil {
+		t.Fatal(e)
+	}
+	for _, field := range []string{"authorization", "nonce"} {
+		_, next := f.job(t, 2, "scan")
+		fresh := f.r.admission(next, loadVector(t, "snapshot").Token)
+		at := f.at.Add(24 * time.Hour)
+		fresh.Accepted, fresh.Issued, fresh.Expires = at.Unix()-60, at.Unix()-30, at.Unix()+3600
+		if field == "authorization" {
+			fresh.AuthorizationID = a.AuthorizationID
+		} else {
+			fresh.Nonce = a.Nonce
+		}
+		if _, e := f.r.Ledger.Admit(ctx, fresh, at); !errors.Is(e, ledger.ErrConsent) {
+			t.Fatal("fresh consent replay admitted", field, e)
+		}
+	}
+	var n int
+	f.r.Ledger.DB.QueryRow("SELECT count(*) FROM verification_daily").Scan(&n)
+	if n != 1 {
+		t.Fatal("failed replay left daily row", n)
 	}
 }

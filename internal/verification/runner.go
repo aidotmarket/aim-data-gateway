@@ -674,7 +674,11 @@ func (s *source) schema(ctx context.Context, f *os.File, id string) ([]string, e
 	return core.DiscoverSchema(ctx, randomFile{f, st.Size()}, format(v.RelativePath))
 }
 func (s *source) Open(ctx context.Context, id string) (io.ReadCloser, error) {
-	return s.checkedOpen(ctx, id)
+	f, e := s.checkedOpen(ctx, id)
+	if e != nil {
+		return nil, e
+	}
+	return f, nil
 }
 
 type randomFile struct {
