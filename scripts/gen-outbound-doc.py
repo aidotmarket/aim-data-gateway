@@ -17,6 +17,18 @@ def render() -> str:
         if vector.get("expected_verdict") != "valid" or not isinstance(vector.get("input"), dict):
             raise ValueError(f"missing valid input for {name}")
         lines.extend((f"## `{name}`", "", "```json", json.dumps(vector["input"], indent=2, sort_keys=True), "```", ""))
+    lines.extend(("## `scan_report`", "", "Identity-key audit envelope; successful, terminal and probe receipts use the separate local receipt key.",
+                  "Decoded documents are Python-canonical JSON (700 KiB maximum); the whole audit frame remains at most 1 MiB.", ""))
+    for name in ("registration", "probe_report", "scan_report", "terminal_report"):
+        vector = json.loads((Path("contract/vectors/verification") / f"{name}.json").read_text())
+        if name == "registration":
+            body = vector["input"]
+        else:
+            import base64
+            body = {"op": "scan_report", "variant": {"probe_report": "probe", "scan_report": "scan", "terminal_report": "terminal"}[name],
+                    "runner_id": "66666666-6666-4666-8666-666666666666", "iid": "88888888-8888-4888-8888-888888888888",
+                    "document_b64": base64.urlsafe_b64encode(vector["canonical"].encode()).decode().rstrip("=")}
+        lines.extend((f"### `{name}`", "", "```json", json.dumps(body, indent=2, sort_keys=True), "```", ""))
     return "\n".join(lines)
 
 

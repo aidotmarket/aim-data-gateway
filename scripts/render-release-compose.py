@@ -14,4 +14,6 @@ if __name__ == "__main__":
         sys.exit("expected exactly one build: . line")
     output = Path(sys.argv[2])
     output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(source.replace(old, f"    image: ghcr.io/aidotmarket/aim-gateway@{sys.argv[1]}\n"))
+    replacement = (f"    image: ghcr.io/aidotmarket/aim-gateway@{sys.argv[1]}\n"
+                   f"    environment:\n      AIM_GATEWAY_IMAGE_DIGEST: {sys.argv[1]}\n")
+    output.write_text(source.replace(old, replacement))

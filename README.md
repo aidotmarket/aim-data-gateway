@@ -19,3 +19,19 @@ Release Compose assets pin the signed image by digest. See the [security policy]
 ## Audit log recovery
 
 At startup, a line without a terminating newline at the end of the last audit file is treated as an interrupted write. The fragment is preserved as `audit/torn-<unix-nanos>.fragment`, the file is truncated to the last valid line and synced, and one recovery line is logged to stderr. A newline-terminated invalid line or damage anywhere earlier still stops startup. Audit entries are synced before transmission, so the recovered fragment was never sent.
+
+## Seller-requested verification
+
+The gateway has four functions: describe seller-selected sources, serve signed purchased-file deliveries, report delivery, and run seller-requested verification probes/scans in place. Verification uses the shared open-source `verification` package. It sends only the approved aggregate facts and signed control records; raw values, samples, paths and parser errors stay local.
+
+Use the website to request a free probe, review the quote, and deliberately start a paid scan. The gateway independently checks signed consent, the retained published member set, effective offer ceiling, and column rules. A configured rename (including a no-op rename) or drop affecting an original column refuses verification: “Some columns of this data are hidden in your gateway settings, so it can't be verified.” Rules for nonexistent columns do not affect eligibility. An admitted refusal still consumes authorization and the listing's daily quota of ten probes/scans combined.
+
+`verification_enabled` defaults true on scanner-capable builds and can be set false locally. Released Compose assets provide their pinned image digest automatically. Existing paired volumes accept a one-time listing-key-signed scan-key bootstrap; receipt/commitment keys are generated locally. No hand-set key or re-pairing is needed. Unregistered development builds cannot accept work.
+
+```sh
+aim-gateway preview --verify <32-hex-file-id> [--spec-id <id>]
+```
+
+Preview selects a retained signed scan for the whole listing, never just that file. Completed work prints the exact saved report; pending work prints a labelled deterministic fact manifest and policy without invented receipt times/signatures. Multiple matching scans require `--spec-id`. It makes no network request, consumes no consent/quota, and writes no ledger or audit record. Ordinary D9 preview remains available.
+
+Keep the seller-owned state volume. `gateway.db` retains consent, nonce, quota, clock high-water, exact specs/snapshots and the report outbox; `verification-audit.jsonl` is a local-only signed event chain. Restart interrupts admitted unfinished work and emits a paid terminal failure instead of rerunning it. Never erase replay state to retry. Removing the verifier stops new verification while historical findings and ordinary gateway delivery remain separate.
