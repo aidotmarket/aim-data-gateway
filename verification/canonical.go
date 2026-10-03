@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"math/big"
 	"sort"
 	"strconv"
 	"strings"
@@ -88,11 +89,13 @@ func encodePython(b *bytes.Buffer, v any) error {
 			}
 			return encodePython(b, f)
 		}
-		n, e := x.Int64()
-		if e != nil {
+		n, ok := new(big.Int).SetString(string(x), 10)
+		if !ok {
 			return ErrUnsupported
 		}
-		b.WriteString(strconv.FormatInt(n, 10))
+		b.WriteString(n.String())
+	case *big.Int:
+		b.WriteString(x.String())
 	case int:
 		b.WriteString(strconv.Itoa(x))
 	case int64:

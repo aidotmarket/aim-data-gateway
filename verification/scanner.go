@@ -493,7 +493,7 @@ func (a *aggregate) add(raw []byte, length int, number float64, valid bool, p Po
 	}
 	return nil
 }
-func (a *aggregate) estimate() int64 {
+func (a *aggregate) estimate() *big.Int {
 	sum := 0.0
 	zeros := 0
 	for _, r := range a.hll {
@@ -506,7 +506,8 @@ func (a *aggregate) estimate() int64 {
 	if zeros > 0 {
 		v = 128 * math.Log(128/float64(zeros))
 	}
-	return int64(math.RoundToEven(v))
+	estimate, _ := new(big.Float).SetFloat64(math.RoundToEven(v)).Int(nil)
+	return estimate
 }
 func low(counts []int64) bool {
 	for _, c := range counts {
@@ -550,10 +551,9 @@ func ambiguousRate(c, n int64) bool {
 	return max(left, int64(1)) <= min(right, int64(9)) || max(left, n-9) <= min(right, n-1)
 }
 func ambiguousDistinct(e int64) bool {
-	if e == 0 {
-		return false
-	}
-	return (e*908076+999999)/1000000 <= min(int64(9), e*1091924/1000000)
+	// The Python interval intersects [1,9] exactly for integer estimates 1..9.
+	// Comparing first avoids overflowing either ppm product for large estimates.
+	return e > 0 && e <= 9
 }
 func finish(names []string, acc []*aggregate, rows int64) Object {
 	o := Object{Names: names, Types: []string{}, NullRate: []any{}, Distinct: []any{}, Length: []any{}, Numeric: []any{}, Rows: rows, RowMethod: "exact"}
@@ -567,8 +567,12 @@ func finish(names []string, acc []*aggregate, rows int64) Object {
 		o.NullRate = append(o.NullRate, rate)
 		var distinct any = suppressed
 		e := a.estimate()
-		if rows >= 10 && (len(a.exact) == 0 || len(a.exact) == 10) && !ambiguousDistinct(e) {
-			distinct = map[string]any{"estimate": e, "algorithm": "hll-sha256-v1", "relative_error_ppm": 91924}
+		if rows >= 10 && (len(a.exact) == 0 || len(a.exact) == 10) && (!e.IsInt64() || !ambiguousDistinct(e.Int64())) {
+			var value any = e
+			if e.IsInt64() {
+				value = e.Int64()
+			}
+			distinct = map[string]any{"estimate": value, "algorithm": "hll-sha256-v1", "relative_error_ppm": 91924}
 		}
 		o.Distinct = append(o.Distinct, distinct)
 		var l, n any
