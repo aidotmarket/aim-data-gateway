@@ -13,6 +13,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
@@ -75,6 +76,7 @@ func TestPinnedOraclePairs(t *testing.T) {
 		SourcePin string `json:"source_pin"`
 		Files     []struct {
 			Name, Input, Expected, Format, Seed string
+			Refusal                             bool   `json:"refusal"`
 			InputSHA                            string `json:"input_sha256"`
 			ExpectedSHA                         string `json:"expected_sha256"`
 		}
@@ -107,6 +109,16 @@ func TestPinnedOraclePairs(t *testing.T) {
 			copy(p.Seed[:], seed)
 			src := sourceFor(input, v.Format)
 			got, e := Scan(context.Background(), src, p)
+			if v.Refusal {
+				if !errors.Is(e, ErrUnsupported) || !reflect.DeepEqual(got, Facts{}) {
+					t.Fatalf("refusal: facts=%+v error=%v", got, e)
+				}
+				raw, err := canonical(map[string]any{"error": "ValueError", "facts": nil})
+				if err != nil || !bytes.Equal(raw, expected) {
+					t.Fatalf("refusal differs: %s", raw)
+				}
+				return
+			}
 			if e != nil {
 				t.Fatal(e)
 			}

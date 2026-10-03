@@ -239,7 +239,7 @@ func inferCell(c cell) string {
 			}
 			return "integer"
 		case string:
-			if _, ok, _ := timestamp(v); ok {
+			if _, ok, _ := timestamp(v); ok && !strings.ContainsAny(v, ".,") {
 				return "datetime"
 			}
 			return "string"
@@ -247,16 +247,16 @@ func inferCell(c cell) string {
 		return "unsupported"
 	}
 	v := strings.TrimSpace(c.text)
-	if nullTokens[v] {
+	if nullTokens[c.text] {
 		return "unknown"
 	}
 	if v == "true" || v == "false" || v == "True" || v == "False" || v == "TRUE" || v == "FALSE" {
 		return "boolean"
 	}
-	if _, e := strconv.ParseInt(v, 10, 64); e == nil {
+	if _, e := strconv.ParseInt(v, 10, 64); e == nil && !strings.HasPrefix(v, "+") {
 		return "integer"
 	}
-	if f, e := strconv.ParseFloat(v, 64); e == nil && !math.IsNaN(f) && !math.IsInf(f, 0) {
+	if _, e := strconv.ParseFloat(v, 64); e == nil || errors.Is(e, strconv.ErrRange) {
 		return "float"
 	}
 	if _, e := time.Parse("2006-01-02", v); e == nil {
@@ -324,7 +324,7 @@ func scalar(c cell, kind string) ([]byte, int, float64, bool, error) {
 		v = c.value
 		valid = v != nil
 	} else if kind != "string" {
-		valid = !nullTokens[strings.TrimSpace(c.text)]
+		valid = !nullTokens[c.text]
 	}
 	if !valid {
 		return nil, 0, 0, false, nil
@@ -383,7 +383,16 @@ func scalar(c cell, kind string) ([]byte, int, float64, bool, error) {
 		if !ok {
 			e = ErrUnsupported
 		} else {
-			raw = []byte("time:" + isoPython(t, tz, t.Nanosecond() != 0))
+			// Arrow CSV retains its inferred precision; without pandas the pinned
+			// Python oracle refuses sub-microsecond values. JSON uses seconds UTC
+			// with no timezone metadata, even when the input has an offset.
+			if !c.json && t.Nanosecond()%1000 != 0 {
+				return nil, 0, 0, false, ErrUnsupported
+			}
+			if tz {
+				t = t.UTC()
+			}
+			raw = []byte("time:" + isoPython(t, tz && !c.json, t.Nanosecond() != 0))
 		}
 	default:
 		e = ErrUnsupported
