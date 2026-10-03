@@ -72,6 +72,9 @@ func (p Policy) checked() (Policy, error) {
 	}
 	return p, nil
 }
+func fileIDASCII(s string) bool {
+	return len(s) == 32 && hexASCII(s+s)
+}
 func hexASCII(s string) bool {
 	if len(s) != 64 {
 		return false
@@ -126,7 +129,7 @@ func prepare(ctx context.Context, s Source, p Policy, b *budget) ([]pinned, erro
 	}
 	out := make([]pinned, 0, len(members))
 	for i, m := range members {
-		if !hexASCII(m.Identity) || m.Size < 0 || i > 0 && members[i-1].Identity >= m.Identity {
+		if !fileIDASCII(m.Identity) || m.Size < 0 || i > 0 && members[i-1].Identity >= m.Identity {
 			return nil, ErrArtifactChanged
 		}
 		n := m.Size / blockSize

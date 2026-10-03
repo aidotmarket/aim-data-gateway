@@ -35,7 +35,7 @@ type memorySource struct {
 }
 
 func sourceFor(data []byte, format string) *memorySource {
-	m := Member{Identity: strings.Repeat("1", 64), Size: int64(len(data)), SHA256: sha256.Sum256(data), Format: format}
+	m := Member{Identity: strings.Repeat("1", 32), Size: int64(len(data)), SHA256: sha256.Sum256(data), Format: format}
 	return &memorySource{[]Member{m}, map[string][]byte{m.Identity: data}, map[string]int{}, nil, nil}
 }
 func (s *memorySource) Members() []Member { return s.members }
@@ -264,7 +264,7 @@ func TestCompleteTraversalAndVoidedMutation(t *testing.T) {
 	for _, mode := range []string{"before", "between", "missing", "append", "unsupported_mutation", "late_supported"} {
 		t.Run(mode, func(t *testing.T) {
 			src := sourceFor([]byte("n\n"+strings.Repeat("123456789\n", 20000)), "csv")
-			second := Member{Identity: strings.Repeat("2", 64), Format: "zip", Size: 4, SHA256: sha256.Sum256([]byte("zip!"))}
+			second := Member{Identity: strings.Repeat("2", 32), Format: "zip", Size: 4, SHA256: sha256.Sum256([]byte("zip!"))}
 			src.members = append(src.members, second)
 			src.data[second.Identity] = []byte("zip!")
 			if mode == "late_supported" {
@@ -305,7 +305,7 @@ func TestCompleteTraversalAndVoidedMutation(t *testing.T) {
 		})
 	}
 	src := sourceFor([]byte("n\n"+strings.Repeat("12\n", 20)), "csv")
-	second := Member{Identity: strings.Repeat("2", 64), Format: "zip", Size: 4, SHA256: sha256.Sum256([]byte("zip!"))}
+	second := Member{Identity: strings.Repeat("2", 32), Format: "zip", Size: 4, SHA256: sha256.Sum256([]byte("zip!"))}
 	src.members = append(src.members, second)
 	src.data[second.Identity] = []byte("zip!")
 	f, e := Scan(context.Background(), src, testPolicy())
@@ -420,7 +420,7 @@ func TestLargeTextMemoryAndDownloadConcurrency(t *testing.T) {
 			}
 			f.Close()
 			st, _ := os.Stat(path)
-			m := Member{strings.Repeat("1", 64), st.Size(), [32]byte(h.Sum(nil)), format}
+			m := Member{strings.Repeat("1", 32), st.Size(), [32]byte(h.Sum(nil)), format}
 			// Existing eight delivery buffers remain live during the measurement.
 			downloads := make([][]byte, 8)
 			for i := range downloads {

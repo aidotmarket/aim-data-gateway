@@ -57,7 +57,7 @@ func TestDistinctSuppressionWithoutOverflow(t *testing.T) {
 func TestProbeAllFields(t *testing.T) {
 	src := sourceFor([]byte("n\n1\n2\n"), "csv")
 	extra := sourceFor([]byte("opaque"), "unsupported")
-	extra.members[0].Identity = strings.Repeat("2", 64)
+	extra.members[0].Identity = strings.Repeat("2", 32)
 	src.members = append(src.members, extra.members[0])
 	src.data[extra.members[0].Identity] = []byte("opaque")
 	got, e := Probe(context.Background(), src, testPolicy())
