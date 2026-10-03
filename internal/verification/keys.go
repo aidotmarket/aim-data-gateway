@@ -188,7 +188,7 @@ func (k *Keys) Acknowledge(token, gateway string, pins map[string]ed25519.Public
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	b := k.Binding
-	if a.Op != "scan_spec" || a.Variant != "registered" || a.Audience != gateway || a.Nonce != b.RegistrationNonce || a.Version != b.ScannerVersion || a.Digest != b.ImageDigest || a.Issued < at.Unix()-300 || a.Issued > at.Unix()+300 || !uuidID(a.Runner) || !uuidID(a.Receipt) || !uuidID(a.IID) {
+	if a.Op != "scan_spec" || a.Variant != "registered" || a.Audience != gateway || a.Nonce != b.RegistrationNonce || a.Version != b.ScannerVersion || a.Digest != b.ImageDigest || a.Issued < at.Unix()-300 || a.Issued > at.Unix()+300 || !wire.ValidUUID(a.Runner) || !wire.ValidUUID(a.Receipt) || !wire.ValidUUID(a.IID) {
 		return wire.ErrVerification
 	}
 	if b.RunnerID != "" && (b.RunnerID != a.Runner || b.ReceiptKeyID != a.Receipt) {
