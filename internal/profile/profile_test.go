@@ -2,6 +2,9 @@ package profile
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -11,6 +14,34 @@ import (
 	"github.com/aidotmarket/aim-data-gateway/internal/ids"
 	"github.com/aidotmarket/aim-data-gateway/internal/inventory"
 )
+
+// Freeze D9's own estimator, rounding, sorted JSON schema and rule behavior.
+// S1791 has a separate fact core; extracting a parser must not change these bytes.
+func TestD9FrozenDescriptionBytes(t *testing.T) {
+	root := t.TempDir()
+	body := []byte("{\"z\":1,\"a\":\"x\",\"hidden\":\"marker\"}\n{\"z\":null,\"a\":\"y\",\"hidden\":\"marker\"}\n")
+	if e := os.WriteFile(filepath.Join(root, "data.jsonl"), body, 0600); e != nil {
+		t.Fatal(e)
+	}
+	key, _ := ids.Derive(make([]byte, 32))
+	records, e := inventory.Scan(config.Config{Sources: []config.Source{{Name: "frozen", Path: root}}}, key)
+	if e != nil {
+		t.Fatal(e)
+	}
+	d, e := File(records[0], config.Columns{Drop: []string{"hidden"}, Rename: map[string]string{"z": "public"}})
+	if e != nil {
+		t.Fatal(e)
+	}
+	raw, e := json.Marshal(d)
+	if e != nil {
+		t.Fatal(e)
+	}
+	sum := sha256.Sum256(body)
+	want := `{"sha256":"` + hex.EncodeToString(sum[:]) + `","row_count":2,"columns":[{"name":"a","type":"string","null_rate_pct":0,"distinct_bucket":"2-10"},{"name":"public","type":"integer","null_rate_pct":50,"distinct_bucket":"1"}]}`
+	if string(raw) != want {
+		t.Fatalf("D9 bytes changed: %s", raw)
+	}
+}
 
 func TestDistinctBuckets(t *testing.T) {
 	cases := []struct {

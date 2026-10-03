@@ -2,10 +2,15 @@ package contract
 
 import (
 	"bytes"
+	"context"
 	"crypto/ed25519"
+	"crypto/hmac"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -17,7 +22,234 @@ import (
 	"github.com/aidotmarket/aim-data-gateway/internal/inventory"
 	"github.com/aidotmarket/aim-data-gateway/internal/profile"
 	"github.com/aidotmarket/aim-data-gateway/internal/wire"
+	"github.com/aidotmarket/aim-data-gateway/verification"
 )
+
+type verificationSource struct {
+	members []verification.Member
+	data    map[string][]byte
+}
+
+func (s verificationSource) Members() []verification.Member { return s.members }
+func (s verificationSource) Open(_ context.Context, stringID string) (io.ReadCloser, error) {
+	return io.NopCloser(bytes.NewReader(s.data[stringID])), nil
+}
+func (s verificationSource) OpenAt(context.Context, string) (verification.RandomAccess, error) {
+	panic("Parquet not present in this fixture")
+}
+func TestVerificationSourceBindingVector(t *testing.T) {
+	raw, e := os.ReadFile("vectors/verification/source_bindings.json")
+	if e != nil {
+		t.Fatal(e)
+	}
+	var v struct {
+		Source map[string]string `json:"source_hex"`
+		Input  struct {
+			Gateway  string `json:"gateway_id"`
+			Snapshot string `json:"snapshot_hash"`
+			Key      string `json:"commitment_key_hex"`
+			Members  []struct {
+				ID   string `json:"file_id"`
+				SHA  string `json:"sha256"`
+				Size int64  `json:"size_bytes"`
+			}
+			Objects     []verification.Object
+			Coverage    verification.Coverage
+			Content     string `json:"content_sha256"`
+			Locator     string `json:"artifact_locator_commitment"`
+			Fingerprint string `json:"fingerprint_hash"`
+			Legacy      struct {
+				Root            string            `json:"root_path"`
+				Key             string            `json:"commitment_key_hex"`
+				LocatorPreimage string            `json:"locator_preimage_hex"`
+				Locator         string            `json:"artifact_locator_commitment"`
+				Content         string            `json:"content_sha256"`
+				ObjectIDs       map[string]string `json:"object_ids"`
+				Members         []struct {
+					Path string `json:"relative_path"`
+					Size int64  `json:"size_bytes"`
+					SHA  string `json:"sha256"`
+					Role string
+				}
+			} `json:"legacy_directory"`
+		}
+	}
+	if e = json.Unmarshal(raw, &v); e != nil {
+		t.Fatal(e)
+	}
+	src := verificationSource{data: map[string][]byte{}}
+	for _, m := range v.Input.Members {
+		data, e := hex.DecodeString(v.Source[m.ID])
+		if e != nil {
+			t.Fatal(e)
+		}
+		sum := sha256.Sum256(data)
+		if hex.EncodeToString(sum[:]) != m.SHA || int64(len(data)) != m.Size {
+			t.Fatal("source digest")
+		}
+		src.data[m.ID] = data
+		src.members = append(src.members, verification.Member{Identity: m.ID, Size: m.Size, SHA256: sum, Format: "csv"})
+	}
+	key, e := hex.DecodeString(v.Input.Key)
+	if e != nil {
+		t.Fatal(e)
+	}
+	p := verification.Policy{CanonicalizationVersion: "python-json-sort-compact-v1", RowCountAlgorithmVersion: "exact-v1", DistinctAlgorithmVersion: "hll-sha256-v1", HistogramVersion: "fixed-buckets-v1", NumericBucketVersion: "fixed-buckets-v1", MinimumAggregateOccupancy: 10, LengthBounds: []int{0, 1, 4, 8, 16, 32, 64, 128, 256}, NumericBoundaries: []float64{-1000, -100, -10, 0, 10, 100, 1000}, GatewayID: v.Input.Gateway, SnapshotHash: v.Input.Snapshot}
+	copy(p.CommitmentKey[:], key)
+	facts, e := verification.Scan(context.Background(), src, p)
+	if e != nil {
+		t.Fatal(e)
+	}
+	actual, e := wire.Canonical(facts.Objects)
+	if e != nil {
+		t.Fatal(e)
+	}
+	expected, e := wire.Canonical(v.Input.Objects)
+	if e != nil || !bytes.Equal(actual, expected) {
+		t.Fatalf("Python source fact bytes differ: %v", e)
+	}
+	actual, _ = wire.Canonical(facts.Coverage)
+	expected, _ = wire.Canonical(v.Input.Coverage)
+	if !bytes.Equal(actual, expected) || facts.ContentSHA256 != v.Input.Content || facts.LocatorCommitment != v.Input.Locator || facts.FingerprintHash != v.Input.Fingerprint {
+		t.Fatal("gateway source binding drift")
+	}
+	// Version-only republishing preserves object/content commitments; key rotation
+	// preserves content but changes keyed identities.
+	p.SnapshotHash = strings.Repeat("b", 64)
+	republished, e := verification.Scan(context.Background(), src, p)
+	if e != nil || republished.ContentSHA256 != facts.ContentSHA256 || republished.Objects[0].ObjectID != facts.Objects[0].ObjectID || republished.LocatorCommitment == facts.LocatorCommitment {
+		t.Fatal("version-only binding", e)
+	}
+	p.CommitmentKey[0] ^= 1
+	rotated, e := verification.Scan(context.Background(), src, p)
+	if e != nil || rotated.ContentSHA256 != facts.ContentSHA256 || rotated.Objects[0].ObjectID == facts.Objects[0].ObjectID {
+		t.Fatal("key binding", e)
+	}
+	// The unchanged old-directory vector uses its own framing and preimages.
+	legacy := v.Input.Legacy
+	legacyKey, e := hex.DecodeString(legacy.Key)
+	if e != nil {
+		t.Fatal(e)
+	}
+	mac := func(pre []byte) string {
+		h := hmac.New(sha256.New, legacyKey)
+		h.Write(pre)
+		return hex.EncodeToString(h.Sum(nil))
+	}
+	pre, e := hex.DecodeString(legacy.LocatorPreimage)
+	if e != nil || mac(pre) != legacy.Locator {
+		t.Fatal("legacy locator")
+	}
+	members := legacy.Members
+	sort.Slice(members, func(i, j int) bool { return members[i].Path < members[j].Path })
+	content := sha256.New()
+	var frame [8]byte
+	for _, m := range members {
+		if m.Role != "data" {
+			continue
+		}
+		sha, e := hex.DecodeString(m.SHA)
+		if e != nil {
+			t.Fatal(e)
+		}
+		binary.BigEndian.PutUint64(frame[:], uint64(len(m.Path)))
+		content.Write(frame[:])
+		content.Write([]byte(m.Path))
+		binary.BigEndian.PutUint64(frame[:], uint64(m.Size))
+		content.Write(frame[:])
+		content.Write(sha)
+		if mac([]byte("object\x00local_directory_object\x00"+legacy.Root+"\x00member\x00"+m.Path+"\x00"+m.SHA)) != legacy.ObjectIDs[m.Path] {
+			t.Fatal("legacy object commitment")
+		}
+	}
+	if hex.EncodeToString(content.Sum(nil)) != legacy.Content {
+		t.Fatal("legacy directory content")
+	}
+}
+
+// These fixtures are transport contracts only. No scan wire, ledger or channel
+// handler is added in chunk 1a; the later chunks enforce admission semantics.
+func TestVerificationSharedVectors(t *testing.T) {
+	paths, e := filepath.Glob("vectors/verification/*.json")
+	if e != nil || len(paths) != 13 {
+		t.Fatalf("shared fixture inventory: %v %d", e, len(paths))
+	}
+	for _, path := range paths {
+		t.Run(filepath.Base(path), func(t *testing.T) {
+			raw, e := os.ReadFile(path)
+			if e != nil {
+				t.Fatal(e)
+			}
+			var v struct {
+				TestOnlySeedHex   string `json:"test_only_seed_hex"`
+				TestOnlyPublicHex string `json:"test_only_public_hex"`
+				Canonical         string
+				CanonicalSHA      string `json:"canonical_sha256"`
+				Input             json.RawMessage
+				Token, Typ        string
+				Negative          []struct {
+					Name, Token string
+					Verdict     string `json:"expected_verdict"`
+				} `json:"negative_cases"`
+			}
+			if e = json.Unmarshal(raw, &v); e != nil {
+				t.Fatal(e)
+			}
+			sum := sha256.Sum256([]byte(v.Canonical))
+			if hex.EncodeToString(sum[:]) != v.CanonicalSHA {
+				t.Fatal("canonical hash drift")
+			}
+			if !json.Valid([]byte(v.Canonical)) {
+				t.Fatal("invalid canonical JSON")
+			}
+			seed, e := hex.DecodeString(v.TestOnlySeedHex)
+			if e != nil {
+				t.Fatal(e)
+			}
+			private := ed25519.NewKeyFromSeed(seed)
+			public, e := hex.DecodeString(v.TestOnlyPublicHex)
+			if e != nil || !bytes.Equal(private.Public().(ed25519.PublicKey), public) {
+				t.Fatal("synthetic key binding")
+			}
+			if v.Token != "" {
+				var body map[string]any
+				d := json.NewDecoder(bytes.NewReader(v.Input))
+				d.UseNumber()
+				if e = d.Decode(&body); e != nil {
+					t.Fatal(e)
+				}
+				token, e := wire.Sign(v.Typ, "test-only-scan-key", body, private)
+				if e != nil || token != v.Token {
+					t.Fatalf("Python/Go JWS bytes differ: %v", e)
+				}
+				valid := func(token string) bool {
+					parts := strings.Split(token, ".")
+					if len(parts) != 3 {
+						return false
+					}
+					header, e := base64.RawURLEncoding.DecodeString(parts[0])
+					if e != nil {
+						return false
+					}
+					var h struct{ Alg, Kid, Typ string }
+					if json.Unmarshal(header, &h) != nil || h.Alg != "EdDSA" || h.Kid != "test-only-scan-key" || h.Typ != v.Typ {
+						return false
+					}
+					signature, e := base64.RawURLEncoding.DecodeString(parts[2])
+					return e == nil && ed25519.Verify(public, []byte(parts[0]+"."+parts[1]), signature)
+				}
+				if !valid(v.Token) {
+					t.Fatal("valid shared JWS refused")
+				}
+				for _, n := range v.Negative {
+					if n.Token != "" && valid(n.Token) {
+						t.Fatalf("accepted %s", n.Name)
+					}
+				}
+			}
+		})
+	}
+}
 
 type vector struct {
 	Label             string          `json:"label"`

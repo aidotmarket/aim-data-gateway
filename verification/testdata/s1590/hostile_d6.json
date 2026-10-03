@@ -1,0 +1,10 @@
+{
+  "cases": [
+    {"name": "pasted_cell", "value": {"domain_class": "education_learning", "record_granularity": "entity", "temporal_scope": "current_snapshot", "update_cadence": "one_time", "intended_use_tags": ["secret@example.invalid"], "known_limitation_tags": []}},
+    {"name": "serialized_row", "value": {"domain_class": "{\"email\":\"secret@example.invalid\"}", "record_granularity": "entity", "temporal_scope": "current_snapshot", "update_cadence": "one_time", "intended_use_tags": [], "known_limitation_tags": []}},
+    {"name": "credential", "value": {"domain_class": "education_learning", "record_granularity": "entity", "temporal_scope": "current_snapshot", "update_cadence": "one_time", "intended_use_tags": [], "known_limitation_tags": ["password=hunter2"]}},
+    {"name": "unicode_obfuscation", "value": {"domain_class": "ｅｄｕｃａｔｉｏｎ＿ｌｅａｒｎｉｎｇ", "record_granularity": "entity", "temporal_scope": "current_snapshot", "update_cadence": "one_time", "intended_use_tags": [], "known_limitation_tags": []}},
+    {"name": "base64", "value": {"domain_class": "education_learning", "record_granularity": "entity", "temporal_scope": "current_snapshot", "update_cadence": "one_time", "intended_use_tags": ["c2VjcmV0QGV4YW1wbGUuaW52YWxpZA=="], "known_limitation_tags": []}},
+    {"name": "unknown_key", "value": {"domain_class": "education_learning", "record_granularity": "entity", "temporal_scope": "current_snapshot", "update_cadence": "one_time", "intended_use_tags": [], "known_limitation_tags": [], "free_text": "secret@example.invalid"}}
+  ]
+}

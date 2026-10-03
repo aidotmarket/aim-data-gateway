@@ -1,0 +1,33 @@
+{
+  "label": "TEST ONLY - S1791 Gate 2 chunk 1a shared fixture",
+  "test_only_seed_hex": "4242424242424242424242424242424242424242424242424242424242424242",
+  "test_only_public_hex": "2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12",
+  "source_hex": {},
+  "input": {
+    "valid": [
+      {
+        "raw": "{\"boundaries\":[-1000.0,-100.0,-10.0,0.0,10.0,100.0,1000.0]}",
+        "sha256": "c9e65ac5ab8f30410bc62849cad8b66136fa0f26fb83975c89db87dd8d226bc4"
+      },
+      {
+        "raw": "{\"large\":1e+16,\"small\":1e-07,\"zero\":-0.0,\"é\":\"<&>   😀\"}",
+        "sha256": "9fb7b88c0dced646c9b22c8844cfd22cd8a6f87534427b0404fabbddbbe14881"
+      }
+    ],
+    "invalid": [
+      "{\"a\":1,\"a\":1}",
+      "{\"a\":1e0}",
+      "{\"a\":-0}",
+      "{\"a\":1} ",
+      "{\"a\":NaN}",
+      "{\"unknown\":true}"
+    ],
+    "schema_verdicts": {
+      "unknown_key": "invalid",
+      "duplicate_key": "invalid"
+    }
+  },
+  "canonical": "{\"invalid\":[\"{\\\"a\\\":1,\\\"a\\\":1}\",\"{\\\"a\\\":1e0}\",\"{\\\"a\\\":-0}\",\"{\\\"a\\\":1} \",\"{\\\"a\\\":NaN}\",\"{\\\"unknown\\\":true}\"],\"schema_verdicts\":{\"duplicate_key\":\"invalid\",\"unknown_key\":\"invalid\"},\"valid\":[{\"raw\":\"{\\\"boundaries\\\":[-1000.0,-100.0,-10.0,0.0,10.0,100.0,1000.0]}\",\"sha256\":\"c9e65ac5ab8f30410bc62849cad8b66136fa0f26fb83975c89db87dd8d226bc4\"},{\"raw\":\"{\\\"large\\\":1e+16,\\\"small\\\":1e-07,\\\"zero\\\":-0.0,\\\"é\\\":\\\"<&>   😀\\\"}\",\"sha256\":\"9fb7b88c0dced646c9b22c8844cfd22cd8a6f87534427b0404fabbddbbe14881\"}]}",
+  "canonical_sha256": "2bdba91b60bc29f4112ce022dc9ac530e1e81dabb44a0126dd3e345bc35b9b90",
+  "expected_verdict": "valid"
+}

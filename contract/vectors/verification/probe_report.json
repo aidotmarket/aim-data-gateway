@@ -1,0 +1,37 @@
+{
+  "label": "TEST ONLY - S1791 Gate 2 chunk 1a shared fixture",
+  "test_only_seed_hex": "4242424242424242424242424242424242424242424242424242424242424242",
+  "test_only_public_hex": "2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12",
+  "source_hex": {},
+  "input": {
+    "probe_id": "88888888-8888-4888-8888-888888888888",
+    "spec_id": "spec_0000000000000001",
+    "spec_hash": "cd5b9ea67d279337a008b4382d89e8e9ca3278e1e20221b0479e600ae73cf9a7",
+    "nonce_echo": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE",
+    "install_key_id": "77777777-7777-4777-8777-777777777777",
+    "probe": {
+      "listing_id": "33333333-3333-4333-8333-333333333333",
+      "source_handle_id": "55555555-5555-4555-8555-555555555555",
+      "connector_type": "aim_gateway",
+      "connector_version": "aim_gateway-v1",
+      "owner_consent": true,
+      "source_reachable": true,
+      "objects_discovered": 3,
+      "size_class": "small",
+      "supported_capabilities": [
+        "complete_traversal",
+        "deterministic_object_order",
+        "fixed_bucket_aggregates",
+        "exact_or_declared_estimated_row_counts"
+      ],
+      "estimated_max_input_tokens": 1024,
+      "preview_requested": true
+    },
+    "affected_file_ids": [],
+    "signature_algorithm": "Ed25519",
+    "receipt_signature": "v2iVE2U9Nm5TJtS4f2PRTfpX9Df2Rp9Kcve9TV6squPQ+g1BiGqsRQLElKpfdZiqxr5+F2ugabaJzHDIj7MNBA=="
+  },
+  "canonical": "{\"affected_file_ids\":[],\"install_key_id\":\"77777777-7777-4777-8777-777777777777\",\"nonce_echo\":\"AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE\",\"probe\":{\"connector_type\":\"aim_gateway\",\"connector_version\":\"aim_gateway-v1\",\"estimated_max_input_tokens\":1024,\"listing_id\":\"33333333-3333-4333-8333-333333333333\",\"objects_discovered\":3,\"owner_consent\":true,\"preview_requested\":true,\"size_class\":\"small\",\"source_handle_id\":\"55555555-5555-4555-8555-555555555555\",\"source_reachable\":true,\"supported_capabilities\":[\"complete_traversal\",\"deterministic_object_order\",\"fixed_bucket_aggregates\",\"exact_or_declared_estimated_row_counts\"]},\"probe_id\":\"88888888-8888-4888-8888-888888888888\",\"receipt_signature\":\"v2iVE2U9Nm5TJtS4f2PRTfpX9Df2Rp9Kcve9TV6squPQ+g1BiGqsRQLElKpfdZiqxr5+F2ugabaJzHDIj7MNBA==\",\"signature_algorithm\":\"Ed25519\",\"spec_hash\":\"cd5b9ea67d279337a008b4382d89e8e9ca3278e1e20221b0479e600ae73cf9a7\",\"spec_id\":\"spec_0000000000000001\"}",
+  "canonical_sha256": "dee1bb17856c46d6621580b82b0ba390d974234935e67e8be670442fffea5cdd",
+  "expected_verdict": "valid"
+}

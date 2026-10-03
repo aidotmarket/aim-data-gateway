@@ -1,0 +1,67 @@
+{
+  "root_path": "/s1717/root",
+  "commitment_key_hex": "6363636363636363636363636363636363636363636363636363636363636363",
+  "members": [
+    {
+      "index": 0,
+      "relative_path": "z.csv",
+      "size_bytes": 9,
+      "sha256": "08960951a574fb605cd0cbfdda1ed52d0ee249db697e725d85c5f724140e6dba",
+      "detected_type": "csv",
+      "role": "data",
+      "is_sample": false
+    },
+    {
+      "index": 1,
+      "relative_path": "a.csv",
+      "size_bytes": 9,
+      "sha256": "fca167ff988310648c44ec9e78d2f159e9f188a6d053851be7a07eb76ffb9cde",
+      "detected_type": "csv",
+      "role": "data",
+      "is_sample": false
+    },
+    {
+      "index": 2,
+      "relative_path": "container.csv",
+      "size_bytes": 139,
+      "sha256": "b4aa4cda185140e54d4324eff2f86ffe5fa9cb6e05e7fb8f716fb80715258dc0",
+      "detected_type": "csv",
+      "role": "data",
+      "is_sample": false
+    },
+    {
+      "index": 3,
+      "relative_path": "notes.txt",
+      "size_bytes": 21,
+      "sha256": "8d38bb5d3fa9d4759e7837b2aedb8eb67077ae4ebb655e39cedc790c284a5aef",
+      "detected_type": "txt",
+      "role": "documentation",
+      "is_sample": false
+    },
+    {
+      "index": 4,
+      "relative_path": "other.txt",
+      "size_bytes": 13,
+      "sha256": "035e4343e09dac93a9525112d271619a623ec4a262231ccccdc6ed3467ffe621",
+      "detected_type": "txt",
+      "role": "other",
+      "is_sample": false
+    }
+  ],
+  "payloads_hex": {
+    "z.csv": "69640a310a320a330a",
+    "a.csv": "69640a340a350a360a",
+    "container.csv": "504b03041400000000000000215c076382050500000005000000120000006e657665722d657870616e6465642e63737669640a390a504b010214031400000000000000215c0763820505000000050000001200000000000000000000008001000000006e657665722d657870616e6465642e637376504b0506000000000100010040000000350000000000",
+    "notes.txt": "5052495641544520444f43554d454e544154494f4e",
+    "other.txt": "50524956415445204f54484552"
+  },
+  "manifest_hash": "e802ee7161763aaac677a3bfc1b775f59c83361ef464bcde531300f9aa1f3620",
+  "locator_preimage_hex": "6c6f63616c5f6469726563746f7279002f73313731372f726f6f740065383032656537313631373633616161633637376133626663316237373566353963383333363165663436346263646535333133303066396161316633363230",
+  "artifact_locator_commitment": "04a26f26a69f0e9c74a2233fc8fcfd12a0dab43fa5468343553dd53b931fb419",
+  "content_sha256": "4278bee4dbd9b6b939b01bcbcd1c75c0ee38f6eec31d6b5b9e5dbb184b2f6972",
+  "object_ids": {
+    "z.csv": "67f17021f233d00f16df26742a42db086297b419ff953857c1eb37bb3ada58ab",
+    "a.csv": "23ed159fa2bcd059412a9f6d28deb687dbd4d4a1334b614f5dbeb9dd98706b5b",
+    "container.csv": "c360911ed0bc185bcf38ee9d289ef6a522524ca5a706b8acce2923061f9ec541"
+  }
+}

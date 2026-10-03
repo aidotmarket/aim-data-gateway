@@ -1,0 +1,25 @@
+{
+  "aim_data_fold_base": "29f1575de9439bef00333bbdc712ed580dd2f9c9",
+  "backend_contract_commit": "3286e0726",
+  "canonicalization_version": "python-json-sort-compact-v1",
+  "fixture_digest_algorithm": "sha256",
+  "fixture_digests": {
+    "hostile_d6.json": "b6aa1a62fc49284b7cf5235cafcaaaeb33260dbec00265d28a14e2a83e431b6e",
+    "hostile_reports.json": "391b3a6723147ddcb10f102ac4d7435e6d5bba7527091de196a187d43455777b",
+    "report.json": "26b8421a08769a8c8cf79077f050d5d4ba0001bdc3005ef732437f8157a3b252",
+    "scan_spec.json": "2c4b12888349812d30993e3587352debd873da736030317147f31439e7e2b1b4"
+  },
+  "backend_fixture_public_key_pem_base64": "LS0tLS1CRUdJTiBQVUJMSUMgS0VZLS0tLS0KTUlJQklqQU5CZ2txaGtpRzl3MEJBUUVGQUFPQ0FROEFNSUlCQ2dLQ0FRRUFzQ2NJc1JNa2lMekw5NThvbmJPaApWeXpJR2poSDNQR05ybVNlTVRQRnlicUxSREQzazY4MjR5ajJBcWliUll2RHFWWTV2NnZrZGRxRS95NU5lcXB4ClFuVGRsNEc4UXVqaEQ2MWpLSXI2K2FJNXFGUFo2dTYrODBVTTY5QWhXQzloUm5Well3WE4yai9seUpGMnRnNXQKK1lyTUc0WExpZWF1Tk50REpCSHRzcWVuTjNEbE8yNFZyaWU0YUcyQ2FWQzMxdUJJTWo4eFo2Qm92UlNmVzFBSQprb0cvV1JBb0hycXdOVFZqK0FpSytGOFMxcmZHdmJVNUlNMlBSVGYwaFFFREFyRkRVd293ZkJlNFRVczV2SXhuCm5JUnJGYXNYZWFaSEw3bVlBa2hTejBScm9UVHZzYjQrZkpRMjY3RDRma292NGFvZVlYNktkSnZ0RkN5TnRaa2kKcHdJREFRQUIKLS0tLS1FTkQgUFVCTElDIEtFWS0tLS0tCg==",
+  "backend_fixture_receipt_integrity_sha256": "61e0a74b581e1139641abdbc8b1ee3a7baf58cbea8295663eee056bbdb781d05",
+  "canonicalization_vectors": [
+    {"name": "floats", "input_json": "{\"value\":1.25}", "expected_utf8": "{\"value\":1.25}"},
+    {"name": "integer_valued_floats", "input_json": "{\"value\":1.0}", "expected_utf8": "{\"value\":1.0}"},
+    {"name": "exponent_notation", "input_json": "{\"small\":1e-7,\"large\":1e20}", "expected_utf8": "{\"large\":1e+20,\"small\":1e-07}"},
+    {"name": "negative_zero", "input_json": "{\"value\":-0.0}", "expected_utf8": "{\"value\":-0.0}"},
+    {"name": "large_integers", "input_json": "{\"value\":9007199254740993}", "expected_utf8": "{\"value\":9007199254740993}"},
+    {"name": "non_bmp_keys", "input_json": "{\"😀\":\"grin\",\"�\":\"replacement\"}", "expected_utf8": "{\"�\":\"replacement\",\"😀\":\"grin\"}"},
+    {"name": "unicode_key_ordering", "input_json": "{\"Ω\":4,\"é\":3,\"a\":2,\"A\":1}", "expected_utf8": "{\"A\":1,\"a\":2,\"é\":3,\"Ω\":4}"}
+  ],
+  "contract_acceptance": "shared_fixtures_byte_identical",
+  "status": "folded_byte_identical_to_backend_3286e0726"
+}
