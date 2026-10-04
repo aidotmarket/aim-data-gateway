@@ -130,14 +130,12 @@ func prepare(ctx context.Context, s Source, p Policy, b *budget) ([]pinned, erro
 	}
 	out := make([]pinned, 0, len(members))
 	for i, m := range members {
-		order := m.Identity
 		if m.OrderingKey != nil {
-			order = string(m.OrderingKey)
 			if e := b.reserve(int64(len(m.Identity) + len(m.OrderingKey))); e != nil {
 				return nil, e
 			}
 		}
-		if m.Identity == "" || m.Size < 0 || m.OrderingKey == nil && !fileIDASCII(m.Identity) || m.OrderingKey != nil && (p.Commitments == nil || order != m.Identity) || i > 0 && members[i-1].Identity >= order {
+		if m.Identity == "" || m.Size < 0 || m.OrderingKey == nil && !fileIDASCII(m.Identity) || m.OrderingKey != nil && (p.Commitments == nil || string(m.OrderingKey) != m.Identity) || i > 0 && members[i-1].Identity >= m.Identity {
 			return nil, ErrArtifactChanged
 		}
 		n := m.Size / blockSize
