@@ -1,0 +1,9 @@
+**
+!go.mod
+!go.sum
+!verification/
+!verification/*.go
+!spikes/
+!spikes/go.mod
+!spikes/go.sum
+!spikes/**/*.go

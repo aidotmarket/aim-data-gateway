@@ -1,0 +1,1 @@
+{"mode":"scan","bucket":"REPLACE_WITH_SPIKE_BUCKET","objects":[{"key":"spike/synthetic.csv","etag":"REPLACE_WITH_QUOTED_ETAG","format":"csv"}]}

@@ -1,0 +1,13 @@
+{
+  "name": "s1791-r2-wasm-spike",
+  "main": "worker.mjs",
+  "compatibility_date": "2026-10-04",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": false,
+  "observability": {"enabled": true},
+  "r2_buckets": [{"binding":"DATA", "bucket_name":"replace-with-spike-bucket"}],
+  "triggers": {"crons":["* * * * *"]},
+  "durable_objects": {"bindings":[{"name":"LEDGER","class_name":"Ledger"}]},
+  "migrations": [{"tag":"v1","new_sqlite_classes":["Ledger"]}],
+  "vars": {"LISTING_ID":"synthetic-listing", "LISTING_VERSION_ID":"synthetic-v1", "SPIKE_SPEC_PUBLIC_KEY_B64":""}
+}

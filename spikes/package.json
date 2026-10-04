@@ -1,0 +1,16 @@
+{
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "typecheck": "rtk proxy tsc --noEmit"
+  },
+  "dependencies": {
+    "@cloudflare/containers": "0.3.7"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "5.20261004.1",
+    "miniflare": "5.20261001.0-alpha",
+    "typescript": "7.0.2",
+    "wrangler": "4.147.0"
+  }
+}
