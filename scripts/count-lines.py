@@ -3,9 +3,9 @@
 from pathlib import Path
 import sys
 
-CAPS = {"gateway": 9250, "AWS": 3500}
+CAPS = {"gateway": 9275, "AWS": 3500}  # gateway: Chunk 2 Amendment B (measured 9,273)
 
-def over_budget(lines, cap=9250):
+def over_budget(lines, cap=9275):
     return lines > cap
 
 def category(path):
