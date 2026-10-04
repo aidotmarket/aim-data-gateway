@@ -9,13 +9,16 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/aidotmarket/aim-data-gateway/internal/inventory"
 
+	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/arrow-go/v18/parquet"
+	"github.com/apache/arrow-go/v18/parquet/compress"
 	"github.com/apache/arrow-go/v18/parquet/file"
 	"github.com/apache/arrow-go/v18/parquet/schema"
 )
@@ -112,6 +115,196 @@ func TestLargeParquetMemory(t *testing.T) {
 	}
 }
 
+// Track actual Arrow buffer ownership independently of the scanner's budget.
+type parquetAllocationProbe struct {
+	memory.Allocator
+	live, peak int
+}
+
+func (a *parquetAllocationProbe) Allocate(n int) []byte {
+	a.live += n
+	a.peak = max(a.peak, a.live)
+	return a.Allocator.Allocate(n)
+}
+func (a *parquetAllocationProbe) Reallocate(n int, old []byte) []byte {
+	a.live += n - len(old)
+	a.peak = max(a.peak, a.live)
+	return a.Allocator.Reallocate(n, old)
+}
+func (a *parquetAllocationProbe) Free(v []byte) {
+	a.live -= len(v)
+	a.Allocator.Free(v)
+}
+
+func rowGroupFixture(t *testing.T, groups int, dictionary bool) []byte {
+	t.Helper()
+	fields := schema.FieldList{}
+	for _, spec := range []struct {
+		name     string
+		physical parquet.Type
+		logical  schema.LogicalType
+	}{
+		{"i", parquet.Types.Int64, schema.NoLogicalType{}},
+		{"f", parquet.Types.Double, schema.NoLogicalType{}},
+		{"s", parquet.Types.ByteArray, schema.StringLogicalType{}},
+		{"d", parquet.Types.Int32, schema.DateLogicalType{}},
+		{"b", parquet.Types.Boolean, schema.NoLogicalType{}},
+	} {
+		node, e := schema.NewPrimitiveNodeLogical(spec.name, parquet.Repetitions.Optional, spec.logical, spec.physical, -1, -1)
+		if e != nil {
+			t.Fatal(e)
+		}
+		fields = append(fields, node)
+	}
+	root, e := schema.NewGroupNode("schema", parquet.Repetitions.Required, fields, -1)
+	if e != nil {
+		t.Fatal(e)
+	}
+	var buf bytes.Buffer
+	w := file.NewParquetWriter(&buf, root, file.WithWriterProps(parquet.NewWriterProperties(
+		parquet.WithDictionaryDefault(dictionary), parquet.WithCompression(compress.Codecs.Snappy), parquet.WithDataPageSize(64<<10))))
+	for g := 0; g < groups; g++ {
+		n := 12800 / groups
+		defs := make([]int16, n)
+		var ints []int64
+		var floats []float64
+		var texts []parquet.ByteArray
+		var dates []int32
+		var bools []bool
+		for j := range defs {
+			k := g*n + j
+			if k%17 == 0 {
+				continue
+			}
+			defs[j] = 1
+			ints = append(ints, int64(k%32))
+			floats = append(floats, float64(k%32)/2)
+			texts = append(texts, parquet.ByteArray(strings.Repeat("x", k%32)))
+			dates = append(dates, int32(k%32))
+			bools = append(bools, k%2 == 0)
+		}
+		rg := w.AppendRowGroup()
+		for i := range fields {
+			c, e := rg.NextColumn()
+			if e != nil {
+				t.Fatal(e)
+			}
+			switch i {
+			case 0:
+				_, e = c.(*file.Int64ColumnChunkWriter).WriteBatch(ints, defs, nil)
+			case 1:
+				_, e = c.(*file.Float64ColumnChunkWriter).WriteBatch(floats, defs, nil)
+			case 2:
+				_, e = c.(*file.ByteArrayColumnChunkWriter).WriteBatch(texts, defs, nil)
+			case 3:
+				_, e = c.(*file.Int32ColumnChunkWriter).WriteBatch(dates, defs, nil)
+			case 4:
+				_, e = c.(*file.BooleanColumnChunkWriter).WriteBatch(bools, defs, nil)
+			}
+			if e != nil {
+				t.Fatal(e)
+			}
+			if e = c.Close(); e != nil {
+				t.Fatal(e)
+			}
+		}
+		if e = rg.Close(); e != nil {
+			t.Fatal(e)
+		}
+	}
+	if e = w.Close(); e != nil {
+		t.Fatal(e)
+	}
+	return buf.Bytes()
+}
+
+func TestParquetRowGroupBudget(t *testing.T) {
+	for _, dictionary := range []bool{false, true} {
+		t.Run(strconv.FormatBool(dictionary), func(t *testing.T) {
+			var want []byte
+			for _, groups := range []int{4, 400} {
+				data := rowGroupFixture(t, groups, dictionary)
+				if _, e := Scan(context.Background(), sourceFor(data, "parquet"), testPolicy()); e != nil {
+					t.Fatal(e)
+				}
+				p, e := testPolicy().checked()
+				if e != nil {
+					t.Fatal(e)
+				}
+				b := &budget{limit: p.MaxMemoryBytes}
+				s := sourceFor(data, "parquet")
+				x, e := prepare(context.Background(), s, p, b)
+				if e != nil {
+					t.Fatal(e)
+				}
+				baseline := b.used
+				o, e := parquetObject(context.Background(), s, &x[0], p, b)
+				if e != nil {
+					t.Fatal(e)
+				}
+				facts, e := canonical(o)
+				if e != nil {
+					t.Fatal(e)
+				}
+				if o.Rows != 12800 {
+					t.Fatal(o.Rows)
+				}
+				// Object facts are grouping-independent. Scan's outer commitments
+				// include the file hash, which necessarily differs between encodings.
+				if want == nil {
+					want = facts
+				} else if !bytes.Equal(want, facts) {
+					t.Fatalf("grouping changed facts: %s != %s", want, facts)
+				}
+				probe := &parquetAllocationProbe{Allocator: memory.NewGoAllocator()}
+				allocatorBudget := &budget{limit: 128 << 20}
+				r, e := file.NewParquetReader(bytes.NewReader(data), file.WithReadProps(parquet.NewReaderProperties(boundedAllocator{allocatorBudget, probe})))
+				if e != nil {
+					t.Fatal(e)
+				}
+				defer r.Close()
+				for g := 0; g < r.NumRowGroups(); g++ {
+					group := r.RowGroup(g)
+					for i := 0; i < group.NumColumns(); i++ {
+						c, e := group.Column(i)
+						if e != nil {
+							t.Fatal(e)
+						}
+						kind, e := parquetKind(c.Descriptor())
+						if e != nil {
+							t.Fatal(e)
+						}
+						if e = parquetColumn(context.Background(), c, group.NumRows(), newAggregate(kind, i, p), p, &budget{limit: 128 << 20}, nil); e != nil {
+							t.Fatal(e)
+						}
+						if probe.live != 0 || allocatorBudget.used != 0 {
+							t.Fatalf("group %d column %d: Arrow live=%d budget=%d peak=%d", g, i, probe.live, allocatorBudget.used, probe.peak)
+						}
+					}
+				}
+				// The early-return path must close the just-opened page reader too.
+				c, e := r.RowGroup(0).Column(0)
+				if e != nil {
+					t.Fatal(e)
+				}
+				ctx, cancel := context.WithCancel(context.Background())
+				cancel()
+				if e = parquetColumn(ctx, c, r.RowGroup(0).NumRows(), newAggregate("integer", 0, p), p, &budget{limit: 128 << 20}, nil); e != ErrTimeout {
+					t.Fatal(e)
+				}
+				if probe.live != 0 || allocatorBudget.used != 0 {
+					t.Fatalf("cancelled column: Arrow live=%d budget=%d", probe.live, allocatorBudget.used)
+				}
+				t.Logf("%d groups: allocator peak=%d, live=%d, scan retained=%d", groups, probe.peak, probe.live, b.used-baseline)
+				// Aggregate/scalar reservations remain; decoder workspace must not.
+				if delta := b.used - baseline; delta < 0 || delta > 64<<10 {
+					t.Fatalf("%d groups: retained budget %d", groups, delta)
+				}
+			}
+		})
+	}
+}
+
 type changingRandom struct {
 	*bytes.Reader
 	data  []byte
@@ -169,7 +362,7 @@ func TestParquetMutationAndAllocationBeforeLimit(t *testing.T) {
 	c.Close()
 	group.Close()
 	w.Close()
-	if _, e = Scan(context.Background(), sourceFor(buf.Bytes(), "parquet"), testPolicy()); e == nil {
-		t.Fatal("over-limit decoded page accepted")
+	if _, e = Scan(context.Background(), sourceFor(buf.Bytes(), "parquet"), testPolicy()); e != ErrBudget {
+		t.Fatal("over-limit decoded page must refuse with ErrBudget", e)
 	}
 }

@@ -106,9 +106,7 @@ func parquetObject(ctx context.Context, s Source, x *pinned, p Policy, b *budget
 	if string(tail[4:]) != "PAR1" || footer > 1<<20 || footer > r.Size()-12 {
 		return o, ErrBudget
 	}
-	// Reserve non-allocator decoder structures and codec workspaces before opening
-	// pages. The existing Arrow reader rejects page headers above these caps before
-	// allocating/decompressing. No full row group buffering or pqarrow import.
+	// Reserve codec workspace; Arrow caps page sizes before allocation/decompression.
 	pageLimit := min(int64(4<<20), (b.limit-b.used)/10)
 	if pageLimit < 64<<10 {
 		return o, ErrBudget
@@ -116,6 +114,7 @@ func parquetObject(ctx context.Context, s Source, x *pinned, p Policy, b *budget
 	if e = b.reserve(pageLimit * 6); e != nil {
 		return o, e
 	}
+	defer func() { b.used -= pageLimit * 6 }()
 	props := parquet.NewReaderProperties(boundedAllocator{b, memory.NewGoAllocator()})
 	props.BufferedStreamEnabled = true
 	props.PageStreamingEnabled = true
@@ -205,6 +204,9 @@ func parquetObject(ctx context.Context, s Source, x *pinned, p Policy, b *budget
 	return finish(names, acc, rows), nil
 }
 func safeParquetError(e error) error {
+	if strings.HasPrefix(e.Error(), "parquet: ") && strings.Contains(e.Error(), "page size") && strings.Contains(e.Error(), "exceeds configured limit") {
+		return ErrBudget
+	}
 	if errors.Is(e, ErrArtifactChanged) {
 		return ErrArtifactChanged
 	}
@@ -353,6 +355,7 @@ func parquetScalar(value any, c *schema.Column, kind string, zone *time.Location
 	return raw, length, num, e
 }
 func parquetColumn(ctx context.Context, c file.ColumnChunkReader, rows int64, a *aggregate, p Policy, b *budget, zone *time.Location) error {
+	defer c.Close()
 	defs := make([]int16, 1024)
 	reps := make([]int16, 1024)
 	remaining := rows
@@ -410,6 +413,9 @@ func parquetColumn(ctx context.Context, c file.ColumnChunkReader, rows int64, a 
 			}
 		default:
 			return ErrUnsupported
+		}
+		if e == nil {
+			e = c.Err()
 		}
 		if e != nil {
 			return safeParquetError(e)
