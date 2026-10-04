@@ -92,6 +92,11 @@ func parquetObject(ctx context.Context, s Source, x *pinned, p Policy, b *budget
 		return o, ErrArtifactChanged
 	}
 	defer r.Close()
+	if buffered, ok := r.(interface{ BufferedBytes() int64 }); ok {
+		if e = b.reserve(buffered.BufferedBytes()); e != nil {
+			return o, e
+		}
+	}
 	stop := context.AfterFunc(ctx, func() { r.Close() })
 	defer stop()
 	if r.Size() != x.member.Size || r.Size() < 12 {

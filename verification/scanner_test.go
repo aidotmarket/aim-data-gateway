@@ -420,7 +420,7 @@ func TestLargeTextMemoryAndDownloadConcurrency(t *testing.T) {
 			}
 			f.Close()
 			st, _ := os.Stat(path)
-			m := Member{strings.Repeat("1", 32), st.Size(), [32]byte(h.Sum(nil)), format}
+			m := Member{Identity: strings.Repeat("1", 32), Size: st.Size(), SHA256: [32]byte(h.Sum(nil)), Format: format}
 			// Existing eight delivery buffers remain live during the measurement.
 			downloads := make([][]byte, 8)
 			for i := range downloads {

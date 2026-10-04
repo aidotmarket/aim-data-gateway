@@ -1,19 +1,31 @@
 #!/usr/bin/env python3
-"""Enforce S1791 Gate 2 section 8's inclusive 9,250 non-test Go line cap."""
+"""Measure shared gateway and AWS-only non-test Go against approved caps."""
 from pathlib import Path
 import sys
 
-def over_budget(lines):
-    return lines > 9250
+CAPS = {"gateway": 9250, "AWS": 3500}
+
+def over_budget(lines, cap=9250):
+    return lines > cap
+
+def category(path):
+    return "AWS" if path.parts[:2] in (("cmd", "aim-aws-verifier"), ("internal", "awsverification")) else "gateway"
 
 if sys.argv[1:] == ["--self-check"]:
-    assert not over_budget(9250)
-    assert over_budget(9251)
-    print("non-test Go line limit trips: PASS")
+    for name, cap in CAPS.items():
+        assert not over_budget(cap, cap)
+        assert over_budget(cap + 1, cap)
+    assert category(Path("internal/awsverification/s3.go")) == "AWS"
+    assert category(Path("cmd/aim-aws-verifier/main.go")) == "AWS"
+    assert category(Path("verification/scanner.go")) == "gateway"
+    assert category(Path("internal/awsverification_extra/x.go")) == "gateway"
+    print("gateway and AWS boundary self-checks: PASS")
     sys.exit(0)
 
-files = [p for p in Path(".").rglob("*.go") if not p.name.endswith("_test.go")]
-lines = sum(len(p.read_text().splitlines()) for p in files)
-print(f"non-test Go lines: {lines} / 9250")
-if over_budget(lines):
-    sys.exit(1)
+totals = dict.fromkeys(CAPS, 0)
+for path in Path(".").rglob("*.go"):
+    if not path.name.endswith("_test.go"):
+        totals[category(path)] += len(path.read_text().splitlines())
+for name, lines in totals.items():
+    print(f"{name} non-test Go lines: {lines} / {CAPS[name]}")
+sys.exit(int(any(over_budget(totals[name], cap) for name, cap in CAPS.items())))

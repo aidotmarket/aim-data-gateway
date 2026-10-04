@@ -18,13 +18,14 @@ import (
 
 const blockSize = 64 << 10
 
-type budget struct{ used, limit int64 }
+type budget struct{ used, limit, peak int64 }
 
 func (b *budget) reserve(n int64) error {
 	if n < 0 || n > b.limit-b.used {
 		return ErrBudget
 	}
 	b.used += n
+	b.peak = max(b.peak, b.used)
 	return nil
 }
 func (p Policy) checked() (Policy, error) {
@@ -129,7 +130,14 @@ func prepare(ctx context.Context, s Source, p Policy, b *budget) ([]pinned, erro
 	}
 	out := make([]pinned, 0, len(members))
 	for i, m := range members {
-		if !fileIDASCII(m.Identity) || m.Size < 0 || i > 0 && members[i-1].Identity >= m.Identity {
+		order := m.Identity
+		if m.OrderingKey != nil {
+			order = string(m.OrderingKey)
+			if e := b.reserve(int64(len(m.Identity) + len(m.OrderingKey))); e != nil {
+				return nil, e
+			}
+		}
+		if m.Identity == "" || m.Size < 0 || m.OrderingKey == nil && !fileIDASCII(m.Identity) || m.OrderingKey != nil && (p.Commitments == nil || order != m.Identity) || i > 0 && members[i-1].Identity >= order {
 			return nil, ErrArtifactChanged
 		}
 		n := m.Size / blockSize
@@ -175,9 +183,11 @@ func prepare(ctx context.Context, s Source, p Policy, b *budget) ([]pinned, erro
 		if e != nil {
 			return nil, e
 		}
-		if size != m.Size || !hmac.Equal(h.Sum(nil), m.SHA256[:]) {
+		if size != m.Size || (m.OrderingKey == nil || m.DigestPresent) && !hmac.Equal(h.Sum(nil), m.SHA256[:]) {
 			return nil, ErrArtifactChanged
 		}
+		copy(x.member.SHA256[:], h.Sum(nil))
+		x.member.DigestPresent = true
 		if parserError != nil {
 			return nil, parserError
 		}
@@ -296,6 +306,11 @@ func Scan(ctx context.Context, s Source, p Policy) (Facts, error) {
 	ctx, cancel := context.WithTimeout(ctx, p.Deadline)
 	defer cancel()
 	b := &budget{limit: p.MaxMemoryBytes}
+	defer func() {
+		if p.MemoryPeak != nil {
+			*p.MemoryPeak = b.peak
+		}
+	}()
 	if e = b.reserve(int64(p.MaxRecordBytes)*4 + int64(p.MaxFactBytes)*4 + 4<<20); e != nil {
 		return Facts{}, e
 	}
