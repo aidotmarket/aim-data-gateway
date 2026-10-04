@@ -6,6 +6,7 @@ require (
 	github.com/BurntSushi/toml v1.5.0
 	github.com/apache/arrow-go/v18 v18.8.0
 	github.com/coder/websocket v1.8.14
+	golang.org/x/text v0.41.0
 	modernc.org/sqlite v1.57.0
 )
 

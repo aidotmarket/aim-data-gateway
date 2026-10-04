@@ -72,7 +72,7 @@ func TestLargeParquetMemory(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	m := Member{strings.Repeat("1", 32), size, [32]byte(h.Sum(nil)), "parquet"}
+	m := Member{Identity: strings.Repeat("1", 32), Size: size, SHA256: [32]byte(h.Sum(nil)), Format: "parquet"}
 	downloads := make([][]byte, 8)
 	for i := range downloads {
 		downloads[i] = make([]byte, inventory.BlockSize)

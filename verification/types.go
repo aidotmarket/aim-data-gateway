@@ -11,10 +11,12 @@ import (
 )
 
 type Member struct {
-	Identity string
-	Size     int64
-	SHA256   [32]byte
-	Format   string // csv, tsv, jsonl, parquet; other formats are disclosed skips.
+	Identity      string
+	Size          int64
+	SHA256        [32]byte
+	DigestPresent bool   // Gateway digests remain required by default.
+	OrderingKey   []byte // Cloud identity bytes; nil selects the gateway contract.
+	Format        string // csv, tsv, jsonl, parquet; other formats are disclosed skips.
 }
 type RandomAccess interface {
 	io.ReaderAt
@@ -39,6 +41,7 @@ type Policy struct {
 	MaxMemoryBytes                                                              int64
 	MaxRecordBytes, MaxScalarBytes, MaxColumns, MaxFactBytes                    int
 	Deadline                                                                    time.Duration
+	MemoryPeak                                                                  *int64 // Optional observation of scanner reservations, including adapter buffers.
 	// The adapter constructs typed preimages; gateway inputs must be ASCII UUID/hex.
 	GatewayID, SnapshotHash string
 	CommitmentKey           [32]byte
