@@ -77,7 +77,12 @@ func NewSource(client S3, bucket string, objects []Object) (*Source, error) {
 	if client == nil || bucket == "" || len(objects) == 0 {
 		return nil, verification.ErrArtifactChanged
 	}
-	s := &Source{client: client, bucket: bucket, objects: map[string]Object{}, readAhead: AWS_VERIFY_PARQUET_READ_AHEAD_BYTES}
+	s := &Source{
+		client:    client,
+		bucket:    bucket,
+		objects:   map[string]Object{},
+		readAhead: AWS_VERIFY_PARQUET_READ_AHEAD_BYTES,
+	}
 	for _, o := range objects {
 		if o.VersionID == "null" {
 			o.VersionID = ""
@@ -97,7 +102,14 @@ func NewSource(client S3, bucket string, objects []Object) (*Source, error) {
 			return nil, verification.ErrArtifactChanged
 		}
 		s.objects[id] = o
-		s.members = append(s.members, verification.Member{Identity: id, OrderingKey: []byte(id), Size: o.Size, Format: o.Format, SHA256: o.SHA256, DigestPresent: o.DigestPresent})
+		s.members = append(s.members, verification.Member{
+			Identity:      id,
+			OrderingKey:   []byte(id),
+			Size:          o.Size,
+			Format:        o.Format,
+			SHA256:        o.SHA256,
+			DigestPresent: o.DigestPresent,
+		})
 	}
 	return s, nil
 }
@@ -113,7 +125,12 @@ func (s *Source) request(ctx context.Context, id string) (Request, Object, error
 	if !ok {
 		return Request{}, o, verification.ErrArtifactChanged
 	}
-	r := Request{Bucket: s.bucket, Key: o.Key, VersionID: o.VersionID, End: -1}
+	r := Request{
+		Bucket:    s.bucket,
+		Key:       o.Key,
+		VersionID: o.VersionID,
+		End:       -1,
+	}
 	if r.VersionID == "" {
 		r.IfMatch = "\"" + o.ETag + "\""
 	}
@@ -135,7 +152,13 @@ func (s *Source) OpenAt(ctx context.Context, id string) (verification.RandomAcce
 	if err != nil {
 		return nil, err
 	}
-	return &reader{ctx: ctx, client: s.client, request: r, size: o.Size, capacity: min(s.readAhead, o.Size)}, nil
+	return &reader{
+		ctx:      ctx,
+		client:   s.client,
+		request:  r,
+		size:     o.Size,
+		capacity: min(s.readAhead, o.Size),
+	}, nil
 }
 
 type reader struct {
@@ -148,8 +171,12 @@ type reader struct {
 	closed                bool
 }
 
-func (r *reader) Size() int64          { return r.size }
-func (r *reader) BufferedBytes() int64 { return r.capacity }
+func (r *reader) Size() int64 {
+	return r.size
+}
+func (r *reader) BufferedBytes() int64 {
+	return r.capacity
+}
 func (r *reader) Close() error {
 	r.mu.Lock()
 	defer r.mu.Unlock()

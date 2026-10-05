@@ -106,7 +106,13 @@ func TestSharedS3Vectors(t *testing.T) {
 					t.Fatal(e)
 				}
 				f.objects[m.Key] = data
-				objects = append(objects, Object{Key: m.Key, VersionID: m.Version, ETag: m.ETag, Format: m.Format, Size: m.Size})
+				objects = append(objects, Object{
+					Key:       m.Key,
+					VersionID: m.Version,
+					ETag:      m.ETag,
+					Format:    m.Format,
+					Size:      m.Size,
+				})
 				pin := m.Version
 				if pin == "" {
 					pin = m.ETag
@@ -198,7 +204,12 @@ func TestSharedS3Refusals(t *testing.T) {
 		t.Run(c.Name, func(t *testing.T) {
 			objects := []Object{}
 			for _, m := range c.Members {
-				objects = append(objects, Object{Key: m.Key, VersionID: m.Version, ETag: m.ETag, Format: "csv"})
+				objects = append(objects, Object{
+					Key:       m.Key,
+					VersionID: m.Version,
+					ETag:      m.ETag,
+					Format:    "csv",
+				})
 			}
 			f := &fakeS3{}
 			if _, e = NewSource(f, "fixture", objects); e != verification.ErrArtifactChanged || len(f.requests)+len(f.heads) != 0 {
