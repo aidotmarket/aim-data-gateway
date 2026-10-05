@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"errors"
 	"strings"
+
+	"github.com/aidotmarket/aim-data-gateway/internal/wire"
 )
 
 const (
@@ -80,6 +82,9 @@ func ParseConfig(get func(string) string) (Config, error) {
 		return c, ErrRefused
 	}
 	if get(EnvAPI) != APIBaseURL || !uuid.MatchString(c.Connection) || !identifier.MatchString(c.Version) || !strings.HasPrefix(c.Digest, "sha256:") || !hex64.MatchString(strings.TrimPrefix(c.Digest, "sha256:")) || c.Secret == "" || c.Table == "" || c.LogGroup == "" || len(c.Bucket) < 3 || strings.ContainsAny(c.Bucket, "/:*?\\\x00") {
+		return c, ErrRefused
+	}
+	if b, e := wire.DecodeDocument(c.Token, 32); e != nil || len(b) != 32 {
 		return c, ErrRefused
 	}
 	if !strings.Contains(" eu-north-1 eu-west-1 eu-central-1 us-east-1 us-west-2 ", " "+c.Region+" ") {

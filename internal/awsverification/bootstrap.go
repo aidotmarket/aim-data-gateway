@@ -71,12 +71,12 @@ func Bootstrap(ctx context.Context, c Config, l Ledger, store SecretStore, backe
 		return nil, ErrRefused
 	}
 	if s == nil {
+		if b, e := wire.DecodeDocument(c.Token, 32); e != nil || len(b) != 32 {
+			return nil, ErrRefused
+		}
 		// A crashed lease with no persisted secret is ambiguous. Never replace keys.
 		if e = l.put(ctx, "bootstrap", map[string]string{"state": "initializing"}, at, "attribute_not_exists(pk)"); e != nil {
 			return nil, e
-		}
-		if b, e := wire.DecodeDocument(c.Token, 32); e != nil || len(b) != 32 {
-			return nil, ErrRefused
 		}
 		_, priv, e := ed25519.GenerateKey(rand.Reader)
 		if e != nil {
@@ -185,7 +185,7 @@ func Rotate(ctx context.Context, store SecretStore, s *Secret, token string, at 
 		return nil
 	}
 	i, e := wire.VerifyScanRotation(token, s.keys(at))
-	if e != nil || i.Audience != s.Runner || i.IssuedAt > at.Unix()+300 || i.IssuedAt < at.Unix()-300 {
+	if e != nil || i.Audience != s.Runner {
 		return ErrRefused
 	}
 	if wire.ValidateKeySet(i.Keys) != nil {

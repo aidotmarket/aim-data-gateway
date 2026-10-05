@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/ed25519"
 	"encoding/base64"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -119,5 +120,53 @@ func TestSignedRotationOverlapAndWrongClassRefusal(t *testing.T) {
 	f.h.Config.Digest = "sha256:" + string(bytes.Repeat([]byte{'b'}, 64))
 	if _, e = Bootstrap(ctx, f.h.Config, f.h.Ledger, f.secrets, f.backend, f.at); e == nil {
 		t.Fatal("silently rebound code digest")
+	}
+}
+
+func TestFifteenMinuteOldRotationAppliedAndAcknowledged(t *testing.T) {
+	f := newFixture(t)
+	newPrivate := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0x43}, 32))
+	newKey := wire.Key{KID: "new-scan-key", Alg: "EdDSA", Key: base64.RawURLEncoding.EncodeToString(newPrivate.Public().(ed25519.PublicKey))}
+	var err error
+	f.backend.work, err = signJWS(platformPrivate, platformKey.KID, "aim-keys+jwt", map[string]any{
+		"op": "key_rotation", "aud": runnerID, "iid": "88888888-8888-4888-8888-888888888888",
+		"iat": f.at.Add(-15 * time.Minute).Unix(), "keys": []wire.Key{newKey},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, delay := range []time.Duration{0, 15 * time.Minute} {
+		f.at = f.at.Add(delay)
+		if err = f.h.Invoke(ctx); err != nil {
+			t.Fatal("old or byte-identical redelivered rotation refused", err)
+		}
+		if len(f.secrets.s.Pins) != 2 || f.secrets.s.Rotation != f.backend.work || !strings.HasPrefix(f.audit.events[len(f.audit.events)-1], "key_rotation ") {
+			t.Fatal("rotation not durably applied and acknowledged")
+		}
+		if len(f.backend.reports) != 0 || len(f.s3.requests) != 0 {
+			t.Fatal("rotation performed scan work")
+		}
+	}
+}
+
+func TestRotationSignedByExpiredOutgoingKeyRefused(t *testing.T) {
+	f := newFixture(t)
+	s, err := Bootstrap(ctx, f.h.Config, f.h.Ledger, f.secrets, f.backend, f.at)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Pins[0].Until = f.at.Add(7 * 24 * time.Hour).Unix()
+	newPrivate := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0x43}, 32))
+	newKey := wire.Key{KID: "new-scan-key", Alg: "EdDSA", Key: base64.RawURLEncoding.EncodeToString(newPrivate.Public().(ed25519.PublicKey))}
+	token, err := signJWS(platformPrivate, platformKey.KID, "aim-keys+jwt", map[string]any{
+		"op": "key_rotation", "aud": runnerID, "iid": "88888888-8888-4888-8888-888888888888",
+		"iat": f.at.Unix(), "keys": []wire.Key{newKey},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	saves := f.secrets.saves
+	if Rotate(ctx, f.secrets, s, token, f.at.Add(7*24*time.Hour+time.Second)) == nil || f.secrets.saves != saves || len(s.Pins) != 1 || s.Rotation != "" {
+		t.Fatal("expired outgoing signer accepted or rotation state changed")
 	}
 }
