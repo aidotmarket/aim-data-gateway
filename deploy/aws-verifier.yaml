@@ -1,0 +1,622 @@
+{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Description": "Seller-owned outbound AWS verifier. Preflight the scope with scripts/aws-verifier-scope.py before generating quick-create. JSON syntax is valid YAML.",
+  "Parameters": {
+    "ConnectionId": {
+      "Type": "String",
+      "AllowedPattern": "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+    },
+    "Bucket": {
+      "Type": "String",
+      "MinLength": 3,
+      "MaxLength": 63,
+      "AllowedPattern": "[a-z0-9][a-z0-9.-]*[a-z0-9]"
+    },
+    "BucketRegion": {
+      "Type": "String",
+      "AllowedValues": [
+        "eu-north-1",
+        "eu-west-1",
+        "eu-central-1",
+        "us-east-1",
+        "us-west-2"
+      ]
+    },
+    "ReadKeys": {
+      "Type": "CommaDelimitedList",
+      "Default": "",
+      "AllowedPattern": "[^,\\x00-\\x1f\\x7f*?\"\\\\]*",
+      "Description": "Exact keys; empty for no keys. Run aws-verifier-scope.py before setup."
+    },
+    "ReadPrefixes": {
+      "Type": "CommaDelimitedList",
+      "Default": "",
+      "AllowedPattern": "[^,\\x00-\\x1f\\x7f*?\"\\\\]*",
+      "Description": "Exact prefixes; compiler appends only the required trailing IAM wildcard."
+    },
+    "SseKmsKeyArn": {
+      "Type": "String",
+      "Default": "",
+      "AllowedPattern": "^$|arn:aws:kms:(eu-north-1|eu-west-1|eu-central-1|us-east-1|us-west-2):[0-9]{12}:key/[0-9a-f-]{36}"
+    },
+    "RegistrationToken": {
+      "Type": "String",
+      "AllowedPattern": "[A-Za-z0-9_-]{43}",
+      "Description": "Single-use token, expires after 30 minutes; visible in seller stack parameters and browser history."
+    },
+    "PollIntervalMinutes": {
+      "Type": "Number",
+      "Default": 1,
+      "AllowedValues": [
+        1,
+        5,
+        15
+      ]
+    },
+    "MemorySize": {
+      "Type": "Number",
+      "Default": 1769,
+      "AllowedValues": [
+        1769,
+        3008
+      ]
+    },
+    "ArtifactBucket": {
+      "Type": "String",
+      "AllowedPattern": "[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]"
+    },
+    "ArtifactKey": {
+      "Type": "String",
+      "AllowedPattern": "aws-verifier/[A-Za-z0-9_.-]+/[0-9a-f]{64}/bootstrap.zip"
+    },
+    "ArtifactObjectVersion": {
+      "Type": "String",
+      "MinLength": 1,
+      "AllowedPattern": "(?!null$).+"
+    },
+    "ExpectedCodeHash": {
+      "Type": "String",
+      "AllowedPattern": "sha256:[0-9a-f]{64}"
+    },
+    "ScannerVersion": {
+      "Type": "String",
+      "AllowedPattern": "[A-Za-z0-9_.-]+"
+    },
+    "ApiBaseUrl": {
+      "Type": "String",
+      "Default": "https://api.ai.market",
+      "AllowedValues": [
+        "https://api.ai.market"
+      ]
+    }
+  },
+  "Rules": {
+    "SameRegion": {
+      "Assertions": [
+        {
+          "Assert": {
+            "Fn::Equals": [
+              {
+                "Ref": "BucketRegion"
+              },
+              {
+                "Ref": "AWS::Region"
+              }
+            ]
+          },
+          "AssertDescription": "Deploy in the supported connection/bucket region."
+        }
+      ]
+    }
+  },
+  "Conditions": {
+    "HasKms": {"Fn::Not":[{"Fn::Equals":[{"Ref":"SseKmsKeyArn"},""]}]},
+    "OneMinute": {"Fn::Equals":[{"Ref":"PollIntervalMinutes"},1]},
+    "ReadKeys0": {"Fn::Not":[{"Fn::Equals":[{"Fn::Select":[0,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadKeys"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]}]},
+    "ReadKeys1": {"Fn::Not":[{"Fn::Equals":[{"Fn::Select":[1,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadKeys"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]}]},
+    "ReadKeys2": {"Fn::Not":[{"Fn::Equals":[{"Fn::Select":[2,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadKeys"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]}]},
+    "ReadKeys3": {"Fn::Not":[{"Fn::Equals":[{"Fn::Select":[3,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadKeys"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]}]},
+    "ReadKeys4": {"Fn::Not":[{"Fn::Equals":[{"Fn::Select":[4,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadKeys"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]}]},
+    "ReadKeys5": {"Fn::Not":[{"Fn::Equals":[{"Fn::Select":[5,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadKeys"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]}]},
+    "ReadKeys6": {"Fn::Not":[{"Fn::Equals":[{"Fn::Select":[6,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadKeys"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]}]},
+    "ReadKeys7": {"Fn::Not":[{"Fn::Equals":[{"Fn::Select":[7,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadKeys"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]}]},
+    "ReadKeys8": {"Fn::Not":[{"Fn::Equals":[{"Fn::Select":[8,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadKeys"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]}]},
+    "ReadKeys9": {"Fn::Not":[{"Fn::Equals":[{"Fn::Select":[9,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadKeys"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]}]},
+    "ReadKeys10": {"Fn::Not":[{"Fn::Equals":[{"Fn::Select":[10,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadKeys"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]}]},
+    "ReadKeys11": {"Fn::Not":[{"Fn::Equals":[{"Fn::Select":[11,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadKeys"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]}]},
+    "ReadKeys12": {"Fn::Not":[{"Fn::Equals":[{"Fn::Select":[12,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadKeys"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]}]},
+    "ReadKeys13": {"Fn::Not":[{"Fn::Equals":[{"Fn::Select":[13,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadKeys"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]}]},
+    "ReadKeys14": {"Fn::Not":[{"Fn::Equals":[{"Fn::Select":[14,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadKeys"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]}]},
+    "ReadKeys15": {"Fn::Not":[{"Fn::Equals":[{"Fn::Select":[15,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadKeys"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]}]},
+    "ReadKeys16": {"Fn::Not":[{"Fn::Equals":[{"Fn::Select":[16,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadKeys"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]}]},
+    "ReadKeys17": {"Fn::Not":[{"Fn::Equals":[{"Fn::Select":[17,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadKeys"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]}]},
+    "ReadKeys18": {"Fn::Not":[{"Fn::Equals":[{"Fn::Select":[18,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadKeys"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]}]},
+    "ReadKeys19": {"Fn::Not":[{"Fn::Equals":[{"Fn::Select":[19,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadKeys"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]}]},
+    "ReadKeys20": {"Fn::Not":[{"Fn::Equals":[{"Fn::Select":[20,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadKeys"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]}]},
+    "ReadKeys21": {"Fn::Not":[{"Fn::Equals":[{"Fn::Select":[21,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadKeys"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]}]},
+    "ReadKeys22": {"Fn::Not":[{"Fn::Equals":[{"Fn::Select":[22,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadKeys"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]}]},
+    "ReadKeys23": {"Fn::Not":[{"Fn::Equals":[{"Fn::Select":[23,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadKeys"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]}]},
+    "ReadKeys24": {"Fn::Not":[{"Fn::Equals":[{"Fn::Select":[24,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadKeys"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]}]},
+    "ReadKeys25": {"Fn::Not":[{"Fn::Equals":[{"Fn::Select":[25,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadKeys"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]}]},
+    "ReadKeys26": {"Fn::Not":[{"Fn::Equals":[{"Fn::Select":[26,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadKeys"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]}]},
+    "ReadKeys27": {"Fn::Not":[{"Fn::Equals":[{"Fn::Select":[27,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadKeys"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]}]},
+    "ReadKeys28": {"Fn::Not":[{"Fn::Equals":[{"Fn::Select":[28,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadKeys"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]}]},
+    "ReadKeys29": {"Fn::Not":[{"Fn::Equals":[{"Fn::Select":[29,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadKeys"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]}]},
+    "ReadKeys30": {"Fn::Not":[{"Fn::Equals":[{"Fn::Select":[30,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadKeys"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]}]},
+    "ReadKeys31": {"Fn::Not":[{"Fn::Equals":[{"Fn::Select":[31,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadKeys"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]}]},
+    "ReadKeys32": {"Fn::Not":[{"Fn::Equals":[{"Fn::Select":[32,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadKeys"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]}]},
+    "ReadKeys33": {"Fn::Not":[{"Fn::Equals":[{"Fn::Select":[33,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadKeys"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]}]},
+    "ReadKeys34": {"Fn::Not":[{"Fn::Equals":[{"Fn::Select":[34,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadKeys"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]}]},
+    "ReadKeys35": {"Fn::Not":[{"Fn::Equals":[{"Fn::Select":[35,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadKeys"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]}]},
+    "ReadKeys36": {"Fn::Not":[{"Fn::Equals":[{"Fn::Select":[36,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadKeys"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]}]},
+    "ReadKeys37": {"Fn::Not":[{"Fn::Equals":[{"Fn::Select":[37,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadKeys"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]}]},
+    "ReadKeys38": {"Fn::Not":[{"Fn::Equals":[{"Fn::Select":[38,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadKeys"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]}]},
+    "ReadKeys39": {"Fn::Not":[{"Fn::Equals":[{"Fn::Select":[39,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadKeys"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]}]},
+    "ReadKeys40": {"Fn::Not":[{"Fn::Equals":[{"Fn::Select":[40,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadKeys"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]}]},
+    "ReadKeys41": {"Fn::Not":[{"Fn::Equals":[{"Fn::Select":[41,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadKeys"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]}]},
+    "ReadKeys42": {"Fn::Not":[{"Fn::Equals":[{"Fn::Select":[42,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadKeys"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]}]},
+    "ReadKeys43": {"Fn::Not":[{"Fn::Equals":[{"Fn::Select":[43,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadKeys"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]}]},
+    "ReadKeys44": {"Fn::Not":[{"Fn::Equals":[{"Fn::Select":[44,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadKeys"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]}]},
+    "ReadKeys45": {"Fn::Not":[{"Fn::Equals":[{"Fn::Select":[45,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadKeys"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]}]},
+    "ReadKeys46": {"Fn::Not":[{"Fn::Equals":[{"Fn::Select":[46,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadKeys"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]}]},
+    "ReadKeys47": {"Fn::Not":[{"Fn::Equals":[{"Fn::Select":[47,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadKeys"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]}]},
+    "ReadKeys48": {"Fn::Not":[{"Fn::Equals":[{"Fn::Select":[48,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadKeys"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]}]},
+    "ReadKeys49": {"Fn::Not":[{"Fn::Equals":[{"Fn::Select":[49,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadKeys"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]}]},
+    "ReadPrefixes0": {"Fn::Not":[{"Fn::Equals":[{"Fn::Select":[0,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadPrefixes"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]}]},
+    "ReadPrefixes1": {"Fn::Not":[{"Fn::Equals":[{"Fn::Select":[1,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadPrefixes"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]}]},
+    "ReadPrefixes2": {"Fn::Not":[{"Fn::Equals":[{"Fn::Select":[2,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadPrefixes"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]}]},
+    "ReadPrefixes3": {"Fn::Not":[{"Fn::Equals":[{"Fn::Select":[3,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadPrefixes"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]}]},
+    "ReadPrefixes4": {"Fn::Not":[{"Fn::Equals":[{"Fn::Select":[4,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadPrefixes"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]}]},
+    "ReadPrefixes5": {"Fn::Not":[{"Fn::Equals":[{"Fn::Select":[5,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadPrefixes"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]}]},
+    "ReadPrefixes6": {"Fn::Not":[{"Fn::Equals":[{"Fn::Select":[6,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadPrefixes"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]}]},
+    "ReadPrefixes7": {"Fn::Not":[{"Fn::Equals":[{"Fn::Select":[7,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadPrefixes"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]}]},
+    "ReadPrefixes8": {"Fn::Not":[{"Fn::Equals":[{"Fn::Select":[8,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadPrefixes"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]}]},
+    "ReadPrefixes9": {"Fn::Not":[{"Fn::Equals":[{"Fn::Select":[9,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadPrefixes"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]}]},
+    "ReadPrefixes10": {"Fn::Not":[{"Fn::Equals":[{"Fn::Select":[10,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadPrefixes"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]}]},
+    "ReadPrefixes11": {"Fn::Not":[{"Fn::Equals":[{"Fn::Select":[11,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadPrefixes"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]}]},
+    "ReadPrefixes12": {"Fn::Not":[{"Fn::Equals":[{"Fn::Select":[12,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadPrefixes"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]}]},
+    "ReadPrefixes13": {"Fn::Not":[{"Fn::Equals":[{"Fn::Select":[13,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadPrefixes"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]}]},
+    "ReadPrefixes14": {"Fn::Not":[{"Fn::Equals":[{"Fn::Select":[14,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadPrefixes"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]}]},
+    "ReadPrefixes15": {"Fn::Not":[{"Fn::Equals":[{"Fn::Select":[15,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadPrefixes"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]}]},
+    "ReadPrefixes16": {"Fn::Not":[{"Fn::Equals":[{"Fn::Select":[16,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadPrefixes"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]}]},
+    "ReadPrefixes17": {"Fn::Not":[{"Fn::Equals":[{"Fn::Select":[17,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadPrefixes"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]}]},
+    "ReadPrefixes18": {"Fn::Not":[{"Fn::Equals":[{"Fn::Select":[18,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadPrefixes"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]}]},
+    "ReadPrefixes19": {"Fn::Not":[{"Fn::Equals":[{"Fn::Select":[19,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadPrefixes"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]}]},
+    "ReadPrefixes20": {"Fn::Not":[{"Fn::Equals":[{"Fn::Select":[20,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadPrefixes"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]}]},
+    "ReadPrefixes21": {"Fn::Not":[{"Fn::Equals":[{"Fn::Select":[21,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadPrefixes"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]}]},
+    "ReadPrefixes22": {"Fn::Not":[{"Fn::Equals":[{"Fn::Select":[22,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadPrefixes"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]}]},
+    "ReadPrefixes23": {"Fn::Not":[{"Fn::Equals":[{"Fn::Select":[23,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadPrefixes"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]}]},
+    "ReadPrefixes24": {"Fn::Not":[{"Fn::Equals":[{"Fn::Select":[24,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadPrefixes"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]}]},
+    "ReadPrefixes25": {"Fn::Not":[{"Fn::Equals":[{"Fn::Select":[25,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadPrefixes"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]}]},
+    "ReadPrefixes26": {"Fn::Not":[{"Fn::Equals":[{"Fn::Select":[26,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadPrefixes"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]}]},
+    "ReadPrefixes27": {"Fn::Not":[{"Fn::Equals":[{"Fn::Select":[27,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadPrefixes"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]}]},
+    "ReadPrefixes28": {"Fn::Not":[{"Fn::Equals":[{"Fn::Select":[28,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadPrefixes"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]}]},
+    "ReadPrefixes29": {"Fn::Not":[{"Fn::Equals":[{"Fn::Select":[29,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadPrefixes"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]}]},
+    "ReadPrefixes30": {"Fn::Not":[{"Fn::Equals":[{"Fn::Select":[30,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadPrefixes"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]}]},
+    "ReadPrefixes31": {"Fn::Not":[{"Fn::Equals":[{"Fn::Select":[31,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadPrefixes"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]}]},
+    "ReadPrefixes32": {"Fn::Not":[{"Fn::Equals":[{"Fn::Select":[32,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadPrefixes"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]}]},
+    "ReadPrefixes33": {"Fn::Not":[{"Fn::Equals":[{"Fn::Select":[33,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadPrefixes"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]}]},
+    "ReadPrefixes34": {"Fn::Not":[{"Fn::Equals":[{"Fn::Select":[34,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadPrefixes"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]}]},
+    "ReadPrefixes35": {"Fn::Not":[{"Fn::Equals":[{"Fn::Select":[35,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadPrefixes"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]}]},
+    "ReadPrefixes36": {"Fn::Not":[{"Fn::Equals":[{"Fn::Select":[36,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadPrefixes"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]}]},
+    "ReadPrefixes37": {"Fn::Not":[{"Fn::Equals":[{"Fn::Select":[37,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadPrefixes"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]}]},
+    "ReadPrefixes38": {"Fn::Not":[{"Fn::Equals":[{"Fn::Select":[38,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadPrefixes"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]}]},
+    "ReadPrefixes39": {"Fn::Not":[{"Fn::Equals":[{"Fn::Select":[39,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadPrefixes"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]}]},
+    "ReadPrefixes40": {"Fn::Not":[{"Fn::Equals":[{"Fn::Select":[40,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadPrefixes"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]}]},
+    "ReadPrefixes41": {"Fn::Not":[{"Fn::Equals":[{"Fn::Select":[41,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadPrefixes"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]}]},
+    "ReadPrefixes42": {"Fn::Not":[{"Fn::Equals":[{"Fn::Select":[42,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadPrefixes"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]}]},
+    "ReadPrefixes43": {"Fn::Not":[{"Fn::Equals":[{"Fn::Select":[43,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadPrefixes"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]}]},
+    "ReadPrefixes44": {"Fn::Not":[{"Fn::Equals":[{"Fn::Select":[44,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadPrefixes"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]}]},
+    "ReadPrefixes45": {"Fn::Not":[{"Fn::Equals":[{"Fn::Select":[45,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadPrefixes"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]}]},
+    "ReadPrefixes46": {"Fn::Not":[{"Fn::Equals":[{"Fn::Select":[46,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadPrefixes"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]}]},
+    "ReadPrefixes47": {"Fn::Not":[{"Fn::Equals":[{"Fn::Select":[47,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadPrefixes"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]}]},
+    "ReadPrefixes48": {"Fn::Not":[{"Fn::Equals":[{"Fn::Select":[48,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadPrefixes"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]}]},
+    "ReadPrefixes49": {"Fn::Not":[{"Fn::Equals":[{"Fn::Select":[49,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadPrefixes"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]}]}
+  },
+  "Resources": {
+    "LogGroup": {
+      "Type": "AWS::Logs::LogGroup",
+      "Properties": {
+        "LogGroupName": {
+          "Fn::Sub": "/aws/lambda/aim-aws-verifier-${ConnectionId}"
+        },
+        "RetentionInDays": 30
+      }
+    },
+    "VerifierSecret": {
+      "Type": "AWS::SecretsManager::Secret",
+      "Properties": {
+        "Name": {
+          "Fn::Sub": "aim-aws-verifier-${ConnectionId}"
+        }
+      }
+    },
+    "Ledger": {
+      "Type": "AWS::DynamoDB::Table",
+      "Properties": {
+        "TableName": {
+          "Fn::Sub": "aim-aws-verifier-${ConnectionId}"
+        },
+        "BillingMode": "PAY_PER_REQUEST",
+        "AttributeDefinitions": [
+          {
+            "AttributeName": "pk",
+            "AttributeType": "S"
+          }
+        ],
+        "KeySchema": [
+          {
+            "AttributeName": "pk",
+            "KeyType": "HASH"
+          }
+        ],
+        "TimeToLiveSpecification": {
+          "AttributeName": "expires_at",
+          "Enabled": true
+        }
+      }
+    },
+    "ExecutionRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "lambda.amazonaws.com"
+              },
+              "Action": "sts:AssumeRole"
+            }
+          ]
+        },
+        "Policies": [
+          {
+            "PolicyName": "verifier",
+            "PolicyDocument": {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "s3:GetObject",
+                    "s3:GetObjectVersion"
+                  ],
+                  "Resource": [
+                {"Fn::If":["ReadKeys0",{"Fn::Join":["",[{"Fn::Sub":"arn:aws:s3:::${Bucket}/"},{"Fn::Select":[0,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadKeys"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]]},{"Ref":"AWS::NoValue"}]},
+                {"Fn::If":["ReadKeys1",{"Fn::Join":["",[{"Fn::Sub":"arn:aws:s3:::${Bucket}/"},{"Fn::Select":[1,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadKeys"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]]},{"Ref":"AWS::NoValue"}]},
+                {"Fn::If":["ReadKeys2",{"Fn::Join":["",[{"Fn::Sub":"arn:aws:s3:::${Bucket}/"},{"Fn::Select":[2,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadKeys"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]]},{"Ref":"AWS::NoValue"}]},
+                {"Fn::If":["ReadKeys3",{"Fn::Join":["",[{"Fn::Sub":"arn:aws:s3:::${Bucket}/"},{"Fn::Select":[3,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadKeys"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]]},{"Ref":"AWS::NoValue"}]},
+                {"Fn::If":["ReadKeys4",{"Fn::Join":["",[{"Fn::Sub":"arn:aws:s3:::${Bucket}/"},{"Fn::Select":[4,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadKeys"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]]},{"Ref":"AWS::NoValue"}]},
+                {"Fn::If":["ReadKeys5",{"Fn::Join":["",[{"Fn::Sub":"arn:aws:s3:::${Bucket}/"},{"Fn::Select":[5,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadKeys"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]]},{"Ref":"AWS::NoValue"}]},
+                {"Fn::If":["ReadKeys6",{"Fn::Join":["",[{"Fn::Sub":"arn:aws:s3:::${Bucket}/"},{"Fn::Select":[6,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadKeys"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]]},{"Ref":"AWS::NoValue"}]},
+                {"Fn::If":["ReadKeys7",{"Fn::Join":["",[{"Fn::Sub":"arn:aws:s3:::${Bucket}/"},{"Fn::Select":[7,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadKeys"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]]},{"Ref":"AWS::NoValue"}]},
+                {"Fn::If":["ReadKeys8",{"Fn::Join":["",[{"Fn::Sub":"arn:aws:s3:::${Bucket}/"},{"Fn::Select":[8,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadKeys"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]]},{"Ref":"AWS::NoValue"}]},
+                {"Fn::If":["ReadKeys9",{"Fn::Join":["",[{"Fn::Sub":"arn:aws:s3:::${Bucket}/"},{"Fn::Select":[9,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadKeys"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]]},{"Ref":"AWS::NoValue"}]},
+                {"Fn::If":["ReadKeys10",{"Fn::Join":["",[{"Fn::Sub":"arn:aws:s3:::${Bucket}/"},{"Fn::Select":[10,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadKeys"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]]},{"Ref":"AWS::NoValue"}]},
+                {"Fn::If":["ReadKeys11",{"Fn::Join":["",[{"Fn::Sub":"arn:aws:s3:::${Bucket}/"},{"Fn::Select":[11,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadKeys"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]]},{"Ref":"AWS::NoValue"}]},
+                {"Fn::If":["ReadKeys12",{"Fn::Join":["",[{"Fn::Sub":"arn:aws:s3:::${Bucket}/"},{"Fn::Select":[12,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadKeys"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]]},{"Ref":"AWS::NoValue"}]},
+                {"Fn::If":["ReadKeys13",{"Fn::Join":["",[{"Fn::Sub":"arn:aws:s3:::${Bucket}/"},{"Fn::Select":[13,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadKeys"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]]},{"Ref":"AWS::NoValue"}]},
+                {"Fn::If":["ReadKeys14",{"Fn::Join":["",[{"Fn::Sub":"arn:aws:s3:::${Bucket}/"},{"Fn::Select":[14,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadKeys"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]]},{"Ref":"AWS::NoValue"}]},
+                {"Fn::If":["ReadKeys15",{"Fn::Join":["",[{"Fn::Sub":"arn:aws:s3:::${Bucket}/"},{"Fn::Select":[15,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadKeys"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]]},{"Ref":"AWS::NoValue"}]},
+                {"Fn::If":["ReadKeys16",{"Fn::Join":["",[{"Fn::Sub":"arn:aws:s3:::${Bucket}/"},{"Fn::Select":[16,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadKeys"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]]},{"Ref":"AWS::NoValue"}]},
+                {"Fn::If":["ReadKeys17",{"Fn::Join":["",[{"Fn::Sub":"arn:aws:s3:::${Bucket}/"},{"Fn::Select":[17,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadKeys"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]]},{"Ref":"AWS::NoValue"}]},
+                {"Fn::If":["ReadKeys18",{"Fn::Join":["",[{"Fn::Sub":"arn:aws:s3:::${Bucket}/"},{"Fn::Select":[18,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadKeys"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]]},{"Ref":"AWS::NoValue"}]},
+                {"Fn::If":["ReadKeys19",{"Fn::Join":["",[{"Fn::Sub":"arn:aws:s3:::${Bucket}/"},{"Fn::Select":[19,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadKeys"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]]},{"Ref":"AWS::NoValue"}]},
+                {"Fn::If":["ReadKeys20",{"Fn::Join":["",[{"Fn::Sub":"arn:aws:s3:::${Bucket}/"},{"Fn::Select":[20,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadKeys"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]]},{"Ref":"AWS::NoValue"}]},
+                {"Fn::If":["ReadKeys21",{"Fn::Join":["",[{"Fn::Sub":"arn:aws:s3:::${Bucket}/"},{"Fn::Select":[21,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadKeys"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]]},{"Ref":"AWS::NoValue"}]},
+                {"Fn::If":["ReadKeys22",{"Fn::Join":["",[{"Fn::Sub":"arn:aws:s3:::${Bucket}/"},{"Fn::Select":[22,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadKeys"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]]},{"Ref":"AWS::NoValue"}]},
+                {"Fn::If":["ReadKeys23",{"Fn::Join":["",[{"Fn::Sub":"arn:aws:s3:::${Bucket}/"},{"Fn::Select":[23,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadKeys"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]]},{"Ref":"AWS::NoValue"}]},
+                {"Fn::If":["ReadKeys24",{"Fn::Join":["",[{"Fn::Sub":"arn:aws:s3:::${Bucket}/"},{"Fn::Select":[24,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadKeys"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]]},{"Ref":"AWS::NoValue"}]},
+                {"Fn::If":["ReadKeys25",{"Fn::Join":["",[{"Fn::Sub":"arn:aws:s3:::${Bucket}/"},{"Fn::Select":[25,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadKeys"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]]},{"Ref":"AWS::NoValue"}]},
+                {"Fn::If":["ReadKeys26",{"Fn::Join":["",[{"Fn::Sub":"arn:aws:s3:::${Bucket}/"},{"Fn::Select":[26,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadKeys"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]]},{"Ref":"AWS::NoValue"}]},
+                {"Fn::If":["ReadKeys27",{"Fn::Join":["",[{"Fn::Sub":"arn:aws:s3:::${Bucket}/"},{"Fn::Select":[27,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadKeys"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]]},{"Ref":"AWS::NoValue"}]},
+                {"Fn::If":["ReadKeys28",{"Fn::Join":["",[{"Fn::Sub":"arn:aws:s3:::${Bucket}/"},{"Fn::Select":[28,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadKeys"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]]},{"Ref":"AWS::NoValue"}]},
+                {"Fn::If":["ReadKeys29",{"Fn::Join":["",[{"Fn::Sub":"arn:aws:s3:::${Bucket}/"},{"Fn::Select":[29,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadKeys"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]]},{"Ref":"AWS::NoValue"}]},
+                {"Fn::If":["ReadKeys30",{"Fn::Join":["",[{"Fn::Sub":"arn:aws:s3:::${Bucket}/"},{"Fn::Select":[30,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadKeys"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]]},{"Ref":"AWS::NoValue"}]},
+                {"Fn::If":["ReadKeys31",{"Fn::Join":["",[{"Fn::Sub":"arn:aws:s3:::${Bucket}/"},{"Fn::Select":[31,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadKeys"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]]},{"Ref":"AWS::NoValue"}]},
+                {"Fn::If":["ReadKeys32",{"Fn::Join":["",[{"Fn::Sub":"arn:aws:s3:::${Bucket}/"},{"Fn::Select":[32,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadKeys"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]]},{"Ref":"AWS::NoValue"}]},
+                {"Fn::If":["ReadKeys33",{"Fn::Join":["",[{"Fn::Sub":"arn:aws:s3:::${Bucket}/"},{"Fn::Select":[33,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadKeys"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]]},{"Ref":"AWS::NoValue"}]},
+                {"Fn::If":["ReadKeys34",{"Fn::Join":["",[{"Fn::Sub":"arn:aws:s3:::${Bucket}/"},{"Fn::Select":[34,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadKeys"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]]},{"Ref":"AWS::NoValue"}]},
+                {"Fn::If":["ReadKeys35",{"Fn::Join":["",[{"Fn::Sub":"arn:aws:s3:::${Bucket}/"},{"Fn::Select":[35,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadKeys"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]]},{"Ref":"AWS::NoValue"}]},
+                {"Fn::If":["ReadKeys36",{"Fn::Join":["",[{"Fn::Sub":"arn:aws:s3:::${Bucket}/"},{"Fn::Select":[36,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadKeys"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]]},{"Ref":"AWS::NoValue"}]},
+                {"Fn::If":["ReadKeys37",{"Fn::Join":["",[{"Fn::Sub":"arn:aws:s3:::${Bucket}/"},{"Fn::Select":[37,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadKeys"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]]},{"Ref":"AWS::NoValue"}]},
+                {"Fn::If":["ReadKeys38",{"Fn::Join":["",[{"Fn::Sub":"arn:aws:s3:::${Bucket}/"},{"Fn::Select":[38,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadKeys"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]]},{"Ref":"AWS::NoValue"}]},
+                {"Fn::If":["ReadKeys39",{"Fn::Join":["",[{"Fn::Sub":"arn:aws:s3:::${Bucket}/"},{"Fn::Select":[39,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadKeys"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]]},{"Ref":"AWS::NoValue"}]},
+                {"Fn::If":["ReadKeys40",{"Fn::Join":["",[{"Fn::Sub":"arn:aws:s3:::${Bucket}/"},{"Fn::Select":[40,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadKeys"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]]},{"Ref":"AWS::NoValue"}]},
+                {"Fn::If":["ReadKeys41",{"Fn::Join":["",[{"Fn::Sub":"arn:aws:s3:::${Bucket}/"},{"Fn::Select":[41,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadKeys"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]]},{"Ref":"AWS::NoValue"}]},
+                {"Fn::If":["ReadKeys42",{"Fn::Join":["",[{"Fn::Sub":"arn:aws:s3:::${Bucket}/"},{"Fn::Select":[42,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadKeys"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]]},{"Ref":"AWS::NoValue"}]},
+                {"Fn::If":["ReadKeys43",{"Fn::Join":["",[{"Fn::Sub":"arn:aws:s3:::${Bucket}/"},{"Fn::Select":[43,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadKeys"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]]},{"Ref":"AWS::NoValue"}]},
+                {"Fn::If":["ReadKeys44",{"Fn::Join":["",[{"Fn::Sub":"arn:aws:s3:::${Bucket}/"},{"Fn::Select":[44,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadKeys"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]]},{"Ref":"AWS::NoValue"}]},
+                {"Fn::If":["ReadKeys45",{"Fn::Join":["",[{"Fn::Sub":"arn:aws:s3:::${Bucket}/"},{"Fn::Select":[45,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadKeys"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]]},{"Ref":"AWS::NoValue"}]},
+                {"Fn::If":["ReadKeys46",{"Fn::Join":["",[{"Fn::Sub":"arn:aws:s3:::${Bucket}/"},{"Fn::Select":[46,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadKeys"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]]},{"Ref":"AWS::NoValue"}]},
+                {"Fn::If":["ReadKeys47",{"Fn::Join":["",[{"Fn::Sub":"arn:aws:s3:::${Bucket}/"},{"Fn::Select":[47,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadKeys"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]]},{"Ref":"AWS::NoValue"}]},
+                {"Fn::If":["ReadKeys48",{"Fn::Join":["",[{"Fn::Sub":"arn:aws:s3:::${Bucket}/"},{"Fn::Select":[48,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadKeys"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]]},{"Ref":"AWS::NoValue"}]},
+                {"Fn::If":["ReadKeys49",{"Fn::Join":["",[{"Fn::Sub":"arn:aws:s3:::${Bucket}/"},{"Fn::Select":[49,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadKeys"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},""]]},{"Ref":"AWS::NoValue"}]},
+                {"Fn::If":["ReadPrefixes0",{"Fn::Join":["",[{"Fn::Sub":"arn:aws:s3:::${Bucket}/"},{"Fn::Select":[0,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadPrefixes"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},"*"]]},{"Ref":"AWS::NoValue"}]},
+                {"Fn::If":["ReadPrefixes1",{"Fn::Join":["",[{"Fn::Sub":"arn:aws:s3:::${Bucket}/"},{"Fn::Select":[1,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadPrefixes"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},"*"]]},{"Ref":"AWS::NoValue"}]},
+                {"Fn::If":["ReadPrefixes2",{"Fn::Join":["",[{"Fn::Sub":"arn:aws:s3:::${Bucket}/"},{"Fn::Select":[2,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadPrefixes"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},"*"]]},{"Ref":"AWS::NoValue"}]},
+                {"Fn::If":["ReadPrefixes3",{"Fn::Join":["",[{"Fn::Sub":"arn:aws:s3:::${Bucket}/"},{"Fn::Select":[3,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadPrefixes"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},"*"]]},{"Ref":"AWS::NoValue"}]},
+                {"Fn::If":["ReadPrefixes4",{"Fn::Join":["",[{"Fn::Sub":"arn:aws:s3:::${Bucket}/"},{"Fn::Select":[4,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadPrefixes"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},"*"]]},{"Ref":"AWS::NoValue"}]},
+                {"Fn::If":["ReadPrefixes5",{"Fn::Join":["",[{"Fn::Sub":"arn:aws:s3:::${Bucket}/"},{"Fn::Select":[5,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadPrefixes"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},"*"]]},{"Ref":"AWS::NoValue"}]},
+                {"Fn::If":["ReadPrefixes6",{"Fn::Join":["",[{"Fn::Sub":"arn:aws:s3:::${Bucket}/"},{"Fn::Select":[6,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadPrefixes"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},"*"]]},{"Ref":"AWS::NoValue"}]},
+                {"Fn::If":["ReadPrefixes7",{"Fn::Join":["",[{"Fn::Sub":"arn:aws:s3:::${Bucket}/"},{"Fn::Select":[7,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadPrefixes"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},"*"]]},{"Ref":"AWS::NoValue"}]},
+                {"Fn::If":["ReadPrefixes8",{"Fn::Join":["",[{"Fn::Sub":"arn:aws:s3:::${Bucket}/"},{"Fn::Select":[8,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadPrefixes"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},"*"]]},{"Ref":"AWS::NoValue"}]},
+                {"Fn::If":["ReadPrefixes9",{"Fn::Join":["",[{"Fn::Sub":"arn:aws:s3:::${Bucket}/"},{"Fn::Select":[9,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadPrefixes"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},"*"]]},{"Ref":"AWS::NoValue"}]},
+                {"Fn::If":["ReadPrefixes10",{"Fn::Join":["",[{"Fn::Sub":"arn:aws:s3:::${Bucket}/"},{"Fn::Select":[10,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadPrefixes"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},"*"]]},{"Ref":"AWS::NoValue"}]},
+                {"Fn::If":["ReadPrefixes11",{"Fn::Join":["",[{"Fn::Sub":"arn:aws:s3:::${Bucket}/"},{"Fn::Select":[11,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadPrefixes"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},"*"]]},{"Ref":"AWS::NoValue"}]},
+                {"Fn::If":["ReadPrefixes12",{"Fn::Join":["",[{"Fn::Sub":"arn:aws:s3:::${Bucket}/"},{"Fn::Select":[12,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadPrefixes"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},"*"]]},{"Ref":"AWS::NoValue"}]},
+                {"Fn::If":["ReadPrefixes13",{"Fn::Join":["",[{"Fn::Sub":"arn:aws:s3:::${Bucket}/"},{"Fn::Select":[13,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadPrefixes"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},"*"]]},{"Ref":"AWS::NoValue"}]},
+                {"Fn::If":["ReadPrefixes14",{"Fn::Join":["",[{"Fn::Sub":"arn:aws:s3:::${Bucket}/"},{"Fn::Select":[14,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadPrefixes"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},"*"]]},{"Ref":"AWS::NoValue"}]},
+                {"Fn::If":["ReadPrefixes15",{"Fn::Join":["",[{"Fn::Sub":"arn:aws:s3:::${Bucket}/"},{"Fn::Select":[15,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadPrefixes"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},"*"]]},{"Ref":"AWS::NoValue"}]},
+                {"Fn::If":["ReadPrefixes16",{"Fn::Join":["",[{"Fn::Sub":"arn:aws:s3:::${Bucket}/"},{"Fn::Select":[16,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadPrefixes"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},"*"]]},{"Ref":"AWS::NoValue"}]},
+                {"Fn::If":["ReadPrefixes17",{"Fn::Join":["",[{"Fn::Sub":"arn:aws:s3:::${Bucket}/"},{"Fn::Select":[17,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadPrefixes"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},"*"]]},{"Ref":"AWS::NoValue"}]},
+                {"Fn::If":["ReadPrefixes18",{"Fn::Join":["",[{"Fn::Sub":"arn:aws:s3:::${Bucket}/"},{"Fn::Select":[18,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadPrefixes"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},"*"]]},{"Ref":"AWS::NoValue"}]},
+                {"Fn::If":["ReadPrefixes19",{"Fn::Join":["",[{"Fn::Sub":"arn:aws:s3:::${Bucket}/"},{"Fn::Select":[19,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadPrefixes"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},"*"]]},{"Ref":"AWS::NoValue"}]},
+                {"Fn::If":["ReadPrefixes20",{"Fn::Join":["",[{"Fn::Sub":"arn:aws:s3:::${Bucket}/"},{"Fn::Select":[20,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadPrefixes"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},"*"]]},{"Ref":"AWS::NoValue"}]},
+                {"Fn::If":["ReadPrefixes21",{"Fn::Join":["",[{"Fn::Sub":"arn:aws:s3:::${Bucket}/"},{"Fn::Select":[21,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadPrefixes"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},"*"]]},{"Ref":"AWS::NoValue"}]},
+                {"Fn::If":["ReadPrefixes22",{"Fn::Join":["",[{"Fn::Sub":"arn:aws:s3:::${Bucket}/"},{"Fn::Select":[22,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadPrefixes"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},"*"]]},{"Ref":"AWS::NoValue"}]},
+                {"Fn::If":["ReadPrefixes23",{"Fn::Join":["",[{"Fn::Sub":"arn:aws:s3:::${Bucket}/"},{"Fn::Select":[23,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadPrefixes"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},"*"]]},{"Ref":"AWS::NoValue"}]},
+                {"Fn::If":["ReadPrefixes24",{"Fn::Join":["",[{"Fn::Sub":"arn:aws:s3:::${Bucket}/"},{"Fn::Select":[24,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadPrefixes"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},"*"]]},{"Ref":"AWS::NoValue"}]},
+                {"Fn::If":["ReadPrefixes25",{"Fn::Join":["",[{"Fn::Sub":"arn:aws:s3:::${Bucket}/"},{"Fn::Select":[25,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadPrefixes"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},"*"]]},{"Ref":"AWS::NoValue"}]},
+                {"Fn::If":["ReadPrefixes26",{"Fn::Join":["",[{"Fn::Sub":"arn:aws:s3:::${Bucket}/"},{"Fn::Select":[26,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadPrefixes"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},"*"]]},{"Ref":"AWS::NoValue"}]},
+                {"Fn::If":["ReadPrefixes27",{"Fn::Join":["",[{"Fn::Sub":"arn:aws:s3:::${Bucket}/"},{"Fn::Select":[27,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadPrefixes"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},"*"]]},{"Ref":"AWS::NoValue"}]},
+                {"Fn::If":["ReadPrefixes28",{"Fn::Join":["",[{"Fn::Sub":"arn:aws:s3:::${Bucket}/"},{"Fn::Select":[28,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadPrefixes"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},"*"]]},{"Ref":"AWS::NoValue"}]},
+                {"Fn::If":["ReadPrefixes29",{"Fn::Join":["",[{"Fn::Sub":"arn:aws:s3:::${Bucket}/"},{"Fn::Select":[29,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadPrefixes"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},"*"]]},{"Ref":"AWS::NoValue"}]},
+                {"Fn::If":["ReadPrefixes30",{"Fn::Join":["",[{"Fn::Sub":"arn:aws:s3:::${Bucket}/"},{"Fn::Select":[30,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadPrefixes"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},"*"]]},{"Ref":"AWS::NoValue"}]},
+                {"Fn::If":["ReadPrefixes31",{"Fn::Join":["",[{"Fn::Sub":"arn:aws:s3:::${Bucket}/"},{"Fn::Select":[31,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadPrefixes"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},"*"]]},{"Ref":"AWS::NoValue"}]},
+                {"Fn::If":["ReadPrefixes32",{"Fn::Join":["",[{"Fn::Sub":"arn:aws:s3:::${Bucket}/"},{"Fn::Select":[32,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadPrefixes"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},"*"]]},{"Ref":"AWS::NoValue"}]},
+                {"Fn::If":["ReadPrefixes33",{"Fn::Join":["",[{"Fn::Sub":"arn:aws:s3:::${Bucket}/"},{"Fn::Select":[33,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadPrefixes"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},"*"]]},{"Ref":"AWS::NoValue"}]},
+                {"Fn::If":["ReadPrefixes34",{"Fn::Join":["",[{"Fn::Sub":"arn:aws:s3:::${Bucket}/"},{"Fn::Select":[34,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadPrefixes"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},"*"]]},{"Ref":"AWS::NoValue"}]},
+                {"Fn::If":["ReadPrefixes35",{"Fn::Join":["",[{"Fn::Sub":"arn:aws:s3:::${Bucket}/"},{"Fn::Select":[35,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadPrefixes"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},"*"]]},{"Ref":"AWS::NoValue"}]},
+                {"Fn::If":["ReadPrefixes36",{"Fn::Join":["",[{"Fn::Sub":"arn:aws:s3:::${Bucket}/"},{"Fn::Select":[36,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadPrefixes"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},"*"]]},{"Ref":"AWS::NoValue"}]},
+                {"Fn::If":["ReadPrefixes37",{"Fn::Join":["",[{"Fn::Sub":"arn:aws:s3:::${Bucket}/"},{"Fn::Select":[37,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadPrefixes"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},"*"]]},{"Ref":"AWS::NoValue"}]},
+                {"Fn::If":["ReadPrefixes38",{"Fn::Join":["",[{"Fn::Sub":"arn:aws:s3:::${Bucket}/"},{"Fn::Select":[38,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadPrefixes"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},"*"]]},{"Ref":"AWS::NoValue"}]},
+                {"Fn::If":["ReadPrefixes39",{"Fn::Join":["",[{"Fn::Sub":"arn:aws:s3:::${Bucket}/"},{"Fn::Select":[39,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadPrefixes"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},"*"]]},{"Ref":"AWS::NoValue"}]},
+                {"Fn::If":["ReadPrefixes40",{"Fn::Join":["",[{"Fn::Sub":"arn:aws:s3:::${Bucket}/"},{"Fn::Select":[40,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadPrefixes"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},"*"]]},{"Ref":"AWS::NoValue"}]},
+                {"Fn::If":["ReadPrefixes41",{"Fn::Join":["",[{"Fn::Sub":"arn:aws:s3:::${Bucket}/"},{"Fn::Select":[41,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadPrefixes"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},"*"]]},{"Ref":"AWS::NoValue"}]},
+                {"Fn::If":["ReadPrefixes42",{"Fn::Join":["",[{"Fn::Sub":"arn:aws:s3:::${Bucket}/"},{"Fn::Select":[42,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadPrefixes"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},"*"]]},{"Ref":"AWS::NoValue"}]},
+                {"Fn::If":["ReadPrefixes43",{"Fn::Join":["",[{"Fn::Sub":"arn:aws:s3:::${Bucket}/"},{"Fn::Select":[43,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadPrefixes"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},"*"]]},{"Ref":"AWS::NoValue"}]},
+                {"Fn::If":["ReadPrefixes44",{"Fn::Join":["",[{"Fn::Sub":"arn:aws:s3:::${Bucket}/"},{"Fn::Select":[44,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadPrefixes"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},"*"]]},{"Ref":"AWS::NoValue"}]},
+                {"Fn::If":["ReadPrefixes45",{"Fn::Join":["",[{"Fn::Sub":"arn:aws:s3:::${Bucket}/"},{"Fn::Select":[45,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadPrefixes"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},"*"]]},{"Ref":"AWS::NoValue"}]},
+                {"Fn::If":["ReadPrefixes46",{"Fn::Join":["",[{"Fn::Sub":"arn:aws:s3:::${Bucket}/"},{"Fn::Select":[46,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadPrefixes"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},"*"]]},{"Ref":"AWS::NoValue"}]},
+                {"Fn::If":["ReadPrefixes47",{"Fn::Join":["",[{"Fn::Sub":"arn:aws:s3:::${Bucket}/"},{"Fn::Select":[47,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadPrefixes"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},"*"]]},{"Ref":"AWS::NoValue"}]},
+                {"Fn::If":["ReadPrefixes48",{"Fn::Join":["",[{"Fn::Sub":"arn:aws:s3:::${Bucket}/"},{"Fn::Select":[48,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadPrefixes"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},"*"]]},{"Ref":"AWS::NoValue"}]},
+                {"Fn::If":["ReadPrefixes49",{"Fn::Join":["",[{"Fn::Sub":"arn:aws:s3:::${Bucket}/"},{"Fn::Select":[49,{"Fn::Split":[",",{"Fn::Join":["",[{"Fn::Join":[",",{"Ref":"ReadPrefixes"}]},",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"]]}]}]},"*"]]},{"Ref":"AWS::NoValue"}]}
+                  ]
+                },
+                {"Effect":"Allow","Action":["secretsmanager:GetSecretValue","secretsmanager:PutSecretValue"],"Resource":{"Ref":"VerifierSecret"}},
+                {"Effect":"Allow","Action":["dynamodb:GetItem","dynamodb:PutItem","dynamodb:UpdateItem"],"Resource":{"Fn::GetAtt":["Ledger","Arn"]}},
+                {"Effect":"Allow","Action":["logs:CreateLogStream","logs:PutLogEvents"],"Resource":{"Fn::Sub":"arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/aim-aws-verifier-${ConnectionId}:log-stream:*"}},
+                {"Fn::If":["HasKms",{"Effect":"Allow","Action":["kms:Decrypt"],"Resource":{"Ref":"SseKmsKeyArn"},"Condition":{"StringEquals":{"kms:ViaService":{"Fn::Sub":"s3.${BucketRegion}.amazonaws.com"}}}},{"Ref":"AWS::NoValue"}]}
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "VerifierFunction": {
+      "Type": "AWS::Lambda::Function",
+      "DependsOn": [
+        "LogGroup"
+      ],
+      "Properties": {
+        "FunctionName": {
+          "Fn::Sub": "aim-aws-verifier-${ConnectionId}"
+        },
+        "Architectures": [
+          "arm64"
+        ],
+        "Runtime": "provided.al2023",
+        "Handler": "bootstrap",
+        "MemorySize": {
+          "Ref": "MemorySize"
+        },
+        "Timeout": 900,
+        "ReservedConcurrentExecutions": 1,
+        "Role": {
+          "Fn::GetAtt": [
+            "ExecutionRole",
+            "Arn"
+          ]
+        },
+        "Code": {
+          "S3Bucket": {
+            "Ref": "ArtifactBucket"
+          },
+          "S3Key": {
+            "Ref": "ArtifactKey"
+          },
+          "S3ObjectVersion": {
+            "Ref": "ArtifactObjectVersion"
+          }
+        },
+        "Environment": {
+          "Variables": {
+            "AIM_AWS_CONNECTION_ID": {
+              "Ref": "ConnectionId"
+            },
+            "AIM_AWS_BUCKET": {
+              "Ref": "Bucket"
+            },
+            "AIM_AWS_BUCKET_REGION": {
+              "Ref": "BucketRegion"
+            },
+            "AIM_AWS_READ_SCOPE": {
+              "Fn::Join": [
+                "",
+                [
+                  "{\"keys\":",
+                  {
+                    "Fn::If": [
+                      "ReadKeys0",
+                      {
+                        "Fn::Join": [
+                          "",
+                          [
+                            "[\"",
+                            {
+                              "Fn::Join": [
+                                "\",\"",
+                                {
+                                  "Ref": "ReadKeys"
+                                }
+                              ]
+                            },
+                            "\"]"
+                          ]
+                        ]
+                      },
+                      "[]"
+                    ]
+                  },
+                  ",\"prefixes\":",
+                  {
+                    "Fn::If": [
+                      "ReadPrefixes0",
+                      {
+                        "Fn::Join": [
+                          "",
+                          [
+                            "[\"",
+                            {
+                              "Fn::Join": [
+                                "\",\"",
+                                {
+                                  "Ref": "ReadPrefixes"
+                                }
+                              ]
+                            },
+                            "\"]"
+                          ]
+                        ]
+                      },
+                      "[]"
+                    ]
+                  },
+                  "}"
+                ]
+              ]
+            },
+            "AIM_AWS_SECRET_ID": {
+              "Ref": "VerifierSecret"
+            },
+            "AIM_AWS_LEDGER_TABLE": {
+              "Ref": "Ledger"
+            },
+            "AIM_AWS_REGISTRATION_TOKEN": {
+              "Ref": "RegistrationToken"
+            },
+            "AIM_AWS_SCANNER_VERSION": {
+              "Ref": "ScannerVersion"
+            },
+            "AIM_AWS_IMAGE_DIGEST": {
+              "Ref": "ExpectedCodeHash"
+            },
+            "AIM_AWS_API_BASE_URL": {
+              "Ref": "ApiBaseUrl"
+            },
+            "AIM_AWS_POLL_INTERVAL_MINUTES": {
+              "Ref": "PollIntervalMinutes"
+            },
+            "AIM_AWS_LOG_GROUP": {
+              "Ref": "LogGroup"
+            },
+            "AIM_AWS_SSE_KMS_KEY_ARN": {
+              "Ref": "SseKmsKeyArn"
+            }
+          }
+        }
+      }
+    },
+    "ScheduleRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "scheduler.amazonaws.com"
+              },
+              "Action": "sts:AssumeRole",
+              "Condition": {
+                "StringEquals": {
+                  "aws:SourceAccount": {
+                    "Ref": "AWS::AccountId"
+                  },
+                  "aws:SourceArn": {
+                    "Fn::Sub": "arn:aws:scheduler:${AWS::Region}:${AWS::AccountId}:schedule-group/default"
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "Policies": [
+          {
+            "PolicyName": "invoke-verifier",
+            "PolicyDocument": {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "lambda:InvokeFunction"
+                  ],
+                  "Resource": {
+                    "Fn::GetAtt": [
+                      "VerifierFunction",
+                      "Arn"
+                    ]
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "PollSchedule": {
+      "Type": "AWS::Scheduler::Schedule",
+      "Properties": {
+        "Name": {
+          "Fn::Sub": "aim-aws-verifier-${ConnectionId}"
+        },
+        "GroupName": "default",
+        "State": "ENABLED",
+        "ScheduleExpression": {
+          "Fn::If": [
+            "OneMinute",
+            "rate(1 minute)",
+            {
+              "Fn::Sub": "rate(${PollIntervalMinutes} minutes)"
+            }
+          ]
+        },
+        "FlexibleTimeWindow": {
+          "Mode": "OFF"
+        },
+        "Target": {
+          "Arn": {
+            "Fn::GetAtt": [
+              "VerifierFunction",
+              "Arn"
+            ]
+          },
+          "RoleArn": {
+            "Fn::GetAtt": [
+              "ScheduleRole",
+              "Arn"
+            ]
+          },
+          "RetryPolicy": {
+            "MaximumRetryAttempts": 0
+          }
+        }
+      }
+    }
+  }
+}
