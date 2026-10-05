@@ -3,7 +3,6 @@
 
 Dry-run is the default and makes no AWS/signing/publication calls. Publication
 requires a five-region manifest and existing smoke functions/identity/buckets.
-All subprocesses go through RTK; binary/SBOM outputs bypass output filtering.
 """
 import argparse
 import base64
@@ -25,7 +24,7 @@ IDENTITY = "https://github.com/aidotmarket/aim-data-gateway/.github/workflows/aw
 
 
 def run(*args, env=None, capture_stderr=False):
-    return subprocess.check_output(["rtk", "proxy", *map(str, args)], cwd=ROOT, env=env,
+    return subprocess.check_output(list(map(str, args)), cwd=ROOT, env=env,
                                    stderr=subprocess.PIPE if capture_stderr else None).decode().strip()
 
 

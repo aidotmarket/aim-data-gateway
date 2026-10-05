@@ -313,9 +313,18 @@ func TestRegionMemoryPollLimitsAndParameterOnlyUpdate(t *testing.T) {
 	}
 }
 
+func python3(t *testing.T) string {
+	t.Helper()
+	path, err := exec.LookPath("python3")
+	if err != nil {
+		t.Fatalf("deploy tests require python3 on PATH: %v", err)
+	}
+	return path
+}
+
 func compile(t *testing.T, source object, accepted bool) object {
 	t.Helper()
-	cmd := exec.Command("rtk", "proxy", "python3", "../scripts/aws-verifier-scope.py", "-")
+	cmd := exec.Command(python3(t), "../scripts/aws-verifier-scope.py", "-")
 	cmd.Stdin = strings.NewReader(encoded(source))
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
@@ -404,7 +413,7 @@ func TestScopeCompilerEnvironmentBoundary(t *testing.T) {
 }
 
 func TestReleaseOfflineContracts(t *testing.T) {
-	cmd := exec.Command("rtk", "proxy", "python3", "../scripts/aws-verifier-release_test.py")
+	cmd := exec.Command(python3(t), "../scripts/aws-verifier-release_test.py")
 	if b, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("release tests: %v\n%s", err, b)
 	}
@@ -426,7 +435,7 @@ func TestExactParameters(t *testing.T) {
 func matchesParameter(t *testing.T, name, candidate string) bool {
 	t.Helper()
 	pattern := template(t)["Parameters"].(object)[name].(object)["AllowedPattern"].(string)
-	cmd := exec.Command("rtk", "proxy", "python3", "-c", "import json,re,sys; p,s=json.load(sys.stdin); print(json.dumps(re.fullmatch(p,s) is not None))")
+	cmd := exec.Command(python3(t), "-c", "import json,re,sys; p,s=json.load(sys.stdin); print(json.dumps(re.fullmatch(p,s) is not None))")
 	cmd.Stdin = strings.NewReader(encoded([]string{pattern, candidate}))
 	b, err := cmd.CombinedOutput()
 	if err != nil {

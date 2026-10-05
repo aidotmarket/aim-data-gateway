@@ -23,35 +23,15 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
-      - name: Install checksum-pinned RTK without a shell bootstrap
-        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
-        with:
-          script: |
-            const fs = require('fs'), path = require('path'), crypto = require('crypto');
-            const response = await fetch('https://github.com/rtk-ai/rtk/releases/download/v0.34.3/rtk-x86_64-unknown-linux-musl.tar.gz');
-            if (!response.ok) throw new Error('RTK download failed');
-            const bytes = Buffer.from(await response.arrayBuffer());
-            if (crypto.createHash('sha256').update(bytes).digest('hex') !== 'a607c17bfdccc1d48dc94ca81cd3a545523329df6a378368fd175d8023425ea5') throw new Error('RTK checksum mismatch');
-            // This checksum-pinned archive has exactly one regular file, rtk.
-            const tar = require('zlib').gunzipSync(bytes);
-            const name = tar.subarray(0, 100).toString().replace(/\0.*$/, '');
-            const size = parseInt(tar.subarray(124, 136).toString().replace(/\0.*$/, '').trim(), 8);
-            if (name !== 'rtk' || tar[156] !== 48 || size !== 9406336) throw new Error('RTK archive layout mismatch');
-            const directory = path.join(process.env.RUNNER_TEMP, 'rtk');
-            fs.mkdirSync(directory);
-            fs.writeFileSync(path.join(directory, 'rtk'), tar.subarray(512, 512 + size), {mode: 0o755});
-            core.addPath(directory);
-      - name: Check RTK
-        run: rtk --version
       - name: Build twice and compare ZIP digests
         env:
           RELEASE_TAG: ${{ github.ref_name }}
           BUILD_VERSION: ${{ inputs.version }}
         run: |
-          rtk proxy python3 - <<'PY'
+          python3 - <<'PY'
           import os, subprocess
           version = os.environ['BUILD_VERSION'] or os.environ['RELEASE_TAG'].removeprefix('aws-verifier-v')
-          subprocess.run(['rtk', 'proxy', 'bash', 'scripts/aws-verifier-release.sh', '--version', version], check=True)
+          subprocess.run(['bash', 'scripts/aws-verifier-release.sh', '--version', version], check=True)
           PY
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
@@ -69,35 +49,15 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
-      - name: Install checksum-pinned RTK without a shell bootstrap
-        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
-        with:
-          script: |
-            const fs = require('fs'), path = require('path'), crypto = require('crypto');
-            const response = await fetch('https://github.com/rtk-ai/rtk/releases/download/v0.34.3/rtk-x86_64-unknown-linux-musl.tar.gz');
-            if (!response.ok) throw new Error('RTK download failed');
-            const bytes = Buffer.from(await response.arrayBuffer());
-            if (crypto.createHash('sha256').update(bytes).digest('hex') !== 'a607c17bfdccc1d48dc94ca81cd3a545523329df6a378368fd175d8023425ea5') throw new Error('RTK checksum mismatch');
-            // This checksum-pinned archive has exactly one regular file, rtk.
-            const tar = require('zlib').gunzipSync(bytes);
-            const name = tar.subarray(0, 100).toString().replace(/\0.*$/, '');
-            const size = parseInt(tar.subarray(124, 136).toString().replace(/\0.*$/, '').trim(), 8);
-            if (name !== 'rtk' || tar[156] !== 48 || size !== 9406336) throw new Error('RTK archive layout mismatch');
-            const directory = path.join(process.env.RUNNER_TEMP, 'rtk');
-            fs.mkdirSync(directory);
-            fs.writeFileSync(path.join(directory, 'rtk'), tar.subarray(512, 512 + size), {mode: 0o755});
-            core.addPath(directory);
-      - name: Check RTK
-        run: rtk --version
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: aws-verifier-build
           path: dist/aws-verifier/
       - name: Restore executable permission
-        run: rtk proxy chmod +x dist/aws-verifier/bootstrap
+        run: chmod +x dist/aws-verifier/bootstrap
       - name: Install checksum-pinned Syft, Grype and Cosign
         run: |
-          rtk proxy python3 - <<'PY'
+          python3 - <<'PY'
           import hashlib, os, pathlib, tarfile, urllib.request
           tools = pathlib.Path(os.environ['RUNNER_TEMP']) / 'aws-verifier-tools'
           tools.mkdir()
@@ -130,11 +90,11 @@ jobs:
           ARTIFACT_MANIFEST: ${{ vars.AWS_VERIFIER_ARTIFACT_MANIFEST }}
           AWS_PAGER: ''
         run: |
-          rtk proxy python3 - <<'PY'
+          python3 - <<'PY'
           import json, os, pathlib, subprocess
           path = pathlib.Path(os.environ['RUNNER_TEMP']) / 'aws-verifier-regions.json'
           path.write_text(json.dumps(json.loads(os.environ['ARTIFACT_MANIFEST'])))
-          subprocess.run(['rtk', 'proxy', 'bash', 'scripts/aws-verifier-release.sh', '--version',
+          subprocess.run(['bash', 'scripts/aws-verifier-release.sh', '--version',
                           os.environ['RELEASE_TAG'].removeprefix('aws-verifier-v'),
                           '--mode', 'publish-built', '--manifest', str(path)], check=True)
           PY

@@ -292,10 +292,10 @@ class ReleaseTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "immutable object version"):
                     release.upload(entries[0], identity[1], out / "bootstrap.zip")
 
-    def test_all_subprocesses_use_rtk(self):
+    def test_subprocesses_execute_commands_directly(self):
         with patch.object(release.subprocess, "check_output", return_value=b"ok") as command:
             self.assertEqual(release.run("go", "version"), "ok")
-            self.assertEqual(command.call_args.args[0], ["rtk", "proxy", "go", "version"])
+            self.assertEqual(command.call_args.args[0], ["go", "version"])
 
 
 if __name__ == "__main__":

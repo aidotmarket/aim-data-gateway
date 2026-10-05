@@ -15,10 +15,10 @@ pickup. A free probe traverses the source and incurs AWS compute cost.
 
 ## Build and publication
 
-An offline build requires the Go version in `go.mod`, Python 3 and RTK:
+An offline build requires the Go version in `go.mod` and Python 3:
 
 ```sh
-rtk proxy bash scripts/aws-verifier-release.sh --version 0.1.0 --mode dry-run
+bash scripts/aws-verifier-release.sh --version 0.1.0 --mode dry-run
 ```
 
 It independently builds linux/arm64 `bootstrap` twice with CGO disabled, no VCS
@@ -32,7 +32,7 @@ SBOM of that executable and scans fixable high/critical findings with Grype.
 
 Tag `aws-verifier-v<semver>` triggers `.github/workflows/aws-verifier-release.yml`.
 Manual dispatch performs only the double-build. The workflow uses GitHub's
-Ubuntu runner and installs checksum-pinned RTK without a shell bootstrap.
+Ubuntu runner with Python 3 available.
 Go is pinned by `go.mod`; Syft, Grype and Cosign use the gateway release's
 checksum-pinned versions. No runtime module is added.
 
@@ -104,7 +104,7 @@ union of the connection listings' pinned scope:
 ```
 
 ```sh
-rtk proxy python3 scripts/aws-verifier-scope.py scope.json
+python3 scripts/aws-verifier-scope.py scope.json
 ```
 
 Use its `parameters` without altering scope spellings. It resolves the actual
@@ -176,7 +176,7 @@ retain private evidence first. Delivery authority remains separate.
 
 ## Evidence mapping and remaining live proof
 
-`rtk go test ./deploy` includes:
+`go test ./deploy` includes:
 
 | Requirement (§3.2 / §7 2b) | Test |
 | --- | --- |
@@ -187,7 +187,7 @@ retain private evidence first. Delivery authority remains separate.
 | Key/prefix ARNs, 1–50 entries, 51/combined-count/size refusal before setup, wildcard/unrepresentable scope refusal | `TestScopeCompilerLimitsAndNoWildcardBroadening` |
 | Resolved environment accepts 4,095/4,096 bytes and refuses 4,097 with `aws_source_scope_unrepresentable` | `TestScopeCompilerEnvironmentBoundary` |
 | No extra command/URL/scope parameters | `TestExactParameters` |
-| ZIP layout/reproducibility metadata, ZIP-derived CodeSha256, regional manifest/smoke rejection, immutable versioned download equality, keyless sign/verify and RTK subprocesses | `TestReleaseOfflineContracts` (Python standard-library fixtures) |
+| ZIP layout/reproducibility metadata, ZIP-derived CodeSha256, regional manifest/smoke rejection, immutable versioned download equality, keyless sign/verify and direct subprocess execution | `TestReleaseOfflineContracts` (Python standard-library fixtures) |
 
 The real dry-run separately compiles the binary twice; mocked release tests do
 not substitute for publication proof. Gate 4 still requires the authorized real
