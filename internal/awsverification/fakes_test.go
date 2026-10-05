@@ -308,17 +308,16 @@ func newFixture(t *testing.T) *handlerFixture {
 	data := []byte("field\nRAW_CELL_MARKER\n")
 	f.s3 = &fakeS3{objects: map[string][]byte{"RAW_KEY_MARKER/data.csv": data}, liveETag: "RAW_ETAG_MARKER"}
 	c := Config{
-		Connection:  connectionID,
-		Bucket:      "fixture-bucket",
-		Region:      "eu-north-1",
-		Secret:      "secret",
-		Table:       "table",
-		Token:       base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{9}, 32)),
-		Version:     "0.3.0",
-		Digest:      "sha256:" + strings.Repeat("a", 64),
-		LogGroup:    "log-group",
-		Scope:       Scope{Prefixes: []string{"RAW_KEY_MARKER/"}},
-		PollMinutes: 15,
+		Connection: connectionID,
+		Bucket:     "fixture-bucket",
+		Region:     "eu-north-1",
+		Secret:     "secret",
+		Table:      "table",
+		Token:      base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{9}, 32)),
+		Version:    "0.3.0",
+		Digest:     "sha256:" + strings.Repeat("a", 64),
+		LogGroup:   "log-group",
+		Scope:      Scope{Prefixes: []string{"RAW_KEY_MARKER/"}},
 	}
 	f.h = Handler{
 		Config:  c,

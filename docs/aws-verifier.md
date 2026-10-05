@@ -4,7 +4,7 @@ The verifier runs in the seller account, outside a VPC by default. It polls only
 `https://api.ai.market`; its role reads the listed S3 objects/versions, its own
 secret/table and log streams. It cannot list a bucket. There is no marketplace
 principal, Lambda permission resource, layer or managed broad IAM policy.
-The binary is the 2b-1 candidate; this chunk adds packaging, not Go behavior.
+The binary includes the 2b-1 Gate 3 fold; polling is configured only in Scheduler.
 
 Supported regions: `eu-north-1`, `eu-west-1`, `eu-central-1`, `us-east-1`,
 `us-west-2`. The stack region must equal the connection/bucket region. Memory is
@@ -110,8 +110,8 @@ control or trimmed-edge spellings with `aws_source_scope_unrepresentable`.
 It also checks the resolved environment against [Lambda's 4 KiB serialized
 environment limit](https://docs.aws.amazon.com/lambda/latest/dg/troubleshooting-deployment.html),
 including escaping, key names and the maximum scanner-version length (128).
-This AWS constraint can refuse a scope that fits IAM's ceiling; the spec omits
-it, and the binary's environment contract cannot safely bypass it.
+This AWS constraint can refuse a scope that fits IAM's ceiling, as required by
+Amendment C-2.
 Native `CommaDelimitedList` cannot round-trip those spellings. Interior spaces
 and Unicode are retained. Never broaden scope to make it fit. Backend setup
 must integrate this preflight in 2c; CloudFormation alone does not enforce the
@@ -124,7 +124,12 @@ An SSE-KMS ARN adds only `kms:Decrypt` on that exact key, conditioned on
 need seller permission for the execution role; the template does not modify it.
 The empty secret uses AWS managed `aws/secretsmanager` encryption without a
 separate decrypt grant. The ledger is on demand with `pk` and `expires_at` TTL;
-the binary sets the 30-day expiry. Logs retain 30 days. Scheduler trusts only
+the binary sets the 30-day expiry. Logs retain 30 days. The execution role grants
+only `logs:CreateLogStream` and `logs:PutLogEvents` on this group's streams;
+CloudFormation creates the group, so no `logs:CreateLogGroup` grant is needed.
+The binary synchronously writes bounded audit lines to stdout, refusing on a
+failed or short write before source reads. Lambda delivers them to CloudWatch;
+the binary has no CloudWatch Logs client (Amendment C-1). Scheduler trusts only
 the seller account's regional `default` schedule group, as required by
 [AWS's SourceArn rules](https://docs.aws.amazon.com/scheduler/latest/UserGuide/cross-service-confused-deputy-prevention.html).
 
@@ -140,20 +145,21 @@ The ordinary token parameter is intentionally not `NoEcho`; AWS ignores URL
 prefill for NoEcho. It reaches only `AIM_AWS_REGISTRATION_TOKEN`, never Outputs
 or Metadata. It is visible to authorized seller `DescribeStacks` users and in
 browser history: a 256-bit token expires after 30 minutes, is single-use and
-connection/kind/hash-bound. A seller-account principal could win the initial
+connection/kind/hash-bound. The template and binary require exactly 32 bytes in
+canonical unpadded base64url (43 characters, including zero trailing padding bits).
+A seller-account principal could win the initial
 registration race. Check the displayed hash/time; remove and replace unexpected
 registrations with a fresh token. Expired tokens are never renewed. Never save
 the URL/token in marketplace logs, analytics, local storage or release evidence.
 Ready requires backend registration and a successful poll, not stack completion.
 
 Change only `PollIntervalMinutes` to 1, 5 or 15 through a normal stack update
-using previous values for other parameters. It changes the schedule expression
-and its matching function environment variable; function identity/code pins,
-IAM, scope and every other resolved property remain unchanged. Longer intervals
+using previous values for other parameters. It changes only the schedule
+expression; the entire function (code, environment, role, memory), IAM, scope
+and every other resolved property remain byte-identical (Amendment C-3).
+The binary does not read or validate a polling interval. Longer intervals
 reduce idle cost and add up to 15 minutes of pickup delay; signed consent expiry
-and the 1,920-second deadline from pickup still apply. Literal “function config
-unchanged” in §3.2 cannot include the polling environment variable if it is to
-reflect the selected rate; no binary config-name change is needed.
+and the 1,920-second deadline from pickup still apply.
 
 Optional seller-managed strict networking is separate: S3/DynamoDB gateway
 endpoints, Secrets Manager/KMS/Logs interface endpoints and allowlisted egress
@@ -170,9 +176,10 @@ retain private evidence first. Delivery authority remains separate.
 | --- | --- |
 | Exactly seven resources, pinned ZIP, runtime/architecture/limits, empty secret, ledger/TTL, explicit log dependency/retention | `TestExactResourcesAndRuntime` |
 | Exact Lambda/Scheduler trusts, seller group/account restrictions, all actions/scopes, no ListBucket/broad managed policy/marketplace principal, optional KMS condition, no payload/retries | `TestTrustActionsScopesAndKMS` |
-| Ordinary prefilled token reaches function only; Outputs/Metadata absence; exact environment parses with unchanged binary | `TestTokenPathAndBinaryConfigContract` |
+| Ordinary prefilled token reaches function only; Outputs/Metadata absence; canonical 32-byte token constraints match binary; exact environment parses | `TestTokenPathAndBinaryConfigContract` |
 | Supported regions/equality, memory defaults/max, fixed API, three rates/rejection and resolved resource diff for parameter-only updates | `TestRegionMemoryPollLimitsAndParameterOnlyUpdate` |
 | Key/prefix ARNs, 1–50 entries, 51/combined-count/size refusal before setup, wildcard/unrepresentable scope refusal | `TestScopeCompilerLimitsAndNoWildcardBroadening` |
+| Resolved environment accepts 4,095/4,096 bytes and refuses 4,097 with `aws_source_scope_unrepresentable` | `TestScopeCompilerEnvironmentBoundary` |
 | No extra command/URL/scope parameters | `TestExactParameters` |
 | ZIP layout/reproducibility metadata, ZIP-derived CodeSha256, regional manifest/smoke rejection, immutable versioned download equality, keyless sign/verify and RTK subprocesses | `TestReleaseOfflineContracts` (Python standard-library fixtures) |
 

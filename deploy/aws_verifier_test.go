@@ -2,6 +2,7 @@ package deploy
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -130,7 +131,7 @@ func parameters() object {
 		"AWS::Region": "eu-north-1", "AWS::AccountId": "123456789012",
 		"ConnectionId": "11111111-1111-1111-1111-111111111111", "Bucket": "seller-fixture", "BucketRegion": "eu-north-1",
 		"ReadKeys": []any{"exact.csv", "folder/é space.jsonl"}, "ReadPrefixes": []any{"workspace/approval/"},
-		"SseKmsKeyArn": "", "RegistrationToken": strings.Repeat("a", 43), "PollIntervalMinutes": 1, "MemorySize": 1769,
+		"SseKmsKeyArn": "", "RegistrationToken": base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{9}, 32)), "PollIntervalMinutes": 1, "MemorySize": 1769,
 		"ArtifactBucket": "public-eu-north-1", "ArtifactKey": "aws-verifier/1.0.0/" + strings.Repeat("a", 64) + "/bootstrap.zip",
 		"ArtifactObjectVersion": "immutable-version", "ExpectedCodeHash": "sha256:" + strings.Repeat("a", 64),
 		"ScannerVersion": "1.0.0", "ApiBaseUrl": "https://api.ai.market",
@@ -221,6 +222,8 @@ func TestTrustActionsScopesAndKMS(t *testing.T) {
 func TestTokenPathAndBinaryConfigContract(t *testing.T) {
 	v := template(t)
 	param := v["Parameters"].(object)["RegistrationToken"].(object)
+	equal(t, param["MinLength"], 43)
+	equal(t, param["MaxLength"], 43)
 	if _, ok := param["NoEcho"]; ok {
 		t.Fatal("quick-create cannot prefill NoEcho")
 	}
@@ -239,11 +242,11 @@ func TestTokenPathAndBinaryConfigContract(t *testing.T) {
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
-	want := strings.Fields("AIM_AWS_CONNECTION_ID AIM_AWS_BUCKET AIM_AWS_BUCKET_REGION AIM_AWS_READ_SCOPE AIM_AWS_SECRET_ID AIM_AWS_LEDGER_TABLE AIM_AWS_REGISTRATION_TOKEN AIM_AWS_SCANNER_VERSION AIM_AWS_IMAGE_DIGEST AIM_AWS_API_BASE_URL AIM_AWS_POLL_INTERVAL_MINUTES AIM_AWS_LOG_GROUP AIM_AWS_SSE_KMS_KEY_ARN")
+	want := strings.Fields("AIM_AWS_CONNECTION_ID AIM_AWS_BUCKET AIM_AWS_BUCKET_REGION AIM_AWS_READ_SCOPE AIM_AWS_SECRET_ID AIM_AWS_LEDGER_TABLE AIM_AWS_REGISTRATION_TOKEN AIM_AWS_SCANNER_VERSION AIM_AWS_IMAGE_DIGEST AIM_AWS_API_BASE_URL AIM_AWS_LOG_GROUP AIM_AWS_SSE_KMS_KEY_ARN")
 	sort.Strings(want)
 	equal(t, keys, want)
 	equal(t, env[av.EnvToken], parameters()["RegistrationToken"])
-	config, err := av.ParseConfig(func(k string) string {
+	get := func(k string) string {
 		if k == av.EnvMemory {
 			return "1769" // Lambda supplies this reserved variable; template must not set it.
 		}
@@ -251,9 +254,24 @@ func TestTokenPathAndBinaryConfigContract(t *testing.T) {
 			return ""
 		}
 		return fmt.Sprint(env[k])
-	})
+	}
+	config, err := av.ParseConfig(get)
 	if err != nil || len(config.Scope.Keys) != 2 || len(config.Scope.Prefixes) != 1 {
 		t.Fatal("template/binary configuration conflict", err)
+	}
+	// Canonical raw base64url for 32 bytes requires zero trailing padding bits.
+	pattern := regexp.MustCompile("^(?:" + param["AllowedPattern"].(string) + ")$")
+	token := parameters()["RegistrationToken"].(string)
+	candidates := []string{"", "invalid!", token + "=", base64.RawURLEncoding.EncodeToString(make([]byte, 31)), base64.RawURLEncoding.EncodeToString(make([]byte, 33))}
+	for _, last := range "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-" {
+		candidates = append(candidates, token[:42]+string(last))
+	}
+	for _, candidate := range candidates {
+		env[av.EnvToken] = candidate
+		_, err := av.ParseConfig(get)
+		if pattern.MatchString(candidate) != (err == nil) {
+			t.Fatalf("template/binary token validation differs for synthetic fixture %q", candidate)
+		}
 	}
 }
 
@@ -281,10 +299,9 @@ func TestRegionMemoryPollLimitsAndParameterOnlyUpdate(t *testing.T) {
 			want = "rate(1 minute)"
 		}
 		equal(t, props(after, "PollSchedule")["ScheduleExpression"], want)
-		// EnvPoll must change so registration/work uses the selected interval.
-		// Everything else in all seven resolved resources must remain byte-identical.
+		// The entire function (code, environment, role, memory), IAM and scope
+		// remain byte-identical; only the schedule expression may change.
 		props(after, "PollSchedule")["ScheduleExpression"] = props(before, "PollSchedule")["ScheduleExpression"]
-		props(after, "VerifierFunction")["Environment"].(object)["Variables"].(object)[av.EnvPoll] = 1
 		equal(t, after, before)
 	}
 	for _, invalid := range []int{0, 2, 10, 16, 60} {
@@ -366,6 +383,24 @@ func TestScopeCompilerLimitsAndNoWildcardBroadening(t *testing.T) {
 	// Count union, not each list separately.
 	source["keys"], source["prefixes"] = make([]string, 26), make([]string, 25)
 	compile(t, source, false)
+}
+
+func TestScopeCompilerEnvironmentBoundary(t *testing.T) {
+	source := object{"connection_id": parameters()["ConnectionId"], "bucket": "seller-fixture", "region": "eu-north-1",
+		"keys": []string{strings.Repeat("a", 1000), strings.Repeat("b", 1000), strings.Repeat("c", 1000), "d"}, "prefixes": []string{}}
+	base := compile(t, source, true)
+	size := int(base["environment_bytes_upper_bound"].(float64))
+	for _, target := range []int{4095, 4096, 4097} {
+		length := 1 + target - size
+		if length < 1 || length > 1024 {
+			t.Fatal("boundary fixture exceeds individual S3 key limit", length)
+		}
+		source["keys"].([]string)[3] = strings.Repeat("d", length)
+		result := compile(t, source, target <= 4096)
+		if target <= 4096 {
+			equal(t, result["environment_bytes_upper_bound"], target)
+		}
+	}
 }
 
 func TestReleaseOfflineContracts(t *testing.T) {

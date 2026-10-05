@@ -41,7 +41,9 @@
     },
     "RegistrationToken": {
       "Type": "String",
-      "AllowedPattern": "[A-Za-z0-9_-]{43}",
+      "MinLength": 43,
+      "MaxLength": 43,
+      "AllowedPattern": "[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]",
       "Description": "Single-use token, expires after 30 minutes; visible in seller stack parameters and browser history."
     },
     "PollIntervalMinutes": {
@@ -514,9 +516,6 @@
             },
             "AIM_AWS_API_BASE_URL": {
               "Ref": "ApiBaseUrl"
-            },
-            "AIM_AWS_POLL_INTERVAL_MINUTES": {
-              "Ref": "PollIntervalMinutes"
             },
             "AIM_AWS_LOG_GROUP": {
               "Ref": "LogGroup"

@@ -26,29 +26,12 @@ func configEnv() map[string]string {
 		EnvMemory:     "1769",
 	}
 }
-func TestConfigRatesRegionsAndScope(t *testing.T) {
-	for _, rate := range []string{
-		"",
-		"1",
-		"5",
-		"15",
-	} {
-		env := configEnv()
-		env[EnvPoll] = rate
-		if _, e := ParseConfig(func(k string) string {
-			return env[k]
-		}); e != nil {
-			t.Fatal(rate, e)
-		}
+func TestConfigRegionsAndScope(t *testing.T) {
+	env := configEnv()
+	if _, e := ParseConfig(func(k string) string { return env[k] }); e != nil {
+		t.Fatal(e)
 	}
 	for k, values := range map[string][]string{
-		EnvPoll: {
-			"0",
-			"2",
-			"10",
-			"16",
-			"-1",
-		},
 		EnvRegion: {"us-east-2", "cn-north-1", ""},
 		EnvAPI:    {"https://api.ai.market/", "http://api.ai.market", "https://other.example"},
 		EnvScope:  {`{"keys":["*"],"prefixes":[]}`, `{"keys":[],"prefixes":[""]}`, `{"keys":[],"prefixes":["ok"],"url":"evil"}`},
@@ -64,7 +47,7 @@ func TestConfigRatesRegionsAndScope(t *testing.T) {
 			}
 		}
 	}
-	env := configEnv()
+	env = configEnv()
 	scope := Scope{Keys: make([]string, 51), Prefixes: []string{}}
 	for i := range scope.Keys {
 		scope.Keys[i] = "key"
