@@ -3,10 +3,11 @@ package awsverification
 import (
 	"crypto/ed25519"
 	"encoding/base64"
-	"github.com/aidotmarket/aim-data-gateway/internal/wire"
-	core "github.com/aidotmarket/aim-data-gateway/verification"
 	"strings"
 	"time"
+
+	"github.com/aidotmarket/aim-data-gateway/internal/wire"
+	core "github.com/aidotmarket/aim-data-gateway/verification"
 )
 
 func terminal(j wire.ScanJob, code string, at time.Time) map[string]any {
@@ -48,5 +49,11 @@ func signReceipt(d map[string]any, key ed25519.PrivateKey, variant string) error
 	return nil
 }
 func reportBody(j wire.ScanJob, variant string, raw []byte) map[string]any {
-	return map[string]any{"op": "scan_report", "variant": variant, "runner_id": j.Envelope.RunnerID, "iid": j.Envelope.IID, "document_b64": base64.RawURLEncoding.EncodeToString(raw)}
+	return map[string]any{
+		"op":           "scan_report",
+		"variant":      variant,
+		"runner_id":    j.Envelope.RunnerID,
+		"iid":          j.Envelope.IID,
+		"document_b64": base64.RawURLEncoding.EncodeToString(raw),
+	}
 }

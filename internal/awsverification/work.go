@@ -3,11 +3,12 @@ package awsverification
 import (
 	"crypto/ed25519"
 	"encoding/json"
-	"github.com/aidotmarket/aim-data-gateway/internal/wire"
-	core "github.com/aidotmarket/aim-data-gateway/verification"
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/aidotmarket/aim-data-gateway/internal/wire"
+	core "github.com/aidotmarket/aim-data-gateway/verification"
 )
 
 var identifier = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,128}$`)
@@ -121,13 +122,37 @@ func VerifyWork(token string, keys map[string]ed25519.PublicKey, gateway, runner
 	if !uuid.MatchString(j.Text("verification_id")) || !identifier.MatchString(j.Text("quote_id")) || !identifier.MatchString(j.Text("idempotency_key")) || !hex64.MatchString(j.Text("deterministic_seed")) || !identifier.MatchString(version) {
 		return j, wire.ErrVerification
 	}
-	fixed := map[string]string{"requested_action": "start", "wire_manifest_version": "data-verification-wire-v1", "corpus_disclosure_version": "s1396-disclosure-v1", "payment_disclosure_version": "payment-disclosure-v1", "traversal_root": "registered_source_artifact", "traversal_order": "canonical_object_identity_ascending", "fingerprint_algorithm": "sha256", "canonicalization_version": "python-json-sort-compact-v1", "approximate_distinct_algorithm": "hll-sha256-v1", "output_contract": "data-verification-report-v1", "depth_class": "complete_standard_v1", "low_occupancy_behavior": "suppressed_low_occupancy", "row_count_algorithm_version": "exact-v1", "histogram_version": "fixed-buckets-v1", "numeric_bucket_version": "fixed-buckets-v1", "d6_schema_version": "d6-v1", "d6_sanitizer_policy_version": "nfkc-fixed-enum-v1"}
+	fixed := map[string]string{
+		"requested_action":               "start",
+		"wire_manifest_version":          "data-verification-wire-v1",
+		"corpus_disclosure_version":      "s1396-disclosure-v1",
+		"payment_disclosure_version":     "payment-disclosure-v1",
+		"traversal_root":                 "registered_source_artifact",
+		"traversal_order":                "canonical_object_identity_ascending",
+		"fingerprint_algorithm":          "sha256",
+		"canonicalization_version":       "python-json-sort-compact-v1",
+		"approximate_distinct_algorithm": "hll-sha256-v1",
+		"output_contract":                "data-verification-report-v1",
+		"depth_class":                    "complete_standard_v1",
+		"low_occupancy_behavior":         "suppressed_low_occupancy",
+		"row_count_algorithm_version":    "exact-v1",
+		"histogram_version":              "fixed-buckets-v1",
+		"numeric_bucket_version":         "fixed-buckets-v1",
+		"d6_schema_version":              "d6-v1",
+		"d6_sanitizer_policy_version":    "nfkc-fixed-enum-v1",
+	}
 	for k, v := range fixed {
 		if j.Text(k) != v {
 			return j, wire.ErrVerification
 		}
 	}
-	constants := map[string]string{"minimum_aggregate_occupancy": `10`, "field_contract": `["coverage","objects.object_id","objects.column_names","objects.column_types","objects.null_rate","objects.approx_distinct_count","objects.length_histograms","objects.numeric_range_buckets","objects.row_count","objects.row_count_method","fingerprint_hash"]`, "bucket_definitions": `{"numeric_boundaries":[-1000.0,-100.0,-10.0,0.0,10.0,100.0,1000.0],"string_length_upper_bounds":[0,1,4,8,16,32,64,128,256]}`, "hard_inference_budget": `{"max_input_tokens":8192,"max_output_tokens":1024,"model_request_count":1}`, "cancellation_signal": `{"cancelled":false,"kind":"signed_spec_flag"}`}
+	constants := map[string]string{
+		"minimum_aggregate_occupancy": `10`,
+		"field_contract":              `["coverage","objects.object_id","objects.column_names","objects.column_types","objects.null_rate","objects.approx_distinct_count","objects.length_histograms","objects.numeric_range_buckets","objects.row_count","objects.row_count_method","fingerprint_hash"]`,
+		"bucket_definitions":          `{"numeric_boundaries":[-1000.0,-100.0,-10.0,0.0,10.0,100.0,1000.0],"string_length_upper_bounds":[0,1,4,8,16,32,64,128,256]}`,
+		"hard_inference_budget":       `{"max_input_tokens":8192,"max_output_tokens":1024,"model_request_count":1}`,
+		"cancellation_signal":         `{"cancelled":false,"kind":"signed_spec_flag"}`,
+	}
 	for k, want := range constants {
 		b, e := core.Canonical(j.Payload[k])
 		if e != nil || string(b) != want {

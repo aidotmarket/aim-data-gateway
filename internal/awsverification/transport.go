@@ -11,13 +11,14 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"github.com/aidotmarket/aim-data-gateway/internal/wire"
-	core "github.com/aidotmarket/aim-data-gateway/verification"
 	"io"
 	"net"
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/aidotmarket/aim-data-gateway/internal/wire"
+	core "github.com/aidotmarket/aim-data-gateway/verification"
 )
 
 // Computed from the unmodified authoritative PEM bytes in testdata/tls.
@@ -46,7 +47,9 @@ func verifyTLS(s tls.ConnectionState) error {
 }
 func MarketplaceClient(audits ...Audit) *http.Client {
 	d := &net.Dialer{Timeout: 10 * time.Second}
-	return &http.Client{Timeout: 30 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return ErrRefused }, Transport: &http.Transport{
+	return &http.Client{Timeout: 30 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error {
+		return ErrRefused
+	}, Transport: &http.Transport{
 		Proxy: nil, TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12, ServerName: "api.ai.market", VerifyConnection: func(s tls.ConnectionState) error {
 			e := verifyTLS(s)
 			if errors.Is(e, ErrTLSPin) {
@@ -115,7 +118,18 @@ func (b HTTPBackend) request(ctx context.Context, s *Secret, method, path string
 		if b.Now != nil {
 			at = b.Now()
 		}
-		t, e := signJWS(s.Private, s.Receipt, "aim-verification-request+jwt", map[string]any{"runner_id": s.Runner, "kind": "aws", "connection_id": b.Config.Connection, "scanner_version": b.Config.Version, "image_digest": b.Config.Digest, "method": method, "path": path, "nonce": n, "iat": at.Unix(), "body_sha256": wire.Digest(body)})
+		t, e := signJWS(s.Private, s.Receipt, "aim-verification-request+jwt", map[string]any{
+			"runner_id":       s.Runner,
+			"kind":            "aws",
+			"connection_id":   b.Config.Connection,
+			"scanner_version": b.Config.Version,
+			"image_digest":    b.Config.Digest,
+			"method":          method,
+			"path":            path,
+			"nonce":           n,
+			"iat":             at.Unix(),
+			"body_sha256":     wire.Digest(body),
+		})
 		if e != nil || len(t) > 4096 {
 			return nil, ErrRefused
 		}

@@ -3,13 +3,14 @@ package awsverification
 import (
 	"crypto/ed25519"
 	"encoding/base64"
-	"github.com/aidotmarket/aim-data-gateway/internal/wire"
-	core "github.com/aidotmarket/aim-data-gateway/verification"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/aidotmarket/aim-data-gateway/internal/wire"
+	core "github.com/aidotmarket/aim-data-gateway/verification"
 )
 
 func resignWork(t *testing.T, token string, edit func(map[string]any)) string {
@@ -38,23 +39,43 @@ func editPayload(m map[string]any, edit func(map[string]any)) {
 }
 func TestAuthenticConsentAndPolicyRefusalsBeforeHEAD(t *testing.T) {
 	for name, edit := range map[string]func(map[string]any){
-		"unsigned_consent": func(m map[string]any) { delete(m, "owner_authorization_id") },
-		"unknown":          func(m map[string]any) { m["url"] = "RAW_MARKER" },
-		"null_consent":     func(m map[string]any) { m["owner_authorization_id"] = nil },
-		"wrong_source":     func(m map[string]any) { m["source_kind"] = "gateway_listing" },
-		"wrong_runner":     func(m map[string]any) { m["runner_id"] = connectionID },
-		"nonce":            func(m map[string]any) { m["nonce"] = "not-a-nonce" },
-		"policy":           func(m map[string]any) { m["minimum_aggregate_occupancy"] = 1 },
+		"unsigned_consent": func(m map[string]any) {
+			delete(m, "owner_authorization_id")
+		},
+		"unknown": func(m map[string]any) {
+			m["url"] = "RAW_MARKER"
+		},
+		"null_consent": func(m map[string]any) {
+			m["owner_authorization_id"] = nil
+		},
+		"wrong_source": func(m map[string]any) {
+			m["source_kind"] = "gateway_listing"
+		},
+		"wrong_runner": func(m map[string]any) {
+			m["runner_id"] = connectionID
+		},
+		"nonce": func(m map[string]any) {
+			m["nonce"] = "not-a-nonce"
+		},
+		"policy": func(m map[string]any) {
+			m["minimum_aggregate_occupancy"] = 1
+		},
 		"cancellation": func(m map[string]any) {
 			m["cancellation_signal"] = map[string]any{"kind": "signed_spec_flag", "cancelled": true}
 		},
-		"accepted_after_issue": func(m map[string]any) { m["accepted_at_utc"] = "2099-01-01T00:00:00Z" },
-		"wrong_platform":       func(m map[string]any) { m["platform_key_id"] = "other-key" },
+		"accepted_after_issue": func(m map[string]any) {
+			m["accepted_at_utc"] = "2099-01-01T00:00:00Z"
+		},
+		"wrong_platform": func(m map[string]any) {
+			m["platform_key_id"] = "other-key"
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			f := newFixture(t)
 			f.job(t, 1, "scan")
-			f.backend.work = resignWork(t, f.backend.work, func(m map[string]any) { editPayload(m, edit) })
+			f.backend.work = resignWork(t, f.backend.work, func(m map[string]any) {
+				editPayload(m, edit)
+			})
 			if f.h.Invoke(ctx) == nil {
 				t.Fatal("accepted bad consent")
 			}
@@ -78,7 +99,9 @@ func TestWorkClockSkewAndLifetimeBoundaries(t *testing.T) {
 	}
 	for _, hours := range []int{24, 25} {
 		token := resignWork(t, f.backend.work, func(m map[string]any) {
-			editPayload(m, func(p map[string]any) { p["expires_at_utc"] = timestamp(f.at.Add(time.Duration(hours) * time.Hour)) })
+			editPayload(m, func(p map[string]any) {
+				p["expires_at_utc"] = timestamp(f.at.Add(time.Duration(hours) * time.Hour))
+			})
 		})
 		_, e := VerifyWork(token, keys, runnerID, runnerID, f.h.Config.Version, f.at)
 		if (e == nil) != (hours == 24) {

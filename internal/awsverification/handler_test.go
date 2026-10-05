@@ -5,13 +5,14 @@ import (
 	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/json"
-	"github.com/aidotmarket/aim-data-gateway/internal/wire"
-	core "github.com/aidotmarket/aim-data-gateway/verification"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/aidotmarket/aim-data-gateway/internal/wire"
+	core "github.com/aidotmarket/aim-data-gateway/verification"
 )
 
 func TestCompleteScanReceiptPrivacyAndRedelivery(t *testing.T) {
@@ -26,7 +27,12 @@ func TestCompleteScanReceiptPrivacyAndRedelivery(t *testing.T) {
 				t.Fatal("no report")
 			}
 			body := f.backend.reports[0]
-			for _, marker := range []string{"RAW_CELL_MARKER", "RAW_KEY_MARKER", "RAW_ETAG_MARKER", "RAW_PROVIDER_MARKER"} {
+			for _, marker := range []string{
+				"RAW_CELL_MARKER",
+				"RAW_KEY_MARKER",
+				"RAW_ETAG_MARKER",
+				"RAW_PROVIDER_MARKER",
+			} {
 				if bytes.Contains(body, []byte(marker)) || strings.Contains(strings.Join(f.audit.events, ""), marker) {
 					t.Fatal("marker leaked")
 				}
@@ -193,7 +199,15 @@ func TestInterruptedInvocationEmitsTerminalAndLateReportsRefused(t *testing.T) {
 	}
 }
 func TestRefusalsPerformZeroWork(t *testing.T) {
-	for _, mode := range []string{"bad_signature", "expired", "ledger", "logs", "snapshot", "clock", "secret"} {
+	for _, mode := range []string{
+		"bad_signature",
+		"expired",
+		"ledger",
+		"logs",
+		"snapshot",
+		"clock",
+		"secret",
+	} {
 		t.Run(mode, func(t *testing.T) {
 			f := newFixture(t)
 			f.job(t, 1, "scan")

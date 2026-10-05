@@ -11,7 +11,6 @@ import (
 	"crypto/x509/pkix"
 	"encoding/hex"
 	"encoding/pem"
-	"github.com/aidotmarket/aim-data-gateway/internal/wire"
 	"io"
 	"math/big"
 	"net"
@@ -22,15 +21,25 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/aidotmarket/aim-data-gateway/internal/wire"
 )
 
 func TestAuthoritativeRootSPKI(t *testing.T) {
-	for name, want := range map[string]string{"x1": ISRG_ROOT_X1_SPKI_SHA256, "x2": ISRG_ROOT_X2_SPKI_SHA256, "yr": ISRG_ROOT_YR_SPKI_SHA256, "ye": ISRG_ROOT_YE_SPKI_SHA256} {
+	for name, want := range map[string]string{
+		"x1": ISRG_ROOT_X1_SPKI_SHA256,
+		"x2": ISRG_ROOT_X2_SPKI_SHA256,
+		"yr": ISRG_ROOT_YR_SPKI_SHA256,
+		"ye": ISRG_ROOT_YE_SPKI_SHA256,
+	} {
 		b, e := os.ReadFile("testdata/tls/" + name + ".pem")
 		if e != nil {
 			t.Fatal(e)
 		}
-		p, _ := pem.Decode(b)
+		p, rest := pem.Decode(b)
+		if p == nil || p.Type != "CERTIFICATE" || len(bytes.TrimSpace(rest)) != 0 {
+			t.Fatal(name, "invalid certificate fixture")
+		}
 		c, e := x509.ParseCertificate(p.Bytes)
 		if e != nil {
 			t.Fatal(e)
@@ -52,7 +61,17 @@ func cert(t *testing.T, parent *x509.Certificate, parentKey ed25519.PrivateKey, 
 		t.Fatal(e)
 	}
 	at := time.Now()
-	tmpl := &x509.Certificate{SerialNumber: big.NewInt(at.UnixNano()), Subject: pkix.Name{CommonName: hostname}, NotBefore: at.Add(-time.Hour), NotAfter: at.Add(time.Hour), BasicConstraintsValid: true, IsCA: ca, KeyUsage: x509.KeyUsageDigitalSignature, DNSNames: []string{hostname}, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}}
+	tmpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(at.UnixNano()),
+		Subject:               pkix.Name{CommonName: hostname},
+		NotBefore:             at.Add(-time.Hour),
+		NotAfter:              at.Add(time.Hour),
+		BasicConstraintsValid: true,
+		IsCA:                  ca,
+		KeyUsage:              x509.KeyUsageDigitalSignature,
+		DNSNames:              []string{hostname},
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+	}
 	if ca {
 		tmpl.KeyUsage |= x509.KeyUsageCertSign
 	}
@@ -71,7 +90,13 @@ func cert(t *testing.T, parent *x509.Certificate, parentKey ed25519.PrivateKey, 
 	return c, key, der
 }
 func TestTLSRefusalsSendZeroHTTPWork(t *testing.T) {
-	for _, mode := range []string{"self_signed", "wrong_issuer", "valid_other_CA", "hostname_substitution", "pin_mismatch"} {
+	for _, mode := range []string{
+		"self_signed",
+		"wrong_issuer",
+		"valid_other_CA",
+		"hostname_substitution",
+		"pin_mismatch",
+	} {
 		t.Run(mode, func(t *testing.T) {
 			ca, caKey, caDER := cert(t, nil, nil, true, "ISRG Root X1") // misleading issuer name cannot satisfy an SPKI pin
 			host := "api.ai.market"
@@ -93,7 +118,10 @@ func TestTLSRefusalsSendZeroHTTPWork(t *testing.T) {
 				pool.AddCert(ca)
 			}
 			var requests atomic.Int32
-			server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { requests.Add(1); io.WriteString(w, `{"work_jws":null}`) }))
+			server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requests.Add(1)
+				io.WriteString(w, `{"work_jws":null}`)
+			}))
 			server.TLS = &tls.Config{Certificates: []tls.Certificate{{Certificate: chain, PrivateKey: leafKey}}}
 			server.Config.ErrorLog = nil
 			server.StartTLS()
@@ -123,7 +151,9 @@ func TestTLSRefusalsSendZeroHTTPWork(t *testing.T) {
 
 type roundTrip func(*http.Request) (*http.Response, error)
 
-func (f roundTrip) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+func (f roundTrip) RoundTrip(r *http.Request) (*http.Response, error) {
+	return f(r)
+}
 func TestAuthBodiesLimitsRedirectAndFixedEgress(t *testing.T) {
 	f := newFixture(t)
 	s, e := Bootstrap(ctx, f.h.Config, f.h.Ledger, f.secrets, f.backend, f.at)
@@ -153,9 +183,16 @@ func TestAuthBodiesLimitsRedirectAndFixedEgress(t *testing.T) {
 			t.Fatal("auth binding wrong", e)
 		}
 		nonces = append(nonces, c.Nonce)
-		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(`{"work_jws":null}`)), Header: make(http.Header), Request: r}, nil
+		return &http.Response{
+			StatusCode: 200,
+			Body:       io.NopCloser(strings.NewReader(`{"work_jws":null}`)),
+			Header:     make(http.Header),
+			Request:    r,
+		}, nil
 	})}
-	b := HTTPBackend{Client: client, Config: f.h.Config, Now: func() time.Time { return f.at }}
+	b := HTTPBackend{Client: client, Config: f.h.Config, Now: func() time.Time {
+		return f.at
+	}}
 	for i := 0; i < 2; i++ {
 		if work, e := b.Work(ctx, s); e != nil || work != "" {
 			t.Fatal(e)
@@ -182,7 +219,12 @@ func TestAuthBodiesLimitsRedirectAndFixedEgress(t *testing.T) {
 	redirectClient := MarketplaceClient()
 	redirectClient.Transport = roundTrip(func(r *http.Request) (*http.Response, error) {
 		calls++
-		return &http.Response{StatusCode: 302, Header: http.Header{"Location": []string{"https://other.example/"}}, Body: io.NopCloser(bytes.NewReader(nil)), Request: r}, nil
+		return &http.Response{
+			StatusCode: 302,
+			Header:     http.Header{"Location": []string{"https://other.example/"}},
+			Body:       io.NopCloser(bytes.NewReader(nil)),
+			Request:    r,
+		}, nil
 	})
 	b.Client = redirectClient
 	if _, e = b.Work(ctx, s); e == nil || calls != 1 {

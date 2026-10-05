@@ -8,17 +8,18 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/aidotmarket/aim-data-gateway/internal/wire"
-	core "github.com/aidotmarket/aim-data-gateway/verification"
-	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
-	d "github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 	"os"
 	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/aidotmarket/aim-data-gateway/internal/wire"
+	core "github.com/aidotmarket/aim-data-gateway/verification"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
+	d "github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 )
 
 var ctx = context.Background()
@@ -41,8 +42,12 @@ type memoryDynamo struct {
 	conflicts int
 }
 
-func newDynamo() *memoryDynamo                { return &memoryDynamo{items: map[string]map[string]d.AttributeValue{}} }
-func pk(m map[string]d.AttributeValue) string { return m["pk"].(*d.AttributeValueMemberS).Value }
+func newDynamo() *memoryDynamo {
+	return &memoryDynamo{items: map[string]map[string]d.AttributeValue{}}
+}
+func pk(m map[string]d.AttributeValue) string {
+	return m["pk"].(*d.AttributeValueMemberS).Value
+}
 func cloneItem(m map[string]d.AttributeValue) map[string]d.AttributeValue {
 	if m == nil {
 		return nil
@@ -236,9 +241,25 @@ func (b *memoryBackend) Register(_ context.Context, raw []byte) (RegistrationAck
 		return RegistrationAck{}, ErrRefused
 	}
 	issued, _ := utc(m["registered_at_utc"].(string))
-	claims := map[string]any{"op": "scan_spec", "variant": "registered", "aud": runnerID, "iid": "88888888-8888-4888-8888-888888888888", "iat": issued.Unix(), "registration_nonce": m["registration_nonce"], "runner_id": runnerID, "receipt_key_id": receiptID, "scanner_version": m["scanner_version"], "image_digest": m["image_digest"]}
+	claims := map[string]any{
+		"op":                 "scan_spec",
+		"variant":            "registered",
+		"aud":                runnerID,
+		"iid":                "88888888-8888-4888-8888-888888888888",
+		"iat":                issued.Unix(),
+		"registration_nonce": m["registration_nonce"],
+		"runner_id":          runnerID,
+		"receipt_key_id":     receiptID,
+		"scanner_version":    m["scanner_version"],
+		"image_digest":       m["image_digest"],
+	}
 	token, _ := signJWS(platformPrivate, platformKey.KID, "aim-scan-runner-ack+jwt", claims)
-	b.ack = RegistrationAck{Runner: runnerID, Receipt: receiptID, Keys: []wire.Key{platformKey}, JWS: token}
+	b.ack = RegistrationAck{
+		Runner:  runnerID,
+		Receipt: receiptID,
+		Keys:    []wire.Key{platformKey},
+		JWS:     token,
+	}
 	b.consumed = true
 	if b.lostRegister {
 		return RegistrationAck{}, ErrRefused
@@ -277,11 +298,39 @@ type handlerFixture struct {
 
 func newFixture(t *testing.T) *handlerFixture {
 	t.Helper()
-	f := &handlerFixture{db: newDynamo(), secrets: &memorySecrets{}, backend: &memoryBackend{}, audit: &memoryAudit{}, at: time.Now().UTC().Truncate(time.Second)}
+	f := &handlerFixture{
+		db:      newDynamo(),
+		secrets: &memorySecrets{},
+		backend: &memoryBackend{},
+		audit:   &memoryAudit{},
+		at:      time.Now().UTC().Truncate(time.Second),
+	}
 	data := []byte("field\nRAW_CELL_MARKER\n")
 	f.s3 = &fakeS3{objects: map[string][]byte{"RAW_KEY_MARKER/data.csv": data}, liveETag: "RAW_ETAG_MARKER"}
-	c := Config{Connection: connectionID, Bucket: "fixture-bucket", Region: "eu-north-1", Secret: "secret", Table: "table", Token: base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{9}, 32)), Version: "0.3.0", Digest: "sha256:" + strings.Repeat("a", 64), LogGroup: "log-group", Scope: Scope{Prefixes: []string{"RAW_KEY_MARKER/"}}, PollMinutes: 15}
-	f.h = Handler{Config: c, Ledger: Ledger{Client: f.db, Table: c.Table}, Store: f.secrets, Backend: f.backend, Audit: f.audit, S3: f.s3, Now: func() time.Time { return f.at }}
+	c := Config{
+		Connection:  connectionID,
+		Bucket:      "fixture-bucket",
+		Region:      "eu-north-1",
+		Secret:      "secret",
+		Table:       "table",
+		Token:       base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{9}, 32)),
+		Version:     "0.3.0",
+		Digest:      "sha256:" + strings.Repeat("a", 64),
+		LogGroup:    "log-group",
+		Scope:       Scope{Prefixes: []string{"RAW_KEY_MARKER/"}},
+		PollMinutes: 15,
+	}
+	f.h = Handler{
+		Config:  c,
+		Ledger:  Ledger{Client: f.db, Table: c.Table},
+		Store:   f.secrets,
+		Backend: f.backend,
+		Audit:   f.audit,
+		S3:      f.s3,
+		Now: func() time.Time {
+			return f.at
+		},
+	}
 	return f
 }
 func (f *handlerFixture) job(t *testing.T, index int, variant string) wire.ScanJob {
@@ -318,10 +367,30 @@ func (f *handlerFixture) job(t *testing.T, index int, variant string) wire.ScanJ
 	payload["issued_at_utc"] = timestamp(f.at)
 	payload["expires_at_utc"] = timestamp(f.at.Add(time.Hour))
 	payload["runner_id"] = runnerID
-	snap := map[string]any{"snapshot_version": "verification-source-snapshot-v1", "source_kind": "s3_listing", "connection_id": connectionID, "bucket": f.h.Config.Bucket, "listing_id": payload["listing_id"], "listing_version_id": payload["listing_version_id"], "source_handle_id": payload["source_handle_id"], "members": []any{map[string]any{"provider": "aws", "key": "RAW_KEY_MARKER/data.csv", "etag": f.s3.liveETag, "size_bytes": len(f.s3.objects["RAW_KEY_MARKER/data.csv"]), "format": "csv"}}}
+	snap := map[string]any{
+		"snapshot_version":   "verification-source-snapshot-v1",
+		"source_kind":        "s3_listing",
+		"connection_id":      connectionID,
+		"bucket":             f.h.Config.Bucket,
+		"listing_id":         payload["listing_id"],
+		"listing_version_id": payload["listing_version_id"],
+		"source_handle_id":   payload["source_handle_id"],
+		"members": []any{map[string]any{
+			"provider":   "aws",
+			"key":        "RAW_KEY_MARKER/data.csv",
+			"etag":       f.s3.liveETag,
+			"size_bytes": len(f.s3.objects["RAW_KEY_MARKER/data.csv"]),
+			"format":     "csv",
+		}},
+	}
 	raw, _ = core.Canonical(snap)
 	payload["manifest_hash"] = wire.Digest(raw)
-	f.backend.snapshot, _ = signJWS(platformPrivate, platformKey.KID, "aim-scan-snapshot+jwt", map[string]any{"aud": runnerID, "runner_id": runnerID, "manifest_hash": wire.Digest(raw), "payload_b64": base64.RawURLEncoding.EncodeToString(raw)})
+	f.backend.snapshot, _ = signJWS(platformPrivate, platformKey.KID, "aim-scan-snapshot+jwt", map[string]any{
+		"aud":           runnerID,
+		"runner_id":     runnerID,
+		"manifest_hash": wire.Digest(raw),
+		"payload_b64":   base64.RawURLEncoding.EncodeToString(raw),
+	})
 	raw, _ = core.Canonical(payload)
 	v.Input["payload_b64"] = base64.RawURLEncoding.EncodeToString(raw)
 	v.Input["spec_hash"] = wire.Digest(raw)

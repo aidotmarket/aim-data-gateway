@@ -3,10 +3,11 @@ package awsverification
 import (
 	"crypto/ed25519"
 	"encoding/json"
-	"github.com/aidotmarket/aim-data-gateway/internal/wire"
-	core "github.com/aidotmarket/aim-data-gateway/verification"
 	"path"
 	"strings"
+
+	"github.com/aidotmarket/aim-data-gateway/internal/wire"
+	core "github.com/aidotmarket/aim-data-gateway/verification"
 )
 
 func Snapshot(token string, keys map[string]ed25519.PublicKey, j wire.ScanJob, c Config) ([]Object, error) {
@@ -28,7 +29,15 @@ func Snapshot(token string, keys map[string]ed25519.PublicKey, j wire.ScanJob, c
 	if e != nil {
 		return nil, ErrRefused
 	}
-	for k, v := range map[string]string{"snapshot_version": "verification-source-snapshot-v1", "source_kind": "s3_listing", "connection_id": c.Connection, "bucket": c.Bucket, "listing_id": j.Text("listing_id"), "listing_version_id": j.Text("listing_version_id"), "source_handle_id": j.Text("source_handle_id")} {
+	for k, v := range map[string]string{
+		"snapshot_version":   "verification-source-snapshot-v1",
+		"source_kind":        "s3_listing",
+		"connection_id":      c.Connection,
+		"bucket":             c.Bucket,
+		"listing_id":         j.Text("listing_id"),
+		"listing_version_id": j.Text("listing_version_id"),
+		"source_handle_id":   j.Text("source_handle_id"),
+	} {
 		if m[k] != v {
 			return nil, ErrRefused
 		}
@@ -73,7 +82,13 @@ func Snapshot(token string, keys map[string]ed25519.PublicKey, j wire.ScanJob, c
 		if o.Format != ext {
 			return nil, ErrRefused
 		}
-		objects = append(objects, Object{Key: o.Key, ETag: o.ETag, VersionID: o.Version, Size: o.Size, Format: o.Format})
+		objects = append(objects, Object{
+			Key:       o.Key,
+			ETag:      o.ETag,
+			VersionID: o.Version,
+			Size:      o.Size,
+			Format:    o.Format,
+		})
 	}
 	return objects, AdmitSize(objects)
 }

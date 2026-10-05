@@ -4,9 +4,10 @@ import (
 	"context"
 	"encoding/hex"
 	"errors"
+	"time"
+
 	"github.com/aidotmarket/aim-data-gateway/internal/wire"
 	core "github.com/aidotmarket/aim-data-gateway/verification"
-	"time"
 )
 
 type Audit interface {
@@ -192,7 +193,41 @@ func (c *collectedCommitments) ObjectID(m core.Member) string {
 	return c.Commitments.ObjectID(m)
 }
 func scanPolicy(j wire.ScanJob, c *collectedCommitments) core.Policy {
-	p := core.Policy{CanonicalizationVersion: "python-json-sort-compact-v1", RowCountAlgorithmVersion: "exact-v1", DistinctAlgorithmVersion: "hll-sha256-v1", HistogramVersion: "fixed-buckets-v1", NumericBucketVersion: "fixed-buckets-v1", MinimumAggregateOccupancy: 10, LengthBounds: []int{0, 1, 4, 8, 16, 32, 64, 128, 256}, NumericBoundaries: []float64{-1000, -100, -10, 0, 10, 100, 1000}, MaxMemoryBytes: 128 << 20, MaxRecordBytes: 16 << 20, MaxScalarBytes: 16 << 20, MaxColumns: 1000, MaxFactBytes: 32768, Deadline: AWS_VERIFY_DEADLINE_SECONDS * time.Second, Commitments: c}
+	p := core.Policy{
+		CanonicalizationVersion:   "python-json-sort-compact-v1",
+		RowCountAlgorithmVersion:  "exact-v1",
+		DistinctAlgorithmVersion:  "hll-sha256-v1",
+		HistogramVersion:          "fixed-buckets-v1",
+		NumericBucketVersion:      "fixed-buckets-v1",
+		MinimumAggregateOccupancy: 10,
+		LengthBounds: []int{
+			0,
+			1,
+			4,
+			8,
+			16,
+			32,
+			64,
+			128,
+			256,
+		},
+		NumericBoundaries: []float64{
+			-1000,
+			-100,
+			-10,
+			0,
+			10,
+			100,
+			1000,
+		},
+		MaxMemoryBytes: 128 << 20,
+		MaxRecordBytes: 16 << 20,
+		MaxScalarBytes: 16 << 20,
+		MaxColumns:     1000,
+		MaxFactBytes:   32768,
+		Deadline:       AWS_VERIFY_DEADLINE_SECONDS * time.Second,
+		Commitments:    c,
+	}
 	b, _ := hex.DecodeString(j.Text("deterministic_seed"))
 	copy(p.Seed[:], b)
 	return p
@@ -229,7 +264,33 @@ func (h Handler) scan(ctx context.Context, s *Secret, j wire.ScanJob, src *Sourc
 		if result.EstimatedMaxInputTokens == 0 {
 			result.EstimatedMaxInputTokens = 8192
 		}
-		document = map[string]any{"probe_id": j.Text("probe_id"), "spec_id": j.Text("spec_id"), "spec_hash": j.Envelope.SpecHash, "nonce_echo": j.Text("nonce"), "install_key_id": s.Receipt, "affected_file_ids": []string{}, "signature_algorithm": "Ed25519", "probe": map[string]any{"listing_id": j.Text("listing_id"), "source_handle_id": j.Text("source_handle_id"), "connector_type": "aws_s3_verifier", "connector_version": "aws_s3_verifier-v1", "owner_consent": true, "source_reachable": e == nil, "objects_discovered": len(src.Members()), "size_class": class, "supported_capabilities": []string{"complete_traversal", "deterministic_object_order", "fixed_bucket_aggregates", "exact_or_declared_estimated_row_counts"}, "estimated_max_input_tokens": result.EstimatedMaxInputTokens, "preview_requested": j.Preview()}}
+		document = map[string]any{
+			"probe_id":            j.Text("probe_id"),
+			"spec_id":             j.Text("spec_id"),
+			"spec_hash":           j.Envelope.SpecHash,
+			"nonce_echo":          j.Text("nonce"),
+			"install_key_id":      s.Receipt,
+			"affected_file_ids":   []string{},
+			"signature_algorithm": "Ed25519",
+			"probe": map[string]any{
+				"listing_id":         j.Text("listing_id"),
+				"source_handle_id":   j.Text("source_handle_id"),
+				"connector_type":     "aws_s3_verifier",
+				"connector_version":  "aws_s3_verifier-v1",
+				"owner_consent":      true,
+				"source_reachable":   e == nil,
+				"objects_discovered": len(src.Members()),
+				"size_class":         class,
+				"supported_capabilities": []string{
+					"complete_traversal",
+					"deterministic_object_order",
+					"fixed_bucket_aggregates",
+					"exact_or_declared_estimated_row_counts",
+				},
+				"estimated_max_input_tokens": result.EstimatedMaxInputTokens,
+				"preview_requested":          j.Preview(),
+			},
+		}
 	} else {
 		var f core.Facts
 		if e == nil {

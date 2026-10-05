@@ -47,7 +47,19 @@ type Config struct {
 }
 
 func ParseConfig(get func(string) string) (Config, error) {
-	c := Config{Connection: get(EnvConnection), Bucket: get(EnvBucket), Region: get(EnvRegion), Secret: get(EnvSecret), Table: get(EnvTable), Token: get(EnvToken), Version: get(EnvVersion), Digest: get(EnvDigest), LogGroup: get(EnvLogGroup), KMS: get(EnvKMS), PollMinutes: 1}
+	c := Config{
+		Connection:  get(EnvConnection),
+		Bucket:      get(EnvBucket),
+		Region:      get(EnvRegion),
+		Secret:      get(EnvSecret),
+		Table:       get(EnvTable),
+		Token:       get(EnvToken),
+		Version:     get(EnvVersion),
+		Digest:      get(EnvDigest),
+		LogGroup:    get(EnvLogGroup),
+		KMS:         get(EnvKMS),
+		PollMinutes: 1,
+	}
 	if json.Unmarshal([]byte(get(EnvScope)), &c.Scope) != nil {
 		return c, ErrRefused
 	}

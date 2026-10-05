@@ -4,13 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strconv"
+	"strings"
+	"time"
+
 	"github.com/aidotmarket/aim-data-gateway/internal/wire"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	d "github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
-	"strconv"
-	"strings"
-	"time"
 )
 
 type Dynamo interface {
@@ -58,7 +59,12 @@ func (l Ledger) Observe(ctx context.Context, at time.Time) error {
 			cond = "version = :old"
 			values = map[string]d.AttributeValue{":old": num(old)}
 		}
-		writes := []d.TransactWriteItem{{Put: &d.Put{TableName: aws.String(l.Table), Item: m, ConditionExpression: aws.String(cond), ExpressionAttributeValues: values}}}
+		writes := []d.TransactWriteItem{{Put: &d.Put{
+			TableName:                 aws.String(l.Table),
+			Item:                      m,
+			ConditionExpression:       aws.String(cond),
+			ExpressionAttributeValues: values,
+		}}}
 		_, e = l.Client.TransactWriteItems(ctx, &dynamodb.TransactWriteItemsInput{TransactItems: writes})
 		if e == nil {
 			return nil
@@ -67,9 +73,15 @@ func (l Ledger) Observe(ctx context.Context, at time.Time) error {
 	return ErrRefused
 }
 
-func str(s string) d.AttributeValue             { return &d.AttributeValueMemberS{Value: s} }
-func num(n int64) d.AttributeValue              { return &d.AttributeValueMemberN{Value: strconv.FormatInt(n, 10)} }
-func key(pk string) map[string]d.AttributeValue { return map[string]d.AttributeValue{"pk": str(pk)} }
+func str(s string) d.AttributeValue {
+	return &d.AttributeValueMemberS{Value: s}
+}
+func num(n int64) d.AttributeValue {
+	return &d.AttributeValueMemberN{Value: strconv.FormatInt(n, 10)}
+}
+func key(pk string) map[string]d.AttributeValue {
+	return map[string]d.AttributeValue{"pk": str(pk)}
+}
 func item(pk string, v any, at time.Time) (map[string]d.AttributeValue, error) {
 	b, e := json.Marshal(v)
 	if e != nil || len(b) > 300<<10 {
@@ -156,7 +168,12 @@ func (l Ledger) Admit(ctx context.Context, j wire.ScanJob, at time.Time, pickup 
 			cond = "version = :old"
 			values = map[string]d.AttributeValue{":old": num(previous)}
 		}
-		writes := []d.TransactWriteItem{{Put: &d.Put{TableName: aws.String(l.Table), Item: ci, ConditionExpression: aws.String(cond), ExpressionAttributeValues: values}}}
+		writes := []d.TransactWriteItem{{Put: &d.Put{
+			TableName:                 aws.String(l.Table),
+			Item:                      ci,
+			ConditionExpression:       aws.String(cond),
+			ExpressionAttributeValues: values,
+		}}}
 		for _, pk := range []string{"nonce#" + j.Text("nonce"), "authorization#" + j.Text("owner_authorization_id"), "spec#" + j.Text("spec_id")} {
 			var v any = map[string]string{"spec_hash": j.Envelope.SpecHash}
 			if pk == "spec#"+j.Text("spec_id") {
@@ -175,7 +192,13 @@ func (l Ledger) Admit(ctx context.Context, j wire.ScanJob, at time.Time, pickup 
 			}
 			writes = append(writes, d.TransactWriteItem{Put: &d.Put{TableName: aws.String(l.Table), Item: m, ConditionExpression: aws.String("attribute_not_exists(pk)")}})
 		}
-		writes = append(writes, d.TransactWriteItem{Update: &d.Update{TableName: aws.String(l.Table), Key: key("daily#" + j.Text("listing_id") + "#" + at.UTC().Format("2006-01-02")), UpdateExpression: aws.String("SET expires_at = :ttl ADD accepted_count :one"), ConditionExpression: aws.String("attribute_not_exists(accepted_count) OR accepted_count < :ten"), ExpressionAttributeValues: map[string]d.AttributeValue{":ttl": num(at.Add(30 * 24 * time.Hour).Unix()), ":one": num(1), ":ten": num(10)}}})
+		writes = append(writes, d.TransactWriteItem{Update: &d.Update{
+			TableName:                 aws.String(l.Table),
+			Key:                       key("daily#" + j.Text("listing_id") + "#" + at.UTC().Format("2006-01-02")),
+			UpdateExpression:          aws.String("SET expires_at = :ttl ADD accepted_count :one"),
+			ConditionExpression:       aws.String("attribute_not_exists(accepted_count) OR accepted_count < :ten"),
+			ExpressionAttributeValues: map[string]d.AttributeValue{":ttl": num(at.Add(30 * 24 * time.Hour).Unix()), ":one": num(1), ":ten": num(10)},
+		}})
 		_, e = l.Client.TransactWriteItems(ctx, &dynamodb.TransactWriteItemsInput{TransactItems: writes})
 		if e == nil {
 			return true, nil
@@ -212,7 +235,12 @@ func (l Ledger) Commit(ctx context.Context, r Record, body []byte, at time.Time)
 	}
 	// A late/interrupted writer cannot replace a settled descriptor.
 	m["state"] = str("committed")
-	_, e = l.Client.PutItem(ctx, &dynamodb.PutItemInput{TableName: aws.String(l.Table), Item: m, ConditionExpression: aws.String("attribute_exists(pk) AND attribute_not_exists(#state)"), ExpressionAttributeNames: map[string]string{"#state": "state"}})
+	_, e = l.Client.PutItem(ctx, &dynamodb.PutItemInput{
+		TableName:                aws.String(l.Table),
+		Item:                     m,
+		ConditionExpression:      aws.String("attribute_exists(pk) AND attribute_not_exists(#state)"),
+		ExpressionAttributeNames: map[string]string{"#state": "state"},
+	})
 	if e != nil {
 		return ErrRefused
 	}
@@ -258,12 +286,23 @@ func (l Ledger) Settle(ctx context.Context, r Record, at time.Time, state string
 	}
 	ri["state"] = str(state)
 	writes := []d.TransactWriteItem{
-		{Put: &d.Put{TableName: aws.String(l.Table), Item: ci, ConditionExpression: aws.String("version = :old"), ExpressionAttributeValues: map[string]d.AttributeValue{":old": num(old)}}},
+		{Put: &d.Put{
+			TableName:                 aws.String(l.Table),
+			Item:                      ci,
+			ConditionExpression:       aws.String("version = :old"),
+			ExpressionAttributeValues: map[string]d.AttributeValue{":old": num(old)},
+		}},
 		{Put: &d.Put{TableName: aws.String(l.Table), Item: ri}},
 	}
 	if state == "reported" {
 		for i := 0; i < r.Chunks; i++ {
-			writes = append(writes, d.TransactWriteItem{Update: &d.Update{TableName: aws.String(l.Table), Key: key(fmt.Sprintf("outbox#%s#%s#%d", r.Job.Text("spec_id"), r.Hash, i)), UpdateExpression: aws.String("SET expires_at = :ttl"), ConditionExpression: aws.String("attribute_exists(pk)"), ExpressionAttributeValues: map[string]d.AttributeValue{":ttl": num(at.Add(30 * 24 * time.Hour).Unix())}}})
+			writes = append(writes, d.TransactWriteItem{Update: &d.Update{
+				TableName:                 aws.String(l.Table),
+				Key:                       key(fmt.Sprintf("outbox#%s#%s#%d", r.Job.Text("spec_id"), r.Hash, i)),
+				UpdateExpression:          aws.String("SET expires_at = :ttl"),
+				ConditionExpression:       aws.String("attribute_exists(pk)"),
+				ExpressionAttributeValues: map[string]d.AttributeValue{":ttl": num(at.Add(30 * 24 * time.Hour).Unix())},
+			}})
 		}
 	}
 	_, e = l.Client.TransactWriteItems(ctx, &dynamodb.TransactWriteItemsInput{TransactItems: writes})

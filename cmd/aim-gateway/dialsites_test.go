@@ -117,6 +117,10 @@ func TestDialSites(t *testing.T) {
 	}
 	sort.Strings(got)
 	want := []string{
+		// Lambda SDK transport: S3, DynamoDB and Secrets Manager in the configured
+		// supported region; runtime credentials only, no proxy or redirects.
+		"cmd/aim-aws-verifier/main.go:handler:http.Client",
+		"cmd/aim-aws-verifier/main.go:handler:http.Transport",
 		// Loopback health request.
 		"cmd/aim-gateway/main.go:execute:client.Get",
 		// Loopback health client construction.
@@ -125,6 +129,15 @@ func TestDialSites(t *testing.T) {
 		"cmd/aim-gateway/main.go:execute:http.Client",
 		// Loopback health transport construction.
 		"cmd/aim-gateway/main.go:execute:http.Transport",
+		// Keep repository-wide review: AWS uses a separate fixed marketplace
+		// destination with normal TLS plus root SPKI pins; logs use stdout only.
+		"internal/awsverification/transport.go:<package>:http.Client",
+		"internal/awsverification/transport.go:MarketplaceClient:d.DialContext",
+		"internal/awsverification/transport.go:MarketplaceClient:http.Client",
+		"internal/awsverification/transport.go:MarketplaceClient:http.Client",
+		"internal/awsverification/transport.go:MarketplaceClient:http.Transport",
+		"internal/awsverification/transport.go:MarketplaceClient:net.Dialer",
+		"internal/awsverification/transport.go:request:b.Client.Do",
 		// Canary TCP probe.
 		"internal/canary/canary.go:Run:d.DialContext",
 		// Canary DNS resolver.

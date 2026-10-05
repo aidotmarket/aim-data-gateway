@@ -4,14 +4,20 @@ import (
 	"bytes"
 	"crypto/ed25519"
 	"encoding/base64"
-	"github.com/aidotmarket/aim-data-gateway/internal/wire"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/aidotmarket/aim-data-gateway/internal/wire"
 )
 
 func TestRegistrationExpiredConsumedAndExactRetry(t *testing.T) {
-	for _, mode := range []string{"expired", "consumed", "lost_reply", "crash_binding"} {
+	for _, mode := range []string{
+		"expired",
+		"consumed",
+		"lost_reply",
+		"crash_binding",
+	} {
 		t.Run(mode, func(t *testing.T) {
 			f := newFixture(t)
 			switch mode {
@@ -71,7 +77,10 @@ func TestBootstrapCrashAndFirstStartRace(t *testing.T) {
 	var wg sync.WaitGroup
 	for i := 0; i < 10; i++ {
 		wg.Add(1)
-		go func() { defer wg.Done(); Bootstrap(ctx, f.h.Config, f.h.Ledger, f.secrets, f.backend, f.at) }()
+		go func() {
+			defer wg.Done()
+			Bootstrap(ctx, f.h.Config, f.h.Ledger, f.secrets, f.backend, f.at)
+		}()
 	}
 	wg.Wait()
 	if f.secrets.saves != 1 || len(f.backend.registered) != 0 {
@@ -86,7 +95,13 @@ func TestSignedRotationOverlapAndWrongClassRefusal(t *testing.T) {
 	}
 	newPrivate := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0x43}, 32))
 	newKey := wire.Key{KID: "new-scan-key", Alg: "EdDSA", Key: base64.RawURLEncoding.EncodeToString(newPrivate.Public().(ed25519.PublicKey))}
-	claims := map[string]any{"op": "key_rotation", "aud": runnerID, "iid": "88888888-8888-4888-8888-888888888888", "iat": f.at.Unix(), "keys": []wire.Key{newKey}}
+	claims := map[string]any{
+		"op":   "key_rotation",
+		"aud":  runnerID,
+		"iid":  "88888888-8888-4888-8888-888888888888",
+		"iat":  f.at.Unix(),
+		"keys": []wire.Key{newKey},
+	}
 	token, _ := signJWS(newPrivate, newKey.KID, "aim-keys+jwt", claims)
 	if Rotate(ctx, f.secrets, s, token, f.at) == nil {
 		t.Fatal("untrusted/wrong class rotation")

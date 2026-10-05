@@ -6,9 +6,10 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"time"
+
 	"github.com/aidotmarket/aim-data-gateway/internal/wire"
 	core "github.com/aidotmarket/aim-data-gateway/verification"
-	"time"
 )
 
 type Pin struct {
@@ -81,7 +82,12 @@ func Bootstrap(ctx context.Context, c Config, l Ledger, store SecretStore, backe
 		if e != nil {
 			return nil, ErrRefused
 		}
-		s = &Secret{Private: priv, Version: c.Version, Digest: c.Digest, Connection: c.Connection}
+		s = &Secret{
+			Private:    priv,
+			Version:    c.Version,
+			Digest:     c.Digest,
+			Connection: c.Connection,
+		}
 		if _, e = rand.Read(s.Commitment[:]); e != nil {
 			return nil, ErrRefused
 		}
@@ -89,7 +95,16 @@ func Bootstrap(ctx context.Context, c Config, l Ledger, store SecretStore, backe
 		if e != nil {
 			return nil, ErrRefused
 		}
-		m := map[string]any{"registration_token": c.Token, "connection_id": c.Connection, "kind": "aws", "receipt_public_key": base64.RawURLEncoding.EncodeToString(priv.Public().(ed25519.PublicKey)), "scanner_version": c.Version, "image_digest": c.Digest, "registration_nonce": s.Nonce, "registered_at_utc": timestamp(at)}
+		m := map[string]any{
+			"registration_token": c.Token,
+			"connection_id":      c.Connection,
+			"kind":               "aws",
+			"receipt_public_key": base64.RawURLEncoding.EncodeToString(priv.Public().(ed25519.PublicKey)),
+			"scanner_version":    c.Version,
+			"image_digest":       c.Digest,
+			"registration_nonce": s.Nonce,
+			"registered_at_utc":  timestamp(at),
+		}
 		b, e := core.Canonical(m)
 		if e != nil {
 			return nil, ErrRefused

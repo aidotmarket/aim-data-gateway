@@ -3,8 +3,9 @@ package main
 import (
 	"context"
 	"errors"
-	av "github.com/aidotmarket/aim-data-gateway/internal/awsverification"
 	"testing"
+
+	av "github.com/aidotmarket/aim-data-gateway/internal/awsverification"
 )
 
 func TestInvalidLambdaConfigRefusesBeforeAnyService(t *testing.T) {

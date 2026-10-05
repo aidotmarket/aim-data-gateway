@@ -75,12 +75,45 @@ func (f *fakeS3) Get(ctx context.Context, r Request) (io.ReadCloser, error) {
 	return io.NopCloser(bytes.NewReader(data)), nil
 }
 func policy() verification.Policy {
-	return verification.Policy{CanonicalizationVersion: "python-json-sort-compact-v1", RowCountAlgorithmVersion: "exact-v1", DistinctAlgorithmVersion: "hll-sha256-v1", HistogramVersion: "fixed-buckets-v1", NumericBucketVersion: "fixed-buckets-v1", MinimumAggregateOccupancy: 10, LengthBounds: []int{0, 1, 4, 8, 16, 32, 64, 128, 256}, NumericBoundaries: []float64{-1000, -100, -10, 0, 10, 100, 1000}, Commitments: Commitments{Bucket: "fixture", ManifestHash: strings.Repeat("a", 64), Key: [32]byte(bytes.Repeat([]byte{99}, 32))}}
+	return verification.Policy{
+		CanonicalizationVersion:   "python-json-sort-compact-v1",
+		RowCountAlgorithmVersion:  "exact-v1",
+		DistinctAlgorithmVersion:  "hll-sha256-v1",
+		HistogramVersion:          "fixed-buckets-v1",
+		NumericBucketVersion:      "fixed-buckets-v1",
+		MinimumAggregateOccupancy: 10,
+		LengthBounds: []int{
+			0,
+			1,
+			4,
+			8,
+			16,
+			32,
+			64,
+			128,
+			256,
+		},
+		NumericBoundaries: []float64{
+			-1000,
+			-100,
+			-10,
+			0,
+			10,
+			100,
+			1000,
+		},
+		Commitments: Commitments{Bucket: "fixture", ManifestHash: strings.Repeat("a", 64), Key: [32]byte(bytes.Repeat([]byte{99}, 32))},
+	}
 }
 func fixture(t *testing.T, data []byte, format string) (*Source, *fakeS3) {
 	t.Helper()
 	f := &fakeS3{objects: map[string][]byte{"e\u0301." + format: data}}
-	s, err := NewSource(f, "fixture", []Object{{Key: "e\u0301." + format, ETag: "etag", Size: int64(len(data)), Format: format}})
+	s, err := NewSource(f, "fixture", []Object{{
+		Key:    "e\u0301." + format,
+		ETag:   "etag",
+		Size:   int64(len(data)),
+		Format: format,
+	}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -92,7 +125,13 @@ func TestIdentityAndAdmission(t *testing.T) {
 	if a != b {
 		t.Fatal("NFC")
 	}
-	for _, pair := range [][2]string{{"", "pin"}, {"key", ""}, {"a\x00b", "pin"}, {"key", "p\x00in"}, {"\xff", "pin"}} {
+	for _, pair := range [][2]string{
+		{"", "pin"},
+		{"key", ""},
+		{"a\x00b", "pin"},
+		{"key", "p\x00in"},
+		{"\xff", "pin"},
+	} {
 		if _, err := Identity(pair[0], pair[1]); err == nil {
 			t.Fatal(pair)
 		}
@@ -277,7 +316,9 @@ func TestConcurrentRangeCloseAndBoundaries(t *testing.T) {
 			}
 		})
 	}
-	wg.Go(func() { _ = at.Close() })
+	wg.Go(func() {
+		_ = at.Close()
+	})
 	wg.Wait()
 	if at.(*reader).cache != nil {
 		t.Fatal("cache retained")

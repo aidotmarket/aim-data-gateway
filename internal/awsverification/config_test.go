@@ -3,27 +3,61 @@ package awsverification
 import (
 	"bytes"
 	"encoding/json"
-	"github.com/aidotmarket/aim-data-gateway/internal/wire"
 	"strings"
 	"testing"
+
+	"github.com/aidotmarket/aim-data-gateway/internal/wire"
 )
 
 func configEnv() map[string]string {
-	return map[string]string{EnvConnection: connectionID, EnvBucket: "fixture-bucket", EnvRegion: "eu-north-1", EnvScope: `{"keys":[],"prefixes":["workspace/approval/"]}`, EnvSecret: "secret", EnvTable: "table", EnvVersion: "0.3.0", EnvDigest: "sha256:" + strings.Repeat("a", 64), EnvAPI: APIBaseURL, EnvLogGroup: "group", EnvMemory: "1769"}
+	return map[string]string{
+		EnvConnection: connectionID,
+		EnvBucket:     "fixture-bucket",
+		EnvRegion:     "eu-north-1",
+		EnvScope:      `{"keys":[],"prefixes":["workspace/approval/"]}`,
+		EnvSecret:     "secret",
+		EnvTable:      "table",
+		EnvVersion:    "0.3.0",
+		EnvDigest:     "sha256:" + strings.Repeat("a", 64),
+		EnvAPI:        APIBaseURL,
+		EnvLogGroup:   "group",
+		EnvMemory:     "1769",
+	}
 }
 func TestConfigRatesRegionsAndScope(t *testing.T) {
-	for _, rate := range []string{"", "1", "5", "15"} {
+	for _, rate := range []string{
+		"",
+		"1",
+		"5",
+		"15",
+	} {
 		env := configEnv()
 		env[EnvPoll] = rate
-		if _, e := ParseConfig(func(k string) string { return env[k] }); e != nil {
+		if _, e := ParseConfig(func(k string) string {
+			return env[k]
+		}); e != nil {
 			t.Fatal(rate, e)
 		}
 	}
-	for k, values := range map[string][]string{EnvPoll: {"0", "2", "10", "16", "-1"}, EnvRegion: {"us-east-2", "cn-north-1", ""}, EnvAPI: {"https://api.ai.market/", "http://api.ai.market", "https://other.example"}, EnvScope: {`{"keys":["*"],"prefixes":[]}`, `{"keys":[],"prefixes":[""]}`, `{"keys":[],"prefixes":["ok"],"url":"evil"}`}, EnvMemory: {"128", "3009"}} {
+	for k, values := range map[string][]string{
+		EnvPoll: {
+			"0",
+			"2",
+			"10",
+			"16",
+			"-1",
+		},
+		EnvRegion: {"us-east-2", "cn-north-1", ""},
+		EnvAPI:    {"https://api.ai.market/", "http://api.ai.market", "https://other.example"},
+		EnvScope:  {`{"keys":["*"],"prefixes":[]}`, `{"keys":[],"prefixes":[""]}`, `{"keys":[],"prefixes":["ok"],"url":"evil"}`},
+		EnvMemory: {"128", "3009"},
+	} {
 		for _, v := range values {
 			env := configEnv()
 			env[k] = v
-			if _, e := ParseConfig(func(k string) string { return env[k] }); e == nil {
+			if _, e := ParseConfig(func(k string) string {
+				return env[k]
+			}); e == nil {
 				t.Fatal("bad config allowed", k, v)
 			}
 		}
@@ -35,7 +69,9 @@ func TestConfigRatesRegionsAndScope(t *testing.T) {
 	}
 	b, _ := json.Marshal(scope)
 	env[EnvScope] = string(b)
-	if _, e := ParseConfig(func(k string) string { return env[k] }); e == nil {
+	if _, e := ParseConfig(func(k string) string {
+		return env[k]
+	}); e == nil {
 		t.Fatal("scope ceiling")
 	}
 	c := Config{Scope: Scope{Keys: []string{"exact.csv"}, Prefixes: []string{"workspace/approval/"}}}

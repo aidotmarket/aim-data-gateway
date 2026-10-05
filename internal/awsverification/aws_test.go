@@ -3,8 +3,14 @@ package awsverification
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"time"
+
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/aws/retry"
 	"github.com/aws/aws-sdk-go-v2/credentials"
@@ -12,12 +18,6 @@ import (
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/aws/aws-sdk-go-v2/service/secretsmanager"
 	sm "github.com/aws/aws-sdk-go-v2/service/secretsmanager/types"
-	"io"
-	"net/http"
-	"net/http/httptest"
-	"strings"
-	"testing"
-	"time"
 )
 
 type fakeSecretsAPI struct {
@@ -89,7 +89,18 @@ func (s *fakeS3API) GetObject(_ context.Context, i *s3.GetObjectInput, _ ...func
 func TestSDKPinAdapterAndKMS(t *testing.T) {
 	api := &fakeS3API{output: s3.HeadObjectOutput{ContentLength: aws.Int64(4), ETag: aws.String(`"etag"`), VersionId: aws.String("version")}}
 	client := S3Client{Client: api}
-	for _, r := range []Request{{Bucket: "bucket", Key: "key", VersionID: "version", End: -1}, {Bucket: "bucket", Key: "key", IfMatch: `"etag"`, Start: 1, End: 3}} {
+	for _, r := range []Request{{
+		Bucket:    "bucket",
+		Key:       "key",
+		VersionID: "version",
+		End:       -1,
+	}, {
+		Bucket:  "bucket",
+		Key:     "key",
+		IfMatch: `"etag"`,
+		Start:   1,
+		End:     3,
+	}} {
 		h, e := client.Head(ctx, r)
 		if e != nil || h.ETag != "etag" || h.Size != 4 {
 			t.Fatal(h, e)
@@ -111,7 +122,12 @@ func TestSDKPinAdapterAndKMS(t *testing.T) {
 	}
 	api.output.ServerSideEncryption = s3types.ServerSideEncryptionAwsKms
 	api.output.SSEKMSKeyId = aws.String("arn:aws:kms:eu-north-1:123456789012:key/abc")
-	r := Request{Bucket: "bucket", Key: "key", VersionID: "version", End: -1}
+	r := Request{
+		Bucket:    "bucket",
+		Key:       "key",
+		VersionID: "version",
+		End:       -1,
+	}
 	if _, e := client.Head(ctx, r); e == nil {
 		t.Fatal("missing KMS grant allowed")
 	}
@@ -147,9 +163,25 @@ func TestRealSDKRetriesPreserveVersionAndETag(t *testing.T) {
 				io.WriteString(w, "ata")
 			}))
 			defer server.Close()
-			api := s3.New(s3.Options{Region: "eu-north-1", Credentials: credentials.NewStaticCredentialsProvider("test", "test", ""), BaseEndpoint: aws.String(server.URL), UsePathStyle: true, HTTPClient: server.Client(), Retryer: retry.NewStandard(func(o *retry.StandardOptions) { o.MaxAttempts = 2; o.MaxBackoff = time.Millisecond })})
+			api := s3.New(s3.Options{
+				Region:       "eu-north-1",
+				Credentials:  credentials.NewStaticCredentialsProvider("test", "test", ""),
+				BaseEndpoint: aws.String(server.URL),
+				UsePathStyle: true,
+				HTTPClient:   server.Client(),
+				Retryer: retry.NewStandard(func(o *retry.StandardOptions) {
+					o.MaxAttempts = 2
+					o.MaxBackoff = time.Millisecond
+				}),
+			})
 			c := S3Client{Client: api}
-			r := Request{Bucket: "bucket", Key: "key", VersionID: version, Start: 1, End: 3}
+			r := Request{
+				Bucket:    "bucket",
+				Key:       "key",
+				VersionID: version,
+				Start:     1,
+				End:       3,
+			}
 			if version == "" {
 				r.IfMatch = `"pin"`
 			}
@@ -163,36 +195,5 @@ func TestRealSDKRetriesPreserveVersionAndETag(t *testing.T) {
 				t.Fatal("retry", attempts, e)
 			}
 		})
-	}
-}
-func TestLogsSignedAckAndProviderErrorsNeverLeak(t *testing.T) {
-	var calls []string
-	client := &http.Client{Transport: roundTrip(func(r *http.Request) (*http.Response, error) {
-		if r.URL.Host != "logs.eu-north-1.amazonaws.com" || !strings.HasPrefix(r.Header.Get("Authorization"), "AWS4-HMAC-SHA256 ") {
-			t.Fatal("logs destination/signature")
-		}
-		calls = append(calls, r.Header.Get("X-Amz-Target"))
-		raw, _ := io.ReadAll(r.Body)
-		if bytes.Contains(raw, []byte("RAW_")) {
-			t.Fatal("raw log")
-		}
-		if strings.HasSuffix(r.Header.Get("X-Amz-Target"), "CreateLogStream") {
-			return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader("{}"))}, nil
-		}
-		var m map[string]any
-		if json.Unmarshal(raw, &m) != nil || len(m["logEvents"].([]any)) != 1 {
-			t.Fatal("log request")
-		}
-		return &http.Response{StatusCode: 400, Body: io.NopCloser(strings.NewReader(`{"message":"RAW_PROVIDER_MARKER"}`))}, nil
-	})}
-	l := Logs{Client: client, Credentials: credentials.NewStaticCredentialsProvider("test", "test", ""), Region: "eu-north-1", Group: "group", Stream: "stream"}
-	if e := l.Event(ctx, "accepted", strings.Repeat("a", 64)); e == nil || strings.Contains(e.Error(), "RAW_") {
-		t.Fatal("logs must acknowledge", e)
-	}
-	if len(calls) != 2 {
-		t.Fatal(calls)
-	}
-	if l.Event(ctx, "RAW_CELL_MARKER", strings.Repeat("a", 64)) == nil {
-		t.Fatal("free-text event")
 	}
 }
