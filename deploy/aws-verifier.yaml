@@ -398,9 +398,6 @@
     },
     "VerifierFunction": {
       "Type": "AWS::Lambda::Function",
-      "DependsOn": [
-        "LogGroup"
-      ],
       "Properties": {
         "FunctionName": {
           "Fn::Sub": "aim-aws-verifier-${ConnectionId}"

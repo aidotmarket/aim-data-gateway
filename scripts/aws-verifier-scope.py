@@ -109,9 +109,10 @@ def main():
     try:
         source = json.loads(sys.stdin.read() if args.source == "-" else Path(args.source).read_text())
         print(json.dumps(compile_scope(source), ensure_ascii=False))
-    except (ValueError, TypeError, KeyError):
+    except (ValueError, TypeError, KeyError) as error:
         # Do not echo raw keys, source documents or exception strings.
-        print("aws_source_scope_unrepresentable", file=sys.stderr)
+        code = "aws_region_unsupported" if str(error) == "aws_region_unsupported" else "aws_source_scope_unrepresentable"
+        print(code, file=sys.stderr)
         return 1
     return 0
 
