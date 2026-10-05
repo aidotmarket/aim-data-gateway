@@ -422,3 +422,52 @@ func TestExactParameters(t *testing.T) {
 		t.Fatal("parameter drift", keys)
 	}
 }
+
+func matchesParameter(t *testing.T, name, candidate string) bool {
+	t.Helper()
+	pattern := template(t)["Parameters"].(object)[name].(object)["AllowedPattern"].(string)
+	cmd := exec.Command("rtk", "proxy", "python3", "-c", "import json,re,sys; p,s=json.load(sys.stdin); print(json.dumps(re.fullmatch(p,s) is not None))")
+	cmd.Stdin = strings.NewReader(encoded([]string{pattern, candidate}))
+	b, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("parameter match: %v: %s", err, b)
+	}
+	return strings.TrimSpace(string(b)) == "true"
+}
+func TestScopeCompilerAndTemplateRefuseIAMPolicyVariables(t *testing.T) {
+	for _, field := range []string{"keys", "prefixes"} {
+		parameter := "ReadKeys"
+		if field == "prefixes" {
+			parameter = "ReadPrefixes"
+		}
+		for _, value := range []string{"${aws:PrincipalAccount}/data.csv", "${aws:PrincipalAccount}/", "before$${unclosed", "${", "nested${aws:username}/"} {
+			source := object{"connection_id": parameters()["ConnectionId"], "bucket": "seller-fixture", "region": "eu-north-1", "keys": []string{}, "prefixes": []string{}}
+			source[field] = []string{value}
+			compile(t, source, false)
+			if matchesParameter(t, parameter, value) {
+				t.Fatal("handmade stack accepts IAM variable", parameter, value)
+			}
+		}
+		for _, value := range []string{"", "cost$5.csv", "dollars$$", "{literal}/", "folder/é space.csv"} {
+			if !matchesParameter(t, parameter, value) {
+				t.Fatal("literal scope refused", value)
+			}
+		}
+	}
+}
+func TestKMSCompilerAndTemplateCanonicalUUIDAgreement(t *testing.T) {
+	for _, region := range []string{"eu-north-1", "eu-west-1", "eu-central-1", "us-east-1", "us-west-2"} {
+		for _, key := range []string{"01234567-89ab-cdef-0123-456789abcdef", strings.Repeat("-", 36), strings.Repeat("a", 36), "012345678-9ab-cdef-0123-456789abcdef", "01234567-89AB-cdef-0123-456789abcdef", "01234567-89ab-cdef-0123-456789abcde", "01234567-89ab-cdef-0123-456789abcdefx"} {
+			arn := "arn:aws:kms:" + region + ":123456789012:key/" + key
+			accepted := key == "01234567-89ab-cdef-0123-456789abcdef"
+			if matchesParameter(t, "SseKmsKeyArn", arn) != accepted {
+				t.Fatal("KMS pattern mismatch", arn)
+			}
+			compile(t, object{"connection_id": parameters()["ConnectionId"], "bucket": "seller-fixture", "region": region, "keys": []string{"exact.csv"}, "prefixes": []string{}, "sse_kms_key_arn": arn}, accepted)
+		}
+	}
+	if !matchesParameter(t, "SseKmsKeyArn", "") {
+		t.Fatal("empty KMS refused")
+	}
+	compile(t, object{"connection_id": parameters()["ConnectionId"], "bucket": "seller-fixture", "region": "eu-north-1", "keys": []string{"exact.csv"}, "prefixes": []string{}, "sse_kms_key_arn": ""}, true)
+}

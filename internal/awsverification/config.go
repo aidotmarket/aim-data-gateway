@@ -82,7 +82,7 @@ func ParseConfig(get func(string) string) (Config, error) {
 		return c, ErrRefused
 	}
 	for _, s := range append(append([]string{}, c.Scope.Keys...), c.Scope.Prefixes...) {
-		if s == "" || strings.ContainsAny(s, "*?\x00") {
+		if s == "" || strings.Contains(s, "${") || strings.ContainsAny(s, "*?\x00") {
 			return c, ErrRefused
 		}
 	}

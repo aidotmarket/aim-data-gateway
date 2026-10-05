@@ -71,15 +71,18 @@ func (h Handler) Invoke(ctx context.Context) error {
 	j.ScannerVersion, j.ReceiptKeyID = h.Config.Version, s.Receipt
 	// Exact redelivery is answered from state, never opened again, even if expired.
 	if r, ok, e := h.Ledger.record(ctx, j.Text("spec_id")); e != nil {
+		h.event(ctx, "refused", hash)
 		return e
 	} else if ok {
 		if r.Job.Token != token {
+			h.event(ctx, "refused", hash)
 			return ErrRefused
 		}
-		return nil
+		return h.event(ctx, "accepted", hash)
 	}
 	snapshot, e := h.Backend.Snapshot(ctx, s, j.Text("manifest_hash"))
 	if e != nil {
+		h.event(ctx, "refused", hash)
 		return ErrRefused
 	}
 	objects, e := Snapshot(snapshot, s.keys(h.now()), j, h.Config)
@@ -89,10 +92,12 @@ func (h Handler) Invoke(ctx context.Context) error {
 	}
 	src, e := NewSource(h.S3, h.Config.Bucket, objects)
 	if e != nil {
+		h.event(ctx, "refused", hash)
 		return ErrRefused
 	}
 	// Revalidate freshness after the bounded snapshot fetch; no expiry crossing.
 	if _, e = VerifyWork(token, s.keys(h.now()), s.Runner, s.Runner, h.Config.Version, h.now()); e != nil {
+		h.event(ctx, "refused", hash)
 		return ErrRefused
 	}
 	fresh, e := h.Ledger.Admit(ctx, j, h.now(), pickup)
@@ -101,7 +106,7 @@ func (h Handler) Invoke(ctx context.Context) error {
 		return e
 	}
 	if !fresh {
-		return nil
+		return h.event(ctx, "accepted", hash)
 	}
 	if e = h.event(ctx, "accepted", hash); e != nil {
 		return e

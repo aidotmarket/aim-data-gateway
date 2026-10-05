@@ -149,3 +149,23 @@ func TestActualSerializedReportBounds(t *testing.T) {
 		t.Fatal("outbox body cap")
 	}
 }
+
+func TestConfigRefusesIAMPolicyVariables(t *testing.T) {
+	for _, scope := range []string{
+		`{"keys":["${aws:PrincipalAccount}/data.csv"],"prefixes":[]}`,
+		`{"keys":[],"prefixes":["${aws:PrincipalAccount}/"]}`,
+		`{"keys":["before$${unclosed"],"prefixes":[]}`,
+		`{"keys":[],"prefixes":["\u0024\u007baws:PrincipalAccount}/"]}`,
+	} {
+		env := configEnv()
+		env[EnvScope] = scope
+		if _, err := ParseConfig(func(k string) string { return env[k] }); err != ErrRefused {
+			t.Fatal("IAM variable allowed", scope, err)
+		}
+	}
+	env := configEnv()
+	env[EnvScope] = `{"keys":["cost$5.csv"],"prefixes":["{literal}/"]}`
+	if _, err := ParseConfig(func(k string) string { return env[k] }); err != nil {
+		t.Fatal("literal dollar/braces refused", err)
+	}
+}

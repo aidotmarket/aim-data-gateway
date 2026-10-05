@@ -209,6 +209,8 @@ func (a *memoryAudit) Event(_ context.Context, event, hash string) error {
 }
 
 type memoryBackend struct {
+	onSnapshot                                  func() error
+	onWork                                      func()
 	work, snapshot                              string
 	calls                                       []string
 	reports                                     [][]byte
@@ -268,10 +270,18 @@ func (b *memoryBackend) Register(_ context.Context, raw []byte) (RegistrationAck
 }
 func (b *memoryBackend) Work(context.Context, *Secret) (string, error) {
 	b.calls = append(b.calls, "work")
+	if b.onWork != nil {
+		b.onWork()
+	}
 	return b.work, nil
 }
 func (b *memoryBackend) Snapshot(context.Context, *Secret, string) (string, error) {
 	b.calls = append(b.calls, "snapshot")
+	if b.onSnapshot != nil {
+		if err := b.onSnapshot(); err != nil {
+			return "", err
+		}
+	}
 	return b.snapshot, nil
 }
 func (b *memoryBackend) Report(_ context.Context, _ *Secret, body []byte, _ string) error {
@@ -333,6 +343,9 @@ func newFixture(t *testing.T) *handlerFixture {
 	return f
 }
 func (f *handlerFixture) job(t *testing.T, index int, variant string) wire.ScanJob {
+	return f.jobWithMembers(t, index, variant, nil)
+}
+func (f *handlerFixture) jobWithMembers(t *testing.T, index int, variant string, members []any) wire.ScanJob {
 	t.Helper()
 	b, e := os.ReadFile("../../contract/vectors/verification/scan_spec.json")
 	if e != nil {
@@ -381,6 +394,9 @@ func (f *handlerFixture) job(t *testing.T, index int, variant string) wire.ScanJ
 			"size_bytes": len(f.s3.objects["RAW_KEY_MARKER/data.csv"]),
 			"format":     "csv",
 		}},
+	}
+	if members != nil {
+		snap["members"] = members
 	}
 	raw, _ = core.Canonical(snap)
 	payload["manifest_hash"] = wire.Digest(raw)

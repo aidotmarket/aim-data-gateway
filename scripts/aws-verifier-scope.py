@@ -72,7 +72,7 @@ def compile_scope(source):
         # Native CommaDelimitedList trims members; JSON and IAM metacharacters
         # cannot be round-tripped. Refuse these spellings rather than rename data.
         if (not isinstance(entry, str) or not entry or entry != entry.strip()
-                or re.search(r'[,\x00-\x1f\x7f*?"\\]', entry)
+                or "${" in entry or re.search(r'[,\x00-\x1f\x7f*?"\\]', entry)
                 or len(entry.encode("utf-8")) > 1024):
             refuse()
     kms = source.get("sse_kms_key_arn", "")

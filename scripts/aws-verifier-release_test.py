@@ -186,6 +186,112 @@ class ReleaseTests(unittest.TestCase):
             self.assertIn(release.IDENTITY + "1.0.0", verify)
             self.assertIn("https://token.actions.githubusercontent.com", verify)
 
+    def test_dispatch_build_has_no_id_token(self):
+        workflow = (release.ROOT / ".github/workflows/aws-verifier-release.yml").read_text()
+        global_permissions, jobs = workflow.split("jobs:\n", 1)
+        build, publish = jobs.split("  publish:\n", 1)
+        self.assertIn("workflow_dispatch:", global_permissions)
+        self.assertIn("  build:\n", build)
+        self.assertNotIn("id-token:", global_permissions + build)
+        self.assertIn("    permissions:\n      contents: read\n", build)
+        self.assertIn("    needs: build\n    if: github.event_name == 'push'\n", publish)
+        self.assertIn("      id-token: write\n", publish)
+        self.assertIn("actions/upload-artifact@", build)
+        self.assertIn("name: aws-verifier-build", build)
+        self.assertIn("actions/download-artifact@", publish)
+        self.assertIn("name: aws-verifier-build", publish)
+        self.assertNotIn("configure-aws-credentials", build)
+        self.assertNotIn("--mode', 'publish-built'", build)
+
+    def test_existing_signature_is_verified_without_resigning(self):
+        with tempfile.TemporaryDirectory() as temp:
+            bundle = Path(temp) / "bundle.json"
+            bundle.write_bytes(b"retained-signature")
+            with patch.object(release, "run") as run:
+                release.sign(Path("bootstrap.zip"), bundle, "1.0.0")
+            self.assertEqual(run.call_count, 1)
+            self.assertEqual(run.call_args.args[:2], ("cosign", "verify-blob"))
+
+    def test_partial_publication_resume_adopts_only_identical_objects(self):
+        entries = [{"region": r, "bucket": "public-" + r, "smoke_function_arn": "fixture"}
+                   for r in sorted(release.REGIONS)]
+        record = {"CodeSha256": "provider-hash", "image_digest": "sha256:" + "a" * 64,
+                  "scanner_version": "1.0.0"}
+        objects, calls = {}, []
+        interrupted = True
+
+        def run(*args, **kwargs):
+            calls.append(args)
+            if args[:3] == ("aws", "s3api", "get-bucket-versioning"):
+                return '{"Status":"Enabled"}'
+            if args[:3] == ("aws", "lambda", "get-function"):
+                return json.dumps({"Configuration": {"CodeSha256": record["CodeSha256"],
+                                  "Runtime": "provided.al2023", "Architectures": ["arm64"],
+                                  "State": "Active", "LastUpdateStatus": "Successful"}})
+            if args[0] == "syft":
+                Path(str(args[-1]).split("=", 1)[1]).write_bytes(b"retained-SBOM")
+            if args[:2] == ("cosign", "sign-blob"):
+                Path(args[args.index("--bundle") + 1]).write_bytes(b"retained-signature")
+            if args[:2] == ("aws", "s3api") and args[2] in ("put-object", "get-object"):
+                identity = (args[args.index("--bucket") + 1], args[args.index("--key") + 1])
+                if args[2] == "put-object":
+                    self.assertIn("--if-none-match", args)
+                    self.assertTrue(kwargs["capture_stderr"])
+                    if identity in objects:
+                        raise release.subprocess.CalledProcessError(254, args, stderr=b"An error occurred (PreconditionFailed) when calling the PutObject operation: exists")
+                    if interrupted and len(objects) == 2:
+                        raise release.subprocess.CalledProcessError(254, args, stderr=b"AccessDenied fixture interruption")
+                    objects[identity] = (Path(args[args.index("--body") + 1]).read_bytes(), "version-" + str(len(objects)))
+                else:
+                    Path(args[-1]).write_bytes(objects[identity][0])
+                return json.dumps({"VersionId": objects[identity][1]})
+            return "fixture"
+
+        class Download(io.BytesIO):
+            def geturl(self):
+                return self.url
+
+        def download(url, **kwargs):
+            parsed = release.urllib.parse.urlparse(url)
+            identity = (parsed.hostname.split(".s3.")[0], release.urllib.parse.unquote(parsed.path[1:]))
+            data, version = objects[identity]
+            self.assertEqual(release.urllib.parse.parse_qs(parsed.query)["versionId"], [version])
+            response = Download(data)
+            response.url = url
+            return response
+
+        with tempfile.TemporaryDirectory() as temp, patch.object(release, "run", run), \
+                patch.object(release.urllib.request, "urlopen", download):
+            out = Path(temp)
+            for name in ("bootstrap", "bootstrap.zip", "aws-verifier.yaml"):
+                (out / name).write_bytes(b"fixture")
+            with self.assertRaisesRegex(RuntimeError, "AccessDenied"):
+                release.publish(record, entries, out)
+            partial = dict(objects)
+            self.assertEqual(len(partial), 2)
+            interrupted = False
+            with contextlib.redirect_stdout(io.StringIO()):
+                release.publish(record, entries, out)
+            self.assertEqual(len(objects), 40)
+            for identity, value in partial.items():
+                self.assertEqual(objects[identity], value)
+            self.assertEqual(len(json.loads((out / "publication.json").read_text())), 5)
+            self.assertEqual(sum(c[0] == "syft" for c in calls), 1)
+            self.assertTrue(any(c[:3] == ("aws", "s3api", "get-object") for c in calls))
+            # A completed rerun must also reuse catalog/signature bytes.
+            with contextlib.redirect_stdout(io.StringIO()):
+                release.publish(record, entries, out)
+            self.assertEqual(len(objects), 40)
+            identity = next(iter(partial))
+            original = objects[identity]
+            objects[identity] = (b"different", original[1])
+            with self.assertRaisesRegex(RuntimeError, "SHA-256 mismatch"):
+                release.upload(entries[0], identity[1], out / "bootstrap.zip")
+            for invalid in (None, "null"):
+                objects[identity] = (b"fixture", invalid)
+                with self.assertRaisesRegex(RuntimeError, "immutable object version"):
+                    release.upload(entries[0], identity[1], out / "bootstrap.zip")
+
     def test_all_subprocesses_use_rtk(self):
         with patch.object(release.subprocess, "check_output", return_value=b"ok") as command:
             self.assertEqual(release.run("go", "version"), "ok")

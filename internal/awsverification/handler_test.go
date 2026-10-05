@@ -5,6 +5,8 @@ import (
 	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -382,5 +384,66 @@ func TestUnresolvedEvidenceSurvivesTTLUntilAcknowledgment(t *testing.T) {
 				t.Fatal("acknowledged evidence not eligible for cleanup", k)
 			}
 		}
+	}
+}
+
+func TestSnapshotAndPreAcceptanceRefusalAudit(t *testing.T) {
+	for _, mode := range []string{"duplicate", "canonical_duplicate", "unsorted", "expiry_during_fetch", "snapshot_fetch_error", "ledger_lookup_error", "conflicting_redelivery"} {
+		t.Run(mode, func(t *testing.T) {
+			f := newFixture(t)
+			member := func(key string) any {
+				return map[string]any{"provider": "aws", "key": key, "etag": "RAW_ETAG_MARKER", "size_bytes": 1, "format": "csv"}
+			}
+			var members []any
+			switch mode {
+			case "duplicate":
+				members = []any{member("RAW_KEY_MARKER/a.csv"), member("RAW_KEY_MARKER/a.csv")}
+			case "canonical_duplicate":
+				members = []any{member("RAW_KEY_MARKER/é.csv"), member("RAW_KEY_MARKER/e\u0301.csv")}
+			case "unsorted":
+				members = []any{member("RAW_KEY_MARKER/z.csv"), member("RAW_KEY_MARKER/a.csv")}
+			}
+			j := f.jobWithMembers(t, 1, "scan", members)
+			if members != nil {
+				keys := map[string]ed25519.PublicKey{platformKey.KID: platformPrivate.Public().(ed25519.PublicKey)}
+				objects, err := Snapshot(f.backend.snapshot, keys, j, f.h.Config)
+				if err != nil {
+					t.Fatal("signed snapshot did not reach source validation", err)
+				}
+				if _, err := NewSource(f.s3, f.h.Config.Bucket, objects); err == nil {
+					t.Fatal("source fixture is valid")
+				}
+			}
+			switch mode {
+			case "expiry_during_fetch":
+				// Cross expiry plus the existing five-minute clock tolerance.
+				f.backend.onSnapshot = func() error { f.at = f.at.Add(time.Hour + 301*time.Second); return nil }
+			case "snapshot_fetch_error":
+				f.backend.onSnapshot = func() error { return errors.New("RAW_PROVIDER_MARKER") }
+			case "ledger_lookup_error":
+				f.backend.onWork = func() { f.db.down = true }
+			case "conflicting_redelivery":
+				if err := f.h.Invoke(ctx); err != nil {
+					t.Fatal(err)
+				}
+				f.audit.events, f.s3.heads, f.s3.requests, f.backend.reports = nil, nil, nil, nil
+				f.backend.work = resignWork(t, f.backend.work, func(m map[string]any) {
+					editPayload(m, func(p map[string]any) { p["manifest_hash"] = strings.Repeat("b", 64) })
+				})
+			}
+			if err := f.h.Invoke(ctx); err == nil {
+				t.Fatal("invalid work accepted")
+			}
+			want := []string{"received " + wire.Digest([]byte(f.backend.work)), "refused " + wire.Digest([]byte(f.backend.work))}
+			if !reflect.DeepEqual(f.audit.events, want) {
+				t.Fatalf("audit: %v; want %v", f.audit.events, want)
+			}
+			if len(f.s3.heads) != 0 || len(f.s3.requests) != 0 || len(f.backend.reports) != 0 {
+				t.Fatal("refusal performed source work")
+			}
+			if strings.Contains(strings.Join(f.audit.events, ""), "RAW_") {
+				t.Fatal("raw marker leaked")
+			}
+		})
 	}
 }

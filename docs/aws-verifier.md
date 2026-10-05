@@ -76,8 +76,14 @@ aws-verifier/<version>/<ZIP-sha256hex>/catalog.json
 
 Every upload uses `If-None-Match:*`, requires a non-null S3 object version and
 downloads that exact version anonymously for byte equality. An existing key is
-never overwritten. Preserve local assets/receipts if publication partially
-fails; do not delete prior versions to force a rerun. The signed catalog records
+never overwritten. If publication partially fails, preserve the complete local
+`dist/aws-verifier` assets/receipts and rerun `publish-built` with the same version,
+tag commit and manifest. Existing SBOM/signature bundles are reused, signatures
+are verified again and Grype runs again. On a put precondition failure, the script
+reads the existing object and adopts its non-null version only if its SHA-256
+matches the local asset; the anonymous exact-version byte check still applies.
+Different bytes refuse recovery. Do not delete prior versions to force a rerun.
+The signed catalog records
 all regional ZIP/template/SBOM/signature versions and hashes and the checked
 Lambda CodeSha256. `publication.json` records the catalog/signature object
 versions and download URLs. The backend must authenticate its catalog selection
@@ -105,7 +111,7 @@ Use its `parameters` without altering scope spellings. It resolves the actual
 execution policy and bounds aggregate inline-policy size using deterministic
 stack resource names, a 12-digit account and the secret's six-character suffix.
 It refuses >50 combined entries, >10,240 bytes (a conservative character bound),
-empty scopes, wildcard injection and unrepresentable comma/quote/backslash/
+empty scopes, wildcard or IAM policy-variable (`${`) injection and unrepresentable comma/quote/backslash/
 control or trimmed-edge spellings with `aws_source_scope_unrepresentable`.
 It also checks the resolved environment against [Lambda's 4 KiB serialized
 environment limit](https://docs.aws.amazon.com/lambda/latest/dg/troubleshooting-deployment.html),

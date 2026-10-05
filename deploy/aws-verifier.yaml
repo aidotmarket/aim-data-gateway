@@ -25,19 +25,19 @@
     "ReadKeys": {
       "Type": "CommaDelimitedList",
       "Default": "",
-      "AllowedPattern": "[^,\\x00-\\x1f\\x7f*?\"\\\\]*",
+      "AllowedPattern": "(?!.*\\$\\{)[^,\\x00-\\x1f\\x7f*?\"\\\\]*",
       "Description": "Exact keys; empty for no keys. Run aws-verifier-scope.py before setup."
     },
     "ReadPrefixes": {
       "Type": "CommaDelimitedList",
       "Default": "",
-      "AllowedPattern": "[^,\\x00-\\x1f\\x7f*?\"\\\\]*",
+      "AllowedPattern": "(?!.*\\$\\{)[^,\\x00-\\x1f\\x7f*?\"\\\\]*",
       "Description": "Exact prefixes; compiler appends only the required trailing IAM wildcard."
     },
     "SseKmsKeyArn": {
       "Type": "String",
       "Default": "",
-      "AllowedPattern": "^$|arn:aws:kms:(eu-north-1|eu-west-1|eu-central-1|us-east-1|us-west-2):[0-9]{12}:key/[0-9a-f-]{36}"
+      "AllowedPattern": "^$|arn:aws:kms:(eu-north-1|eu-west-1|eu-central-1|us-east-1|us-west-2):[0-9]{12}:key/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
     },
     "RegistrationToken": {
       "Type": "String",

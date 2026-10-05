@@ -24,8 +24,9 @@ REGIONS = {"eu-north-1", "eu-west-1", "eu-central-1", "us-east-1", "us-west-2"}
 IDENTITY = "https://github.com/aidotmarket/aim-data-gateway/.github/workflows/aws-verifier-release.yml@refs/tags/aws-verifier-v"
 
 
-def run(*args, env=None):
-    return subprocess.check_output(["rtk", "proxy", *map(str, args)], cwd=ROOT, env=env).decode().strip()
+def run(*args, env=None, capture_stderr=False):
+    return subprocess.check_output(["rtk", "proxy", *map(str, args)], cwd=ROOT, env=env,
+                                   stderr=subprocess.PIPE if capture_stderr else None).decode().strip()
 
 
 def digest(path):
@@ -83,7 +84,8 @@ def manifest(path):
 
 
 def sign(path, bundle, version):
-    run("cosign", "sign-blob", "--yes", "--bundle", bundle, path)
+    if not bundle.exists():
+        run("cosign", "sign-blob", "--yes", "--bundle", bundle, path)
     run("cosign", "verify-blob", "--bundle", bundle,
         "--certificate-identity", IDENTITY + version,
         "--certificate-oidc-issuer", "https://token.actions.githubusercontent.com", path)
@@ -92,10 +94,22 @@ def sign(path, bundle, version):
 def upload(entry, key, path):
     # Existing versioned buckets have public read only for release objects.
     # No bucket creation/policy/ACL/credential/delete commands in this script.
-    response = json.loads(run("aws", "s3api", "put-object", "--region", entry["region"],
-                              "--bucket", entry["bucket"], "--key", key, "--body", path,
-                              "--if-none-match", "*", "--content-type",
-                              "application/zip" if path.suffix == ".zip" else "application/json"))
+    try:
+        response = json.loads(run("aws", "s3api", "put-object", "--region", entry["region"],
+                                  "--bucket", entry["bucket"], "--key", key, "--body", path,
+                                  "--if-none-match", "*", "--content-type",
+                                  "application/zip" if path.suffix == ".zip" else "application/json",
+                                  capture_stderr=True))
+    except subprocess.CalledProcessError as error:
+        stderr = (error.stderr or b"").decode(errors="replace")
+        if "An error occurred (PreconditionFailed) when calling the PutObject operation" not in stderr:
+            raise RuntimeError("publication put-object failed: " + stderr) from error
+        with tempfile.TemporaryDirectory(prefix="aws-verifier-existing-") as temp:
+            existing = Path(temp) / "object"
+            response = json.loads(run("aws", "s3api", "get-object", "--region", entry["region"],
+                                      "--bucket", entry["bucket"], "--key", key, existing))
+            if digest(existing) != digest(path):
+                raise RuntimeError("existing publication object SHA-256 mismatch")
     version = response.get("VersionId")
     if not version or version == "null":
         raise RuntimeError("publication did not return an immutable object version")
@@ -123,7 +137,8 @@ def publish(record, entries, out):
                 or function["Architectures"] != ["arm64"] or function.get("State") != "Active"
                 or function.get("LastUpdateStatus") != "Successful"):
             raise RuntimeError("actual regional Lambda CodeSha256/runtime smoke identity mismatch")
-    run("syft", out / "bootstrap", "-o", f"spdx-json={out / 'aws-verifier.spdx.json'}")
+    if not (out / "aws-verifier.spdx.json").exists():
+        run("syft", out / "bootstrap", "-o", f"spdx-json={out / 'aws-verifier.spdx.json'}")
     run("grype", f"sbom:{out / 'aws-verifier.spdx.json'}", "--only-fixed", "--fail-on", "high")
     for filename in ("bootstrap.zip", "aws-verifier.yaml", "aws-verifier.spdx.json"):
         sign(out / filename, out / (filename + ".sigstore.json"), record["scanner_version"])
