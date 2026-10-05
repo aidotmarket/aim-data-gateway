@@ -165,7 +165,10 @@ func TestAuthBodiesLimitsRedirectAndFixedEgress(t *testing.T) {
 		if r.URL.Host != "api.ai.market" || r.URL.RawQuery != "" {
 			t.Fatal("host substitution")
 		}
-		raw, _ := io.ReadAll(r.Body)
+		var raw []byte
+		if r.Body != nil {
+			raw, _ = io.ReadAll(r.Body)
+		}
 		var c struct {
 			Runner     string `json:"runner_id"`
 			Kind       string `json:"kind"`
@@ -183,9 +186,21 @@ func TestAuthBodiesLimitsRedirectAndFixedEgress(t *testing.T) {
 			t.Fatal("auth binding wrong", e)
 		}
 		nonces = append(nonces, c.Nonce)
+		reply := `{"work_jws":null}`
+		if strings.Contains(r.URL.Path, "/snapshot/") {
+			if r.Method != "GET" || len(raw) != 0 {
+				t.Fatal("snapshot request body/method changed")
+			}
+			reply = "snapshot-jws"
+		} else if strings.HasSuffix(r.URL.Path, "/report") {
+			if r.Method != "POST" || string(raw) != `{"test":"control-only"}` {
+				t.Fatal("report body/method changed")
+			}
+			reply = `{"iid":"report-iid","status":"stored"}`
+		}
 		return &http.Response{
 			StatusCode: 200,
-			Body:       io.NopCloser(strings.NewReader(`{"work_jws":null}`)),
+			Body:       io.NopCloser(strings.NewReader(reply)),
 			Header:     make(http.Header),
 			Request:    r,
 		}, nil
@@ -198,7 +213,22 @@ func TestAuthBodiesLimitsRedirectAndFixedEgress(t *testing.T) {
 			t.Fatal(e)
 		}
 	}
-	if len(nonces) != 2 || nonces[0] == nonces[1] {
+	if snapshot, err := b.Snapshot(ctx, s, strings.Repeat("a", 64)); err != nil || snapshot != "snapshot-jws" {
+		t.Fatal("authenticated snapshot request failed", err)
+	}
+	for i := 0; i < 2; i++ {
+		if err := b.Report(ctx, s, []byte(`{"test":"control-only"}`), "report-iid"); err != nil {
+			t.Fatal("authenticated exact report retry failed", err)
+		}
+	}
+	seen := map[string]bool{}
+	for _, nonce := range nonces {
+		if seen[nonce] {
+			t.Fatal("request replay nonce reused")
+		}
+		seen[nonce] = true
+	}
+	if len(nonces) != 5 {
 		t.Fatal("request replay nonce reused")
 	}
 	for _, p := range []string{"/api/v1/verification-runners/x?url=evil", "https://other.example/", "/api/v1/verification-runners/x#evil"} {

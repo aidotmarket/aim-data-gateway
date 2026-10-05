@@ -174,6 +174,11 @@ func (h Handler) recover(ctx context.Context, s *Secret) error {
 	if e != nil {
 		return e
 	}
+	// Loading multiple outbox chunks can cross the pickup deadline. Recheck
+	// immediately before sending; backend intake independently enforces it too.
+	if h.now().Unix() > r.Pickup+AWS_VERIFY_TERMINAL_DEADLINE_SECONDS {
+		return ErrRefused
+	}
 	if e = h.Backend.Report(ctx, s, body, r.Job.Envelope.IID); e != nil {
 		return ErrRefused
 	}
