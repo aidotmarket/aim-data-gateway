@@ -2,6 +2,7 @@ package awsverification
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -17,6 +18,7 @@ func configEnv() map[string]string {
 		EnvScope:      `{"keys":[],"prefixes":["workspace/approval/"]}`,
 		EnvSecret:     "secret",
 		EnvTable:      "table",
+		EnvToken:      base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{9}, 32)),
 		EnvVersion:    "0.3.0",
 		EnvDigest:     "sha256:" + strings.Repeat("a", 64),
 		EnvAPI:        APIBaseURL,
@@ -77,6 +79,27 @@ func TestConfigRatesRegionsAndScope(t *testing.T) {
 	c := Config{Scope: Scope{Keys: []string{"exact.csv"}, Prefixes: []string{"workspace/approval/"}}}
 	if !c.permits("exact.csv") || !c.permits("workspace/approval/data.csv") || c.permits("workspace/other/data.csv") || c.permits("exact.csv/evil") {
 		t.Fatal("scope broadened")
+	}
+}
+
+func TestInvalidRegistrationTokenRefusesWithoutLedgerWrites(t *testing.T) {
+	for _, token := range []string{"", "invalid!", base64.RawURLEncoding.EncodeToString(make([]byte, 31)), base64.RawURLEncoding.EncodeToString(make([]byte, 33)), base64.StdEncoding.EncodeToString(make([]byte, 32))} {
+		t.Run(token, func(t *testing.T) {
+			f := newFixture(t)
+			env := configEnv()
+			env[EnvToken] = token
+			if _, err := ParseConfig(func(k string) string { return env[k] }); err == nil {
+				t.Fatal("invalid registration token accepted by config parser")
+			}
+			// Direct bootstrap callers also refuse before the durable lease.
+			f.h.Config.Token = token
+			if _, err := Bootstrap(ctx, f.h.Config, f.h.Ledger, f.secrets, f.backend, f.at); err == nil {
+				t.Fatal("invalid registration token accepted by bootstrap")
+			}
+			if f.db.puts != 0 || len(f.db.items) != 0 || f.secrets.saves != 0 || len(f.backend.calls) != 0 {
+				t.Fatal("invalid token reached durable state or registration")
+			}
+		})
 	}
 }
 func TestIntegerMixedSizeAndMemberCeilings(t *testing.T) {

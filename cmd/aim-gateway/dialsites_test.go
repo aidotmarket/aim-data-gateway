@@ -129,6 +129,12 @@ func TestDialSites(t *testing.T) {
 		"cmd/aim-gateway/main.go:execute:http.Client",
 		// Loopback health transport construction.
 		"cmd/aim-gateway/main.go:execute:http.Transport",
+		// S3 setup/header bounds; streaming bodies use the scan context deadline.
+		"internal/awsverification/aws_http.go:<package>:net.Dialer",
+		"internal/awsverification/aws_http.go:S3HTTPClient:http.Client",
+		"internal/awsverification/aws_http.go:S3HTTPClient:http.Client",
+		"internal/awsverification/aws_http.go:S3HTTPClient:http.Transport",
+		"internal/awsverification/aws_http.go:S3HTTPClient:s3Dialer.DialContext",
 		// Keep repository-wide review: AWS uses a separate fixed marketplace
 		// destination with normal TLS plus root SPKI pins; logs use stdout only.
 		"internal/awsverification/transport.go:<package>:http.Client",

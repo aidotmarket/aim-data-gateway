@@ -36,12 +36,14 @@ func handler(ctx context.Context) error {
 		HTTPClient:       client,
 		RetryMaxAttempts: 3,
 	}
+	s3Config := base
+	s3Config.HTTPClient = av.S3HTTPClient()
 	audit := av.Logs{Output: os.Stdout}
 	h := av.Handler{
 		Config:  c,
 		Ledger:  av.Ledger{Table: c.Table, Client: dynamodb.NewFromConfig(base)},
 		Store:   av.Secrets{ID: c.Secret, Client: secretsmanager.NewFromConfig(base)},
-		S3:      av.S3Client{Client: s3.NewFromConfig(base), KMS: c.KMS},
+		S3:      av.S3Client{Client: s3.NewFromConfig(s3Config), KMS: c.KMS},
 		Backend: av.HTTPBackend{Config: c, Client: av.MarketplaceClient(audit)},
 		Audit:   audit,
 	}
