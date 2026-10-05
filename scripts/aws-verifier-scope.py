@@ -98,8 +98,20 @@ def compile_scope(source):
     size = sum(len(json.dumps(p, ensure_ascii=False, separators=(",", ":")).encode()) for p in documents)
     if size > 10240:
         refuse()
+    # Lambda also caps the serialized application environment at 4 KiB. Use the
+    # binary's maximum version length and the longest allowed poll value, so
+    # an IAM-representable scope cannot fail only after the seller starts setup.
+    values.update({"Ledger": name, "LogGroup": f"/aws/lambda/{name}",
+                   "RegistrationToken": "x" * 43, "ScannerVersion": "x" * 128,
+                   "ExpectedCodeHash": "sha256:" + "0" * 64,
+                   "ApiBaseUrl": "https://api.ai.market", "PollIntervalMinutes": "15"})
+    env = resolve(template["Resources"]["VerifierFunction"]["Properties"]["Environment"]["Variables"],
+                  values, template["Conditions"])
+    env_size = len(json.dumps(env, ensure_ascii=False, separators=(",", ":")).encode())
+    if env_size > 4096:
+        refuse()
     return {"parameters": params, "object_arns": documents[0]["Statement"][0]["Resource"],
-            "inline_policy_characters_upper_bound": size}
+            "inline_policy_characters_upper_bound": size, "environment_bytes_upper_bound": env_size}
 
 
 def main():

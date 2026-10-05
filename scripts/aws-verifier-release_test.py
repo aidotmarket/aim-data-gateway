@@ -9,9 +9,11 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+import sys
 from unittest.mock import patch
 import zipfile
 
+sys.dont_write_bytecode = True
 spec = importlib.util.spec_from_file_location("release", Path(__file__).with_name("aws-verifier-release.py"))
 release = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(release)
@@ -88,6 +90,65 @@ class ReleaseTests(unittest.TestCase):
             with patch.object(release, "run", return_value='{"VersionId":"null"}'):
                 with self.assertRaises(RuntimeError):
                     release.upload(entry, "key", path)
+
+    def test_double_build_mismatch_refuses_release(self):
+        count = 0
+
+        def run(*args, **kwargs):
+            nonlocal count
+            if args[:2] == ("go", "build"):
+                count += 1
+                Path(args[args.index("-o") + 1]).write_bytes(bytes([count]))
+            return "fixture"
+
+        with tempfile.TemporaryDirectory() as temp, patch.object(release, "run", run):
+            out = Path(temp)
+            with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(RuntimeError):
+                release.build("1.0.0", out)
+            self.assertFalse((out / "build.json").exists())
+
+    def test_five_region_catalog_and_publication_receipts(self):
+        entries = [{"region": r, "bucket": "public-" + r, "smoke_function_arn": "fixture"}
+                   for r in sorted(release.REGIONS)]
+        record = {"CodeSha256": "actual-provider-hash", "image_digest": "sha256:" + "a" * 64,
+                  "scanner_version": "1.0.0"}
+        calls, uploads = [], []
+
+        def run(*args, **kwargs):
+            calls.append(args)
+            if args[:3] == ("aws", "s3api", "get-bucket-versioning"):
+                return '{"Status":"Enabled"}'
+            if args[:3] == ("aws", "lambda", "get-function"):
+                return json.dumps({"Configuration": {"CodeSha256": record["CodeSha256"],
+                                  "Runtime": "provided.al2023", "Architectures": ["arm64"],
+                                  "State": "Active", "LastUpdateStatus": "Successful"}})
+            if args[0] == "syft":
+                Path(str(args[-1]).split("=", 1)[1]).write_text('{"spdxVersion":"SPDX-2.3"}')
+            return "fixture"
+
+        def sign(path, bundle, version):
+            self.assertTrue(path.exists())
+            bundle.write_text("fixture-keyless-signature")
+
+        def upload(entry, key, path):
+            # All five provider identities checked before the first public write.
+            self.assertEqual(sum(c[:3] == ("aws", "lambda", "get-function") for c in calls), 5)
+            uploads.append((entry["region"], key))
+            return {"object_version": "fixture-version", "sha256": release.digest(path)}
+
+        with tempfile.TemporaryDirectory() as temp, patch.object(release, "run", run), \
+                patch.object(release, "sign", sign), patch.object(release, "upload", upload):
+            out = Path(temp)
+            for name in ["bootstrap", "bootstrap.zip", "aws-verifier.yaml"]:
+                (out / name).write_bytes(b"fixture")
+            with contextlib.redirect_stdout(io.StringIO()):
+                release.publish(record, entries, out)
+            catalog = json.loads((out / "catalog.json").read_text())
+            self.assertEqual({e["region"] for e in catalog["regions"]}, release.REGIONS)
+            self.assertTrue(all(e["actual_CodeSha256"] == record["CodeSha256"] for e in catalog["regions"]))
+            self.assertTrue(all(len(e["objects"]) == 6 for e in catalog["regions"]))
+            self.assertEqual(len(json.loads((out / "publication.json").read_text())), 5)
+            self.assertEqual(len(uploads), 40)
 
     def test_five_region_manifest_and_smoke_before_publication(self):
         entries = [{"region": r, "bucket": "public-" + r,

@@ -323,6 +323,9 @@ func TestScopeCompilerLimitsAndNoWildcardBroadening(t *testing.T) {
 	source := object{"connection_id": parameters()["ConnectionId"], "bucket": "seller-fixture", "region": "eu-north-1", "keys": []string{}, "prefixes": []string{"workspace/approval/"}}
 	result := compile(t, source, true)
 	equal(t, result["object_arns"], []string{"arn:aws:s3:::seller-fixture/workspace/approval/*"})
+	if result["environment_bytes_upper_bound"].(float64) > 4096 {
+		t.Fatal("Lambda environment quota exceeded")
+	}
 	for _, bad := range []string{"", "*", "?", "prefix/*", "exact,other", `quote"`, `back\slash`, "NUL\x00", " trim ", "line\n"} {
 		source["prefixes"] = []string{bad}
 		compile(t, source, false)
@@ -354,6 +357,11 @@ func TestScopeCompilerLimitsAndNoWildcardBroadening(t *testing.T) {
 	for i := 0; i < 12; i++ {
 		source["keys"] = append(source["keys"].([]string), fmt.Sprintf("%d-%s", i, strings.Repeat("x", 1000)))
 	}
+	compile(t, source, false)
+	// This fits IAM's policy limit but not Lambda's aggregate 4 KiB environment.
+	source["keys"] = []string{strings.Repeat("a", 1000), strings.Repeat("b", 1000), strings.Repeat("c", 1000), strings.Repeat("d", 1000)}
+	compile(t, source, false)
+	source["keys"], source["prefixes"] = []string{}, []string{}
 	compile(t, source, false)
 	// Count union, not each list separately.
 	source["keys"], source["prefixes"] = make([]string, 26), make([]string, 25)

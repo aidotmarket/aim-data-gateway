@@ -107,6 +107,11 @@ stack resource names, a 12-digit account and the secret's six-character suffix.
 It refuses >50 combined entries, >10,240 bytes (a conservative character bound),
 empty scopes, wildcard injection and unrepresentable comma/quote/backslash/
 control or trimmed-edge spellings with `aws_source_scope_unrepresentable`.
+It also checks the resolved environment against [Lambda's 4 KiB serialized
+environment limit](https://docs.aws.amazon.com/lambda/latest/dg/troubleshooting-deployment.html),
+including escaping, key names and the maximum scanner-version length (128).
+This AWS constraint can refuse a scope that fits IAM's ceiling; the spec omits
+it, and the binary's environment contract cannot safely bypass it.
 Native `CommaDelimitedList` cannot round-trip those spellings. Interior spaces
 and Unicode are retained. Never broaden scope to make it fit. Backend setup
 must integrate this preflight in 2c; CloudFormation alone does not enforce the

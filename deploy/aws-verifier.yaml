@@ -80,6 +80,7 @@
     },
     "ScannerVersion": {
       "Type": "String",
+      "MaxLength": 128,
       "AllowedPattern": "[A-Za-z0-9_.-]+"
     },
     "ApiBaseUrl": {
