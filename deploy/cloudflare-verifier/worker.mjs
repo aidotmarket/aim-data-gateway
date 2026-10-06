@@ -1489,7 +1489,11 @@ var Container = class extends DurableObject {
 };
 
 // state.ts
+import { createHash } from "node:crypto";
 var RETENTION = 30 * 86400;
+var LEASE_GRACE = 900 + 120;
+var DATA_CHUNK = 512 * 1024;
+var digest = (s) => createHash("sha256").update(s).digest("hex");
 function refuse() {
   throw new Error("verification_refused");
 }
@@ -1497,10 +1501,20 @@ var Ledger = class {
   constructor(storage) {
     this.storage = storage;
     storage.transactionSync(() => {
-      const tables = storage.sql.exec("SELECT name FROM sqlite_master WHERE type='table' AND name IN ('meta','admissions','daily','events','outbox','chunks')").toArray();
+      const tables = storage.sql.exec("SELECT name FROM sqlite_master WHERE type='table' AND name IN ('meta','admissions','daily','events','outbox','chunks','admission_chunks')").toArray();
       if (tables.length) {
-        if (tables.length !== 6 || storage.sql.exec("SELECT v FROM meta WHERE k='schema'").toArray()[0]?.v !== "verifier-state-v1") refuse();
+        const version = this.get("schema");
+        if (!(version === "verifier-state-v1" && tables.length === 6 || version === "verifier-state-v2" && tables.length === 7)) refuse();
         for (const k of ["clock", "active", "lease", "wake", "task"]) if (this.get(k) === void 0) refuse();
+        if (version === "verifier-state-v1") {
+          storage.sql.exec("CREATE TABLE admission_chunks(id TEXT NOT NULL,n INTEGER NOT NULL,data TEXT NOT NULL,PRIMARY KEY(id,n))");
+          for (const row of storage.sql.exec("SELECT id,record FROM admissions")) {
+            const r = JSON.parse(row.record);
+            if (r.id !== row.id || typeof r.snapshot !== "string" || !Array.isArray(r.objects)) refuse();
+            storage.sql.exec("UPDATE admissions SET record=? WHERE id=?", this.pack(r), row.id);
+          }
+          this.put("schema", "verifier-state-v2");
+        }
         return;
       }
       storage.sql.exec(`CREATE TABLE IF NOT EXISTS meta(k TEXT PRIMARY KEY,v TEXT NOT NULL);
@@ -1508,8 +1522,9 @@ var Ledger = class {
         CREATE TABLE IF NOT EXISTS daily(listing TEXT NOT NULL,day TEXT NOT NULL,n INTEGER NOT NULL,PRIMARY KEY(listing,day));
         CREATE TABLE IF NOT EXISTS events(at INTEGER NOT NULL,event TEXT NOT NULL,hash TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS outbox(id TEXT PRIMARY KEY,hash TEXT NOT NULL,bytes INTEGER NOT NULL,chunks INTEGER NOT NULL);
-        CREATE TABLE IF NOT EXISTS chunks(id TEXT NOT NULL,n INTEGER NOT NULL,data TEXT NOT NULL,PRIMARY KEY(id,n));`);
-      this.put("schema", "verifier-state-v1");
+        CREATE TABLE IF NOT EXISTS chunks(id TEXT NOT NULL,n INTEGER NOT NULL,data TEXT NOT NULL,PRIMARY KEY(id,n));
+        CREATE TABLE IF NOT EXISTS admission_chunks(id TEXT NOT NULL,n INTEGER NOT NULL,data TEXT NOT NULL,PRIMARY KEY(id,n));`);
+      this.put("schema", "verifier-state-v2");
       for (const [k, v] of Object.entries({ clock: "0", active: "", lease: "0", wake: "0", task: "" })) this.put(k, v);
     });
   }
@@ -1545,9 +1560,31 @@ var Ledger = class {
       return true;
     });
   }
+  pack(r) {
+    const { snapshot, objects, ...meta } = r;
+    if (["reported", "expired", "interrupted"].includes(r.state)) return JSON.stringify({ ...meta, snapshot: "", objects: [] });
+    const body = JSON.stringify({ snapshot, objects }).replace(/[\u007f-\uffff]/g, (c) => "\\u" + c.charCodeAt(0).toString(16).padStart(4, "0"));
+    const chunks = Math.ceil(body.length / DATA_CHUNK);
+    for (let n = 0; n < chunks; n++) this.storage.sql.exec("INSERT INTO admission_chunks VALUES (?,?,?)", r.id, n, body.slice(n * DATA_CHUNK, (n + 1) * DATA_CHUNK));
+    return JSON.stringify({ ...meta, data: { chunks, bytes: body.length, hash: digest(body) } });
+  }
   record(id) {
-    const row = this.storage.sql.exec("SELECT record FROM admissions WHERE id=?", id).toArray()[0];
-    return row && JSON.parse(row.record);
+    return this.storage.transactionSync(() => {
+      const row = this.storage.sql.exec("SELECT record FROM admissions WHERE id=?", id).toArray()[0];
+      if (!row) return;
+      const { data, ...meta } = JSON.parse(row.record);
+      if (!data) {
+        if (!["reported", "expired", "interrupted"].includes(meta.state) || meta.snapshot !== "" || !Array.isArray(meta.objects) || meta.objects.length) refuse();
+        return { ...meta, snapshot: "", objects: [] };
+      }
+      const chunks = this.storage.sql.exec("SELECT n,data FROM admission_chunks WHERE id=? ORDER BY n", id).toArray();
+      if (!Number.isSafeInteger(data.chunks) || data.chunks < 1 || chunks.length !== data.chunks || chunks.some((c, i) => c.n !== i || !c.data.length || c.data.length > DATA_CHUNK || /[^\x00-\x7f]/.test(c.data))) refuse();
+      const body = chunks.map((c) => c.data).join("");
+      if (body.length !== data.bytes || digest(body) !== data.hash) refuse();
+      const payload = JSON.parse(body);
+      if (typeof payload.snapshot !== "string" || !Array.isArray(payload.objects) || payload.objects.length > 17033) refuse();
+      return { ...meta, snapshot: payload.snapshot, objects: payload.objects };
+    });
   }
   active() {
     const id = this.get("active");
@@ -1557,7 +1594,9 @@ var Ledger = class {
   wake(now2) {
     return this.storage.transactionSync(() => {
       this.clock(now2);
-      if (Number(this.get("wake") ?? 0) > now2 - 60 || this.get("task")) return false;
+      const wake = Number(this.get("wake") ?? 0), lease = Number(this.get("lease") ?? 0);
+      const task = this.get("task"), marker = task === "queued" ? wake : lease || wake;
+      if (wake > now2 - 60 || task && now2 <= marker + LEASE_GRACE) return false;
       this.put("wake", String(now2));
       this.put("task", "queued");
       return true;
@@ -1567,7 +1606,7 @@ var Ledger = class {
     return this.storage.transactionSync(() => {
       this.clock(now2);
       const lease = Number(this.get("lease") ?? 0);
-      if (lease && now2 <= lease + 1020) return false;
+      if (lease && now2 <= lease + LEASE_GRACE) return false;
       this.put("lease", String(now2));
       this.put("task", "running");
       return true;
@@ -1593,7 +1632,7 @@ var Ledger = class {
       const n = this.storage.sql.exec("SELECT n FROM daily WHERE listing=? AND day=?", p.listing_id, day).toArray()[0]?.n ?? 0;
       if (n >= 10) refuse();
       const r = { id: p.spec_id, token: job.Token, hash: job.Envelope.spec_hash, iid: job.Envelope.iid, variant: job.Envelope.variant, snapshot, objects, pickup, start, state: "accepted" };
-      this.storage.sql.exec("INSERT INTO admissions VALUES (?,?,?,?,?,?,?)", r.id, r.hash, r.iid, p.nonce, p.owner_authorization_id, JSON.stringify(r), now2 + RETENTION);
+      this.storage.sql.exec("INSERT INTO admissions VALUES (?,?,?,?,?,?,?)", r.id, r.hash, r.iid, p.nonce, p.owner_authorization_id, this.pack(r), now2 + RETENTION);
       this.storage.sql.exec("INSERT OR REPLACE INTO daily VALUES (?,?,?)", p.listing_id, day, n + 1);
       this.put("active", r.id);
       this.event("accepted", r.hash, now2);
@@ -1626,7 +1665,10 @@ var Ledger = class {
     });
   }
   update(r, now2) {
-    this.storage.sql.exec("UPDATE admissions SET record=?,until=? WHERE id=?", JSON.stringify(r), now2 + RETENTION, r.id);
+    const { snapshot, objects, ...meta } = r;
+    const row = this.storage.sql.exec("SELECT record FROM admissions WHERE id=?", r.id).toArray()[0] ?? refuse();
+    const saved = JSON.parse(row.record);
+    this.storage.sql.exec("UPDATE admissions SET record=?,until=? WHERE id=?", JSON.stringify({ ...meta, ...saved.data ? { data: saved.data } : { snapshot: "", objects: [] } }), now2 + RETENTION, r.id);
   }
   settle(r, state, now2) {
     this.storage.transactionSync(() => {
@@ -1635,12 +1677,15 @@ var Ledger = class {
       this.event(state, r.hash, now2);
       this.storage.sql.exec("DELETE FROM chunks WHERE id=?", r.id);
       this.storage.sql.exec("DELETE FROM outbox WHERE id=?", r.id);
+      this.storage.sql.exec("UPDATE admissions SET record=json_set(json_remove(record,'$.data'),'$.snapshot','','$.objects',json('[]')) WHERE id=?", r.id);
+      this.storage.sql.exec("DELETE FROM admission_chunks WHERE id=?", r.id);
       this.put("active", "");
     });
   }
   prune(now2) {
     this.storage.transactionSync(() => {
       this.storage.sql.exec("DELETE FROM admissions WHERE until<? AND id NOT IN (SELECT id FROM outbox) AND id!=? AND json_extract(record,'$.state') IN ('reported','expired','interrupted')", now2, this.get("active") ?? "");
+      this.storage.sql.exec("DELETE FROM admission_chunks WHERE id NOT IN (SELECT id FROM admissions)");
       this.storage.sql.exec("DELETE FROM events WHERE at<?", now2 - RETENTION);
       this.storage.sql.exec("DELETE FROM daily WHERE day<?", new Date((now2 - RETENTION) * 1e3).toISOString().slice(0, 10));
     });
@@ -1846,7 +1891,7 @@ var CloudflareVerifier = class extends Container {
       return;
     }
     if (r.state !== "committed") {
-      if (now() <= r.start + 1020) refuse();
+      if (now() <= r.start + LEASE_GRACE) refuse();
       if (r.variant === "probe") {
         this.ledger.settle(r, "interrupted", now());
         return;
@@ -1865,7 +1910,10 @@ var CloudflareVerifier = class extends Container {
   }
   async pollTask() {
     const start = now();
-    if (!this.ledger.claim(start)) return;
+    if (!this.ledger.claim(start)) {
+      await this.schedule(Math.max(1, Number(this.ledger.get("lease")) + LEASE_GRACE + 1 - start), "pollTask");
+      return;
+    }
     try {
       const c = config(this.env);
       if (!this.ledger.get("bootstrap")) {

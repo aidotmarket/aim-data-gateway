@@ -1,8 +1,9 @@
 import { env, runInDurableObject } from "cloudflare:test";
 import { beforeAll, afterAll, describe, it, expect, vi } from "vitest";
 import worker, { CloudflareVerifier } from "./worker.ts";
-import { Ledger, type Job } from "./state";
-import { encrypt, decrypt, random, sha, now, canonical } from "./crypto";
+import { Container } from "@cloudflare/containers";
+import { Ledger, RETENTION, type Job } from "./state";
+import { encrypt, decrypt, random, sha, now, canonical, b64, utf8 } from "./crypto";
 
 beforeAll(()=>{vi.stubGlobal("fetch",()=>{throw new Error("network disabled in tests");});});
 afterAll(()=>{vi.unstubAllGlobals();});
@@ -64,6 +65,59 @@ describe("SQLite consent and custody",()=>{
     expect(l.claim(at+1020)).toBe(false);expect(l.claim(at+1021)).toBe(true);
     l.release();expect(l.wake(at+1081)).toBe(true);
   }));
+  it("coalesces a fresh queued wake even while the old running lease is stale",async()=>storage("requeued",l=>{
+    expect(l.wake(at)).toBe(true);expect(l.claim(at)).toBe(true);
+    expect(l.wake(at+1021)).toBe(true);expect(l.wake(at+1081)).toBe(false);
+    expect(l.wake(at+2041)).toBe(false);expect(l.wake(at+2042)).toBe(true);
+  }));
+  it("reclaims an abandoned queued task after the grace",async()=>storage("queued",l=>{
+    expect(l.wake(at)).toBe(true);expect(l.wake(at+1020)).toBe(false);
+    expect(l.wake(at+1021)).toBe(true);expect(l.claim(at+1021)).toBe(true);
+  }));
+  it("chunks and reconstructs a signed 17,033-member snapshot within SQL row limits",async()=>storage("snapshot-boundary",async(l,state)=>{
+    const objects=Array.from({length:17033},(_,n)=>({Key:"p/"+String(n).padStart(8,"0")+"é.csv",ETag:"e".repeat(32),Size:12345,Format:"csv"}));
+    const encode=(s:string)=>{const bytes=utf8.encode(s);let raw="";for(let n=0;n<bytes.length;n+=32768)raw+=String.fromCharCode(...bytes.subarray(n,n+32768));return btoa(raw).replaceAll("+","-").replaceAll("/","_").replaceAll("=","");};
+    const payload=canonical({members:objects.map(m=>({key:m.Key,etag:m.ETag,size:m.Size,format:m.Format})),provider:"r2",bucket:config.bucket});
+    const pair=await crypto.subtle.generateKey({name:"Ed25519"},true,["sign","verify"]);
+    const input=encode(canonical({alg:"EdDSA",typ:"aim-scan-snapshot+jwt"}))+"."+encode(canonical({payload_b64:encode(payload),manifest_hash:await sha(payload)}));
+    const snapshot=input+"."+b64(new Uint8Array(await crypto.subtle.sign("Ed25519",pair.privateKey,utf8.encode(input))));
+    expect(utf8.encode(JSON.stringify({snapshot,objects})).length).toBeGreaterThan(4_000_000);
+    const r=l.admit(job(1),snapshot,objects,at,at,at)!;
+    const rebuilt=new Ledger(state.storage).active()!;
+    expect(rebuilt.snapshot).toBe(snapshot);expect(rebuilt.objects).toEqual(objects);
+    const rows=l.storage.sql.exec<{id:string;n:number;data:string}>("SELECT * FROM admission_chunks").toArray();
+    expect(rows.length).toBeGreaterThan(4);
+    for(const row of rows)expect(utf8.encode(row.data).length+utf8.encode(row.id).length+8).toBeLessThanOrEqual(1048576);
+    expect(l.storage.sql.exec<{n:number}>("SELECT length(CAST(record AS BLOB)) n FROM admissions").one().n).toBeLessThan(1048576);
+    l.commit(r,"{}",await sha("{}"),at);expect(new Ledger(state.storage).active()?.objects).toEqual(objects);
+    l.settle(r,"reported",at);expect(l.storage.sql.exec("SELECT COUNT(*) n FROM admission_chunks").one().n).toBe(0);
+    expect(l.record(r.id)?.token).toBe(r.token);l.prune(at+RETENTION+1);expect(l.record(r.id)).toBeUndefined();
+  }));
+  it.each(["missing","corrupt","index","extra","descriptor"])("refuses %s admission chunks before commit or reads",async fault=>storage("snapshot-"+fault,async(l,state)=>{
+    const r=l.admit(job(1),"x".repeat(1100000),[],at,at,at)!;
+    if(fault==="missing")l.storage.sql.exec("DELETE FROM admission_chunks WHERE n=1");
+    if(fault==="corrupt")l.storage.sql.exec("UPDATE admission_chunks SET data='y'||substr(data,2) WHERE n=1");
+    if(fault==="index")l.storage.sql.exec("UPDATE admission_chunks SET n=9 WHERE n=1");
+    if(fault==="extra")l.storage.sql.exec("INSERT INTO admission_chunks VALUES (?,9,'extra')",r.id);
+    if(fault==="descriptor")l.storage.sql.exec("UPDATE admissions SET record=json_remove(record,'$.data')");
+    const restored=new Ledger(state.storage);expect(()=>restored.active()).toThrow();
+    const hash=await sha("{}");expect(()=>restored.commit(r,"{}",hash,at)).toThrow();
+    expect(l.storage.sql.exec("SELECT COUNT(*) n FROM outbox").one().n).toBe(0);
+  }));
+  it("rolls back chunks and quota with a failed admission insert",async()=>storage("chunk-rollback",l=>{
+    const r=l.admit(job(1),"first",[],at,at,at)!;l.settle(r,"reported",at);
+    const duplicate={...job(2),Envelope:{...job(2).Envelope,iid:r.iid}};
+    expect(()=>l.admit(duplicate,"x".repeat(1100000),[],at,at,at)).toThrow();
+    expect(l.storage.sql.exec("SELECT COUNT(*) n FROM admission_chunks").one().n).toBe(0);
+    expect(l.storage.sql.exec("SELECT n FROM daily").one().n).toBe(1);
+  }));
+  it("migrates v1 custody atomically and refuses a lost v2 chunk table",async()=>storage("chunk-migration",(l,state)=>{
+    const r=l.admit(job(1),"legacy snapshot",[{Key:"p/é.csv",ETag:"etag",Size:2,Format:"csv"}],at,at,at)!;
+    l.storage.sql.exec("UPDATE admissions SET record=? WHERE id=?",JSON.stringify(r),r.id);
+    l.storage.sql.exec("DROP TABLE admission_chunks");l.put("schema","verifier-state-v1");
+    const upgraded=new Ledger(state.storage);expect(upgraded.active()).toEqual(r);expect(upgraded.get("schema")).toBe("verifier-state-v2");
+    l.storage.sql.exec("DROP TABLE admission_chunks");expect(()=>new Ledger(state.storage)).toThrow();
+  }));
 });
 describe("seller control and private bridge",()=>{
   it("authenticates seller only, accepts exactly {}, never forwards operator payload",async()=>{
@@ -122,6 +176,61 @@ async function authClaims(request:Request,publicKey:Uint8Array){
   return JSON.parse(new TextDecoder().decode(decode(parts[1])));
 }
 describe("scheduled recovery without external network",()=>{
+  it.each([
+    {committed:false,trigger:"cron"},{committed:false,trigger:"operator"},
+    {committed:true,trigger:"cron"},{committed:true,trigger:"operator"},
+  ])("$trigger recovers a hard interruption (committed=$committed) through SDK one-shot retries",async({committed,trigger})=>storage("hard-"+trigger+committed,async(l,state)=>{
+    const t=now(),clock=vi.spyOn(Date,"now").mockReturnValue(t*1000),sec=await testSecret();l.put("bootstrap","saved");
+    const source={head:vi.fn(),get:vi.fn()},paths:string[]=[],bodies:string[]=[];
+    const body=canonical({terminal_error_code:committed?null:"scanner_failure",evidence:"exact committed bytes"});
+    const compute=vi.fn(async(path:string)=>{paths.push(path);if(path!=="/terminal")throw new Error("consumed traversal must not restart");return {body};});
+    // Use SDK 0.3.7's actual SQL scheduler/alarm, with only Container lifecycle
+    // and network stubbed. Its normal-return deletion is part of this test.
+    state.storage.sql.exec(`CREATE TABLE container_schedules(id TEXT PRIMARY KEY,callback TEXT NOT NULL,payload TEXT,type TEXT NOT NULL,time INTEGER,delayInSeconds INTEGER)`);
+    const fake={ledger:l,ctx:state,env:{DEPLOYMENT_CONFIG:JSON.stringify(config),SOURCE:source},load:async()=>sec,compute,
+      enqueue:CloudflareVerifier.prototype.enqueue,pollTask:CloudflareVerifier.prototype.pollTask,recover:CloudflareVerifier.prototype.recover,
+      schedule:Container.prototype.schedule,scheduleNextAlarm:Container.prototype.scheduleNextAlarm,
+      getSchedule:Container.prototype.getSchedule,toSchedule:Container.prototype.toSchedule,
+      sql:(strings:TemplateStringsArray,...values:unknown[])=>state.storage.sql.exec(strings.join("?"),...values.map(v=>v===undefined?null:v)).toArray(),
+      container:{running:false},syncPendingStoppedEvents:vi.fn().mockResolvedValue(undefined),stop:vi.fn().mockResolvedValue(undefined)};
+    const e={DEPLOYMENT_CONFIG:JSON.stringify(config),RUN_NOW_SECRET:"s".repeat(43),VERIFIER:{getByName:()=>fake}};
+    const triggerWake=async()=>{
+      if(trigger==="cron")await worker.scheduled({},e);
+      else expect((await worker.fetch(new Request("https://seller.invalid/operator/run-now",{method:"POST",headers:{Authorization:"Bearer "+e.RUN_NOW_SECRET},body:"{}"}),e)).status).toBe(202);
+    };
+    try {
+      await triggerWake();expect(l.get("task")).toBe("queued");
+      clock.mockReturnValue((t+1)*1000);expect(l.claim(now())).toBe(true);
+      const j=job(1);j.Payload.accepted_at_utc=new Date(t*1000).toISOString();j.Payload.expires_at_utc=new Date((t+3600)*1000).toISOString();
+      const r=l.admit(j,"saved snapshot",[{Key:"p/data.csv",ETag:"old",Size:4,Format:"csv"}],now(),t,t+1)!;
+      if(committed)l.commit(r,body,await sha(body),now());
+      // Hard interruption: no finally/release; reconstruct durable custody.
+      fake.ledger=new Ledger(state.storage);expect(fake.ledger.get("task")).toBe("running");
+      vi.stubGlobal("fetch",async(url:string,init:RequestInit)=>{
+        const request=new Request(url,init);await authClaims(request,sec.pub);
+        const path=new URL(url).pathname.split("/").at(-1)!;paths.push(path);
+        if(path==="report"){bodies.push(await request.text());return new Response(canonical({iid:r.iid,status:"stored"}));}
+        return new Response(canonical({work_jws:j.Token})); // replay must not prepare/execute
+      });
+      clock.mockReturnValue((t+901)*1000);await triggerWake();
+      await Container.prototype.alarm.call(fake,{isRetry:true,retryCount:1});
+      expect(paths).toEqual([]);expect(fake.ledger.get("task")).toBe("running");
+      const pending=state.storage.sql.exec<{time:number}>("SELECT time FROM container_schedules").toArray();
+      expect(pending).toEqual([{time:t+1022}]);expect(await state.storage.getAlarm()).toBe((t+1022)*1000);
+      clock.mockReturnValue((t+1021)*1000);await triggerWake();
+      expect(fake.ledger.get("task")).toBe("running");expect(state.storage.sql.exec("SELECT COUNT(*) n FROM container_schedules").one().n).toBe(1);
+      clock.mockReturnValue((t+1022)*1000);await triggerWake();expect(fake.ledger.get("task")).toBe("queued");
+      clock.mockReturnValue((t+1023)*1000);await Container.prototype.alarm.call(fake);
+      expect(paths.slice(0,committed?2:3)).toEqual(committed?["report","work"]:["/terminal","report","work"]);
+      expect(bodies).toEqual([body]);expect(compute).toHaveBeenCalledTimes(committed?0:1);
+      expect(source.head).not.toHaveBeenCalled();expect(source.get).not.toHaveBeenCalled();
+      expect(fake.ledger.active()).toBeUndefined();expect(fake.ledger.record(r.id)?.state).toBe("reported");
+      expect(fake.ledger.get("task")).toBe("");expect(state.storage.sql.exec("SELECT COUNT(*) n FROM container_schedules").one().n).toBe(0);
+      clock.mockReturnValue((t+1083)*1000);await triggerWake();expect(fake.ledger.get("task")).toBe("queued");
+      clock.mockReturnValue((t+1084)*1000);await Container.prototype.alarm.call(fake);
+      expect(paths.filter(p=>p==="report")).toHaveLength(1);expect(paths.at(-1)).toBe("work");
+    }finally{clock.mockRestore();await state.storage.deleteAlarm();vi.stubGlobal("fetch",()=>{throw new Error("network disabled in tests");});}
+  }));
   it("resends lost-ack committed outbox before poll, identical bytes with new HTTP nonce",async()=>storage("recover",async(l,state)=>{
     const t=now(),j=job(1);j.Payload.accepted_at_utc=new Date((t-900)*1000).toISOString();j.Payload.expires_at_utc=new Date((t+3600)*1000).toISOString();
     const r=l.admit(j,"saved snapshot",[],t-900,t-900,t-900)!;

@@ -59,7 +59,7 @@ def build(version, output, verify_committed=False):
                 "-o", binary, "./cmd/aim-cloudflare-verifier", env=env)
             bundle = directory / "worker.mjs"
             run(TEMPLATE / "node_modules/.bin/esbuild", "worker.ts", "--bundle", "--format=esm",
-                "--platform=neutral", "--external:cloudflare:*", "--outfile=" + str(bundle), cwd=TEMPLATE)
+                "--platform=neutral", "--external:cloudflare:*", "--external:node:*", "--outfile=" + str(bundle), cwd=TEMPLATE)
             binaries.append(binary.read_bytes())
             bundles.append(bundle.read_bytes())
             print(f"build_{n}_binary_sha256={digest(binary)}", flush=True)

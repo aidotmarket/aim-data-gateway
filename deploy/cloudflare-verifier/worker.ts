@@ -1,6 +1,6 @@
 import { Container, type OutboundHandlerContext } from "@cloudflare/containers";
 export { ContainerProxy } from "@cloudflare/containers";
-import { Ledger, refuse, type Admission, type Job, type Member } from "./state";
+import { Ledger, LEASE_GRACE, refuse, type Admission, type Job, type Member } from "./state";
 import { b64, unb64, utf8, random, sha, canonical, encrypt, decrypt, equalSecret, bounded, now } from "./crypto";
 
 type Env = Omit<RuntimeEnv,"VERIFIER"> & { VERIFIER: DurableObjectNamespace<CloudflareVerifier>; REGISTRATION_TOKEN: string; RUN_NOW_SECRET: string };
@@ -117,7 +117,7 @@ export class CloudflareVerifier extends Container<Env> {
     let r=this.ledger.active();if(!r)return;
     if(now()>r.pickup+1920){this.ledger.settle(r,"expired",now());return;}
     if(r.state!=="committed"){
-      if(now()<=r.start+1020)refuse();
+      if(now()<=r.start+LEASE_GRACE)refuse();
       if(r.variant==="probe"){this.ledger.settle(r,"interrupted",now());return;}
       const terminal=await this.compute<{body:string}>("/terminal",c,s,{token:r.token,pickup:r.pickup});
       this.ledger.commit(r,terminal.body,await sha(terminal.body),now());r=this.ledger.active()??refuse();
@@ -131,7 +131,13 @@ export class CloudflareVerifier extends Container<Env> {
     console.log(JSON.stringify({event:"reported",hash:r.hash}));
   }
   async pollTask():Promise<void> {
-    const start=now();if(!this.ledger.claim(start))return;
+    const start=now();
+    if(!this.ledger.claim(start)){
+      // SDK 0.3.7 deletes this one-shot schedule on normal return. Preserve
+      // recovery with a new schedule beyond the running task's lease grace.
+      await this.schedule(Math.max(1,Number(this.ledger.get("lease"))+LEASE_GRACE+1-start),"pollTask");
+      return;
+    }
     try {
       const c=config(this.env);
       if(!this.ledger.get("bootstrap")){

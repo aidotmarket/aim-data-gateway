@@ -89,7 +89,16 @@ The alarm awaits the private Container HTTP invocation. Go's deadline is
 start+780 seconds, including bootstrap/poll elapsed time, reduced by the
 remaining invocation budget with terminal persistence time reserved. The DO
 lease coalesces retries until 900+120 seconds; interrupted consumed work is
-never scanned again. Complete signed report bytes are transactionally chunked
+never scanned again. Stale running or queued task markers become reclaimable
+after that grace; an early SDK alarm retry schedules recovery just beyond lease
+expiry before its one-shot schedule is deleted. Recovery precedes every new poll.
+Signed snapshot tokens and expanded members are stored together in ASCII JSON
+chunks of at most 512 KiB, in the admission transaction. A descriptor binds their
+count, byte length and SHA-256; missing or corrupt chunks refuse reads. Settlement
+deletes these chunks while retaining replay/consent metadata for thirty days;
+retention pruning also removes orphan chunks. Existing v1 custody migrates to
+v2 atomically without resetting keys, quota, leases or consent.
+Complete signed report bytes are transactionally chunked
 at 128 KiB before send. Every task resends committed outbox before polling,
 with identical report bytes and fresh HTTP nonce. Exact backend ack settles
 the row. First pickup+1,920 seconds is the terminal deadline, unchanged by
@@ -114,7 +123,10 @@ It compiles twice with separate caches, CGO disabled, linux/amd64, trimpath,
 empty build ID and embedded release/version. It bundles twice with the locked
 esbuild/SDK and compares bytes. Go build is offline (`GOPROXY=off`); fetch
 dependencies beforehand. `--verify-committed` also compares the tracked binary
-and bundle. The binary computes its executable SHA-256 at runtime. Worker
+and bundle. After a source change, copy `dist/cloudflare-verifier/worker.mjs`
+and `dist/cloudflare-verifier/aim-cloudflare-verifier` into
+`deploy/cloudflare-verifier/`, then rerun the release command with
+`--verify-committed` before committing those artifacts. The binary computes its executable SHA-256 at runtime. Worker
 identity is deployment metadata, never embedded in its own hashed module.
 
 The export includes a deterministic local release-template commit/tree,
