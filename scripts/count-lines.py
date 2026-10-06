@@ -54,6 +54,8 @@ if sys.argv[1:] == ["--self-check"]:
 
 totals = dict.fromkeys(CAPS, 0)
 for path in Path(".").rglob("*"):
+    if "node_modules" in path.parts or ".wrangler" in path.parts:
+        continue  # Installed tooling is not handwritten verifier source.
     if path.suffix == ".go" and not path.name.endswith("_test.go"):
         totals[category(path)] += len(path.read_text().splitlines())
     elif worker_source(path):
