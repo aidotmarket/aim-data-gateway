@@ -1,8 +1,8 @@
 package cloudflareverification
 
 import (
-	"encoding/json"
 	"github.com/aidotmarket/aim-data-gateway/internal/wire"
+	core "github.com/aidotmarket/aim-data-gateway/verification"
 	"strings"
 )
 
@@ -16,12 +16,13 @@ type WorkerIdentity struct {
 	SHA256 string `json:"sha256"`
 }
 type Config struct {
+	ConfigHash   string         `json:"deployment_config_sha256,omitempty"`
 	Connection   string         `json:"connection_id"`
 	Bucket       string         `json:"bucket"`
 	Prefix       string         `json:"prefix"`
 	Jurisdiction string         `json:"jurisdiction"`
 	Keys         []string       `json:"keys"`
-	Token        string         `json:"registration_token"`
+	Token        string         `json:"registration_token,omitempty"`
 	Version      string         `json:"scanner_version"`
 	Release      string         `json:"release_id"`
 	Binary       string         `json:"binary_sha256"`
@@ -32,7 +33,9 @@ func (c Config) Validate() error {
 	if !uuid.MatchString(c.Connection) || c.Bucket == "" || strings.ContainsAny(c.Bucket, "/:*?\\\x00") || c.Jurisdiction != "default" || !identifier.MatchString(c.Version) || !identifier.MatchString(c.Release) || !hex64.MatchString(c.Binary) || !hex64.MatchString(c.Worker.SHA256) || (c.Worker.Mode != "bundle" && c.Worker.Mode != "source_tree_lockfile") || len(c.Keys) == 0 || len(c.Keys) > MaxMembers {
 		return ErrRefused
 	}
-	raw, e := json.Marshal(c)
+	scope := c
+	scope.Token, scope.ConfigHash = "", ""
+	raw, e := core.Canonical(scope)
 	if e != nil || len(raw) > 1<<20 {
 		return ErrRefused
 	}

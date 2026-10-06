@@ -132,7 +132,7 @@ def export(record, output):
     config = json.loads((tree / "wrangler.jsonc").read_text())
     # Identity is deployment metadata, never embedded in the hashed Worker.
     config["vars"]["DEPLOYMENT_CONFIG"] = canonical({
-        "connection_id": "", "bucket": "", "prefix": "", "jurisdiction": "default", "keys": [],
+        "jurisdiction": "default",
         "release_id": record["release_id"], "scanner_version": record["scanner_version"],
         "binary_sha256": record["binary_sha256"], "worker_identity": record["worker_identity"]}).decode()
     (tree / "wrangler.jsonc").write_text(json.dumps(config, indent=2) + "\n")

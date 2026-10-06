@@ -30,7 +30,7 @@ func reply(r *http.Request, body string) *http.Response {
 	return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header), Request: r}
 }
 func testConfig() Config {
-	return Config{Connection: "11111111-1111-1111-1111-111111111111", Bucket: "synthetic", Prefix: "p/", Jurisdiction: "default", Keys: []string{"p/data.csv"}, Token: base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{3}, 32)), Version: "0.1.0", Release: "cloudflare-verifier-v0.1.0", Binary: strings.Repeat("b", 64), Worker: WorkerIdentity{Mode: "bundle", SHA256: strings.Repeat("c", 64)}}
+	return Config{ConfigHash: strings.Repeat("d", 64), Connection: "11111111-1111-1111-1111-111111111111", Bucket: "synthetic", Prefix: "p/", Jurisdiction: "default", Keys: []string{"p/data.csv"}, Token: base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{3}, 32)), Version: "0.1.0", Release: "cloudflare-verifier-v0.1.0", Binary: strings.Repeat("b", 64), Worker: WorkerIdentity{Mode: "bundle", SHA256: strings.Repeat("c", 64)}}
 }
 
 var runner = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
@@ -56,6 +56,9 @@ func TestRegistrationLostReplyExactAckAndIdentity(t *testing.T) {
 	json.Unmarshal(original, &request)
 	proof, _ := wire.DecodeDocument(request["key_proof"].(string), 64)
 	delete(request, "key_proof")
+	if request["deployment_config_sha256"] != c.ConfigHash {
+		t.Fatal("config hash missing from proof")
+	}
 	raw, _ := core.Canonical(request)
 	if !ed25519.Verify(s.Private.Public().(ed25519.PublicKey), raw, proof) {
 		t.Fatal("key proof")
@@ -333,5 +336,83 @@ func TestWorkVectorsScanAndDeadlineNoReads(t *testing.T) {
 	service.ServeHTTP(rr, httptest.NewRequest("POST", "/execute", bytes.NewReader(invocation)))
 	if rr.Code != 403 {
 		t.Fatal("deadline permitted", rr.Code)
+	}
+}
+
+func TestDeploymentConfigHashRequiredAtKeyCreation(t *testing.T) {
+	for _, hash := range []string{"", "bad", strings.Repeat("A", 64)} {
+		c := testConfig()
+		c.ConfigHash = hash
+		if _, e := CreateSecret(c, time.Now()); e == nil {
+			t.Fatal("invalid config hash accepted")
+		}
+	}
+}
+func TestRegistrationRefusalDistinctFromAmbiguousFailure(t *testing.T) {
+	for _, tc := range []struct {
+		body    string
+		status  int
+		refused bool
+	}{
+		{`{"detail":{"error":"registration_refused"}}`, 403, true},
+		{`{"error":"registration_refused"}`, 400, true},
+		{`{"detail":"registration_refused"}`, 401, true},
+		{`{"error":"registration_refused"}`, 500, false},
+		{`{"error":"other"}`, 403, false},
+		{`invalid`, 403, false},
+	} {
+		t.Run(tc.body, func(t *testing.T) {
+			c := testConfig()
+			sec, e := CreateSecret(c, time.Now())
+			if e != nil {
+				t.Fatal(e)
+			}
+			b := HTTPBackend{Client: &http.Client{Transport: trip(func(r *http.Request) (*http.Response, error) {
+				if r.URL.String() != APIBaseURL+"/api/v1/verification-runners/register" {
+					t.Fatal("wrong endpoint")
+				}
+				raw, _ := io.ReadAll(r.Body)
+				if !bytes.Equal(raw, sec.Registration) {
+					t.Fatal("request changed")
+				}
+				out := reply(r, tc.body)
+				out.StatusCode = tc.status
+				return out, nil
+			})}}
+			e = Register(context.Background(), c, sec, b)
+			if errors.Is(e, ErrRegistrationRefused) != tc.refused {
+				t.Fatalf("refusal %v: %v", tc.refused, e)
+			}
+			if sec.Runner != "" {
+				t.Fatal("failed registration consumed locally")
+			}
+		})
+	}
+	c := testConfig()
+	sec, _ := CreateSecret(c, time.Now())
+	b := HTTPBackend{Client: &http.Client{Transport: trip(func(r *http.Request) (*http.Response, error) { return nil, errors.New("lost reply") })}}
+	if e := Register(context.Background(), c, sec, b); e == nil || errors.Is(e, ErrRegistrationRefused) {
+		t.Fatal("network failure permits refetch")
+	}
+}
+
+func TestServiceReportsOnlyDefinitiveRegistrationRefusal(t *testing.T) {
+	c := testConfig()
+	sec, _ := CreateSecret(c, time.Now())
+	for _, status := range []int{403, 500} {
+		service := Service{Release: c.Release, Version: c.Version, Binary: c.Binary, BackendClient: &http.Client{Transport: trip(func(r *http.Request) (*http.Response, error) {
+			out := reply(r, `{"detail":{"error":"registration_refused"}}`)
+			out.StatusCode = status
+			return out, nil
+		})}}
+		raw, _ := json.Marshal(Invocation{Config: c, Secret: sec})
+		w := httptest.NewRecorder()
+		service.ServeHTTP(w, httptest.NewRequest("POST", "/register", bytes.NewReader(raw)))
+		if status == 403 && (w.Code != 409 || w.Body.String() != "registration_refused\n") {
+			t.Fatal("definitive refusal lost")
+		}
+		if status == 500 && (w.Code != 403 || w.Body.String() != "verification_refused\n") {
+			t.Fatal("ambiguous failure enables refetch")
+		}
 	}
 }
