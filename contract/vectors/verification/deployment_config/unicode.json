@@ -1,0 +1,43 @@
+{
+  "deployment_config": {
+    "connection_id": "6f1c2b9e-1111-4222-8333-944455556666",
+    "bucket": "seller-bucket",
+    "prefix": "fixtures/",
+    "jurisdiction": "default",
+    "keys": [
+      "fixtures/z.NDJSON",
+      "fixtures/é.csv",
+      "fixtures/日本 データ.parquet",
+      "fixtures/quote\"and\\slash"
+    ],
+    "release_id": "r1",
+    "scanner_version": "0.1.0",
+    "binary_sha256": "aa",
+    "worker_identity": {
+      "mode": "bundle",
+      "sha256": "bb"
+    }
+  },
+  "deployment_config_sha256": "0b69ed512d7065bce74c6302f927ebc8743a3598225005686d58f6d10a718d39",
+  "escaped_sha256": "ccd68f09cc5bc923eb9b4f5c30c69a1d540c1a4c73ae9efd2b0169a0f9b3167d",
+  "bootstrap_config": {
+    "connection_id": "6f1c2b9e-1111-4222-8333-944455556666",
+    "bucket": "seller-bucket",
+    "prefix": "fixtures/",
+    "jurisdiction": "default",
+    "keys": [
+      "fixtures/z.NDJSON",
+      "fixtures/é.csv",
+      "fixtures/日本 データ.parquet",
+      "fixtures/quote\"and\\slash"
+    ],
+    "release_id": "r1",
+    "scanner_version": "0.1.0",
+    "binary_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "worker_identity": {
+      "mode": "bundle",
+      "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    }
+  },
+  "bootstrap_sha256": "c2736f87e0372480a27c06ccffa6c6de9b0f8bbe934fbaa97f5ff0bff543a92e"
+}

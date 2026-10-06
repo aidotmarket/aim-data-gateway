@@ -13,6 +13,27 @@ export function canonical(v: unknown): string {
   if (s===undefined) refuse();
   return s.replace(/[\u007f-\uffff]/g,c=>"\\u"+c.charCodeAt(0).toString(16).padStart(4,"0"));
 }
+// Deployment config uses Python ensure_ascii=False. Its schema contains no numbers.
+export function deploymentConfigCanonical(v: unknown): string {
+  if (typeof v === "string") {
+    for (const c of v) {
+      const cp=c.codePointAt(0)!;
+      if(cp>=0xd800 && cp<=0xdfff)refuse();
+    }
+    return JSON.stringify(v);
+  }
+  if (Array.isArray(v)) return "["+v.map(deploymentConfigCanonical).join(",")+"]";
+  if (v !== null && typeof v === "object") {
+    const compare=(a:string,b:string):number=>{
+      const x=Array.from(a,c=>c.codePointAt(0)!),y=Array.from(b,c=>c.codePointAt(0)!);
+      for(let i=0;i<Math.min(x.length,y.length);i++)if(x[i]!==y[i])return x[i]-y[i];
+      return x.length-y.length;
+    };
+    return "{"+Object.entries(v).sort(([a],[b])=>compare(a,b)).map(([k,z])=>deploymentConfigCanonical(k)+":"+deploymentConfigCanonical(z)).join(",")+"}";
+  }
+  if(v===null || typeof v==="boolean")return JSON.stringify(v);
+  return refuse();
+}
 export async function encrypt(wrap: string, connection: string, value: unknown): Promise<string> {
   const key=await crypto.subtle.importKey("raw",unb64(wrap),"AES-GCM",false,["encrypt"]);
   const iv=crypto.getRandomValues(new Uint8Array(12));

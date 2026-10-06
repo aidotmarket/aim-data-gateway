@@ -1714,6 +1714,26 @@ function canonical(v) {
   if (s === void 0) refuse();
   return s.replace(/[\u007f-\uffff]/g, (c) => "\\u" + c.charCodeAt(0).toString(16).padStart(4, "0"));
 }
+function deploymentConfigCanonical(v) {
+  if (typeof v === "string") {
+    for (const c of v) {
+      const cp = c.codePointAt(0);
+      if (cp >= 55296 && cp <= 57343) refuse();
+    }
+    return JSON.stringify(v);
+  }
+  if (Array.isArray(v)) return "[" + v.map(deploymentConfigCanonical).join(",") + "]";
+  if (v !== null && typeof v === "object") {
+    const compare = (a, b) => {
+      const x = Array.from(a, (c) => c.codePointAt(0)), y = Array.from(b, (c) => c.codePointAt(0));
+      for (let i = 0; i < Math.min(x.length, y.length); i++) if (x[i] !== y[i]) return x[i] - y[i];
+      return x.length - y.length;
+    };
+    return "{" + Object.entries(v).sort(([a], [b]) => compare(a, b)).map(([k, z]) => deploymentConfigCanonical(k) + ":" + deploymentConfigCanonical(z)).join(",") + "}";
+  }
+  if (v === null || typeof v === "boolean") return JSON.stringify(v);
+  return refuse();
+}
 async function encrypt(wrap, connection, value) {
   const key = await crypto.subtle.importKey("raw", unb64(wrap), "AES-GCM", false, ["encrypt"]);
   const iv = crypto.getRandomValues(new Uint8Array(12));
@@ -1772,7 +1792,7 @@ function identity(raw) {
 }
 function config(c) {
   identity(canonical(Object.fromEntries(releaseFields.split(" ").map((k) => [k, c[k]]))));
-  if (Object.keys(c).sort().join(" ") !== "binary_sha256 bucket connection_id jurisdiction keys prefix release_id scanner_version worker_identity" || !/^[0-9a-f-]{36}$/.test(c.connection_id) || typeof c.bucket !== "string" || !c.bucket || /[/:*?\\\x00]/.test(c.bucket) || typeof c.prefix !== "string" || !Array.isArray(c.keys) || c.keys.length === 0 || c.keys.length > 17033 || utf8.encode(canonical(c)).length > 1048576 || c.keys.some((k) => typeof k !== "string" || !k || k.includes("\0") || !k.startsWith(c.prefix)) || new Set(c.keys).size !== c.keys.length) refuse();
+  if (Object.keys(c).sort().join(" ") !== "binary_sha256 bucket connection_id jurisdiction keys prefix release_id scanner_version worker_identity" || !/^[0-9a-f-]{36}$/.test(c.connection_id) || typeof c.bucket !== "string" || !c.bucket || /[/:*?\\\x00]/.test(c.bucket) || typeof c.prefix !== "string" || !Array.isArray(c.keys) || c.keys.length === 0 || c.keys.length > 17033 || utf8.encode(deploymentConfigCanonical(c)).length > 1048576 || c.keys.some((k) => typeof k !== "string" || !k || k.includes("\0") || !k.startsWith(c.prefix)) || new Set(c.keys).size !== c.keys.length) refuse();
   return c;
 }
 function matches(c, i) {
@@ -1886,13 +1906,13 @@ var CloudflareVerifier = class extends Container {
     for (let n = 0; n < count; n++) raw += this.ledger.get("config_" + n) ?? refuse();
     if (await sha(raw) !== hash) refuse();
     const c = config(JSON.parse(raw));
-    if (canonical(c) !== raw || !matches(c, identity(this.env.DEPLOYMENT_CONFIG)) || c.connection_id !== this.ledger.get("connection_id")) refuse();
+    if (deploymentConfigCanonical(c) !== raw || !matches(c, identity(this.env.DEPLOYMENT_CONFIG)) || c.connection_id !== this.ledger.get("connection_id")) refuse();
     return c;
   }
   persistConfig(c, hash, tokenHash) {
     const existing = this.ledger.get("connection_id");
     if (existing && existing !== c.connection_id) refuse();
-    const raw = canonical(c), count = Math.ceil(raw.length / 524288);
+    const raw = deploymentConfigCanonical(c), count = Math.ceil(raw.length / 524288);
     for (let n = 0; n < count; n++) this.ledger.put("config_" + n, raw.slice(n * 524288, (n + 1) * 524288));
     this.ledger.put("config_chunks", String(count));
     this.ledger.put("config_hash", hash);
@@ -1905,7 +1925,7 @@ var CloudflareVerifier = class extends Container {
     const response = await fetch("https://api.ai.market/api/v1/verification-runners/cloudflare/deployment-config", { method: "POST", headers: { "Content-Type": "application/json" }, body: canonical({ registration_token: token }), redirect: "manual", signal: AbortSignal.timeout(3e4) });
     if (response.status !== 200) refuse();
     const result = JSON.parse(await bounded(response, (1 << 20) + 256));
-    if (!result || Object.keys(result).sort().join(" ") !== "deployment_config deployment_config_sha256" || !/^[a-f0-9]{64}$/.test(result.deployment_config_sha256) || await sha(canonical(result.deployment_config)) !== result.deployment_config_sha256) refuse();
+    if (!result || Object.keys(result).sort().join(" ") !== "deployment_config deployment_config_sha256" || !/^[a-f0-9]{64}$/.test(result.deployment_config_sha256) || await sha(deploymentConfigCanonical(result.deployment_config)) !== result.deployment_config_sha256) refuse();
     const c = config(result.deployment_config);
     if (!matches(c, i) || this.ledger.get("connection_id") && this.ledger.get("connection_id") !== c.connection_id) refuse();
     return { config: c, hash: result.deployment_config_sha256, tokenHash: await sha(token) };

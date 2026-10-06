@@ -1,7 +1,7 @@
 import { Container, type OutboundHandlerContext } from "@cloudflare/containers";
 export { ContainerProxy } from "@cloudflare/containers";
 import { Ledger, LEASE_GRACE, refuse, type Admission, type Job, type Member } from "./state";
-import { b64, unb64, utf8, random, sha, canonical, encrypt, decrypt, equalSecret, bounded, now } from "./crypto";
+import { b64, unb64, utf8, random, sha, canonical, deploymentConfigCanonical, encrypt, decrypt, equalSecret, bounded, now } from "./crypto";
 
 type Env = Omit<RuntimeEnv,"VERIFIER"> & { VERIFIER: DurableObjectNamespace<CloudflareVerifier>; REGISTRATION_TOKEN: string; RUN_NOW_SECRET: string };
 
@@ -18,7 +18,7 @@ export function identity(raw:string):ReleaseIdentity {
 }
 export function config(c:Config):Config {
   identity(canonical(Object.fromEntries(releaseFields.split(" ").map(k=>[k,c[k as keyof Config]]))));
-  if(Object.keys(c).sort().join(" ")!=="binary_sha256 bucket connection_id jurisdiction keys prefix release_id scanner_version worker_identity" || !/^[0-9a-f-]{36}$/.test(c.connection_id) || typeof c.bucket!=="string" || !c.bucket || /[/:*?\\\x00]/.test(c.bucket) || typeof c.prefix!=="string" || !Array.isArray(c.keys) || c.keys.length===0 || c.keys.length>17033 || utf8.encode(canonical(c)).length>1048576 || c.keys.some(k=>typeof k!=="string" || !k || k.includes("\0") || !k.startsWith(c.prefix)) || new Set(c.keys).size!==c.keys.length)refuse();
+  if(Object.keys(c).sort().join(" ")!=="binary_sha256 bucket connection_id jurisdiction keys prefix release_id scanner_version worker_identity" || !/^[0-9a-f-]{36}$/.test(c.connection_id) || typeof c.bucket!=="string" || !c.bucket || /[/:*?\\\x00]/.test(c.bucket) || typeof c.prefix!=="string" || !Array.isArray(c.keys) || c.keys.length===0 || c.keys.length>17033 || utf8.encode(deploymentConfigCanonical(c)).length>1048576 || c.keys.some(k=>typeof k!=="string" || !k || k.includes("\0") || !k.startsWith(c.prefix)) || new Set(c.keys).size!==c.keys.length)refuse();
   return c;
 }
 function matches(c:Config,i:ReleaseIdentity):boolean {
@@ -117,12 +117,12 @@ export class CloudflareVerifier extends Container<Env> {
     let raw="";for(let n=0;n<count;n++)raw+=this.ledger.get("config_"+n)??refuse();
     if(await sha(raw)!==hash)refuse();
     const c=config(JSON.parse(raw));
-    if(canonical(c)!==raw || !matches(c,identity(this.env.DEPLOYMENT_CONFIG)) || c.connection_id!==this.ledger.get("connection_id"))refuse();
+    if(deploymentConfigCanonical(c)!==raw || !matches(c,identity(this.env.DEPLOYMENT_CONFIG)) || c.connection_id!==this.ledger.get("connection_id"))refuse();
     return c;
   }
   persistConfig(c:Config,hash:string,tokenHash:string):void {
     const existing=this.ledger.get("connection_id");if(existing && existing!==c.connection_id)refuse();
-    const raw=canonical(c),count=Math.ceil(raw.length/524288);
+    const raw=deploymentConfigCanonical(c),count=Math.ceil(raw.length/524288);
     for(let n=0;n<count;n++)this.ledger.put("config_"+n,raw.slice(n*524288,(n+1)*524288));
     this.ledger.put("config_chunks",String(count));this.ledger.put("config_hash",hash);
     this.ledger.put("connection_id",c.connection_id);this.ledger.put("config_token_hash",tokenHash);
@@ -133,7 +133,7 @@ export class CloudflareVerifier extends Container<Env> {
     const response=await fetch("https://api.ai.market/api/v1/verification-runners/cloudflare/deployment-config",{method:"POST",headers:{"Content-Type":"application/json"},body:canonical({registration_token:token}),redirect:"manual",signal:AbortSignal.timeout(30000)});
     if(response.status!==200)refuse();
     const result=JSON.parse(await bounded(response,(1<<20)+256));
-    if(!result || Object.keys(result).sort().join(" ")!=="deployment_config deployment_config_sha256" || !/^[a-f0-9]{64}$/.test(result.deployment_config_sha256) || await sha(canonical(result.deployment_config))!==result.deployment_config_sha256)refuse();
+    if(!result || Object.keys(result).sort().join(" ")!=="deployment_config deployment_config_sha256" || !/^[a-f0-9]{64}$/.test(result.deployment_config_sha256) || await sha(deploymentConfigCanonical(result.deployment_config))!==result.deployment_config_sha256)refuse();
     const c=config(result.deployment_config);
     if(!matches(c,i) || (this.ledger.get("connection_id") && this.ledger.get("connection_id")!==c.connection_id))refuse();
     return {config:c,hash:result.deployment_config_sha256,tokenHash:await sha(token)};

@@ -1,9 +1,10 @@
+import deploymentVector from "../../contract/vectors/verification/deployment_config/unicode.json";
 import { env, runInDurableObject } from "cloudflare:test";
 import { beforeAll, afterAll, describe, it, expect, vi } from "vitest";
 import worker, { CloudflareVerifier, identity } from "./worker.ts";
 import { Container } from "@cloudflare/containers";
 import { Ledger, RETENTION, type Job } from "./state";
-import { encrypt, decrypt, random, sha, now, canonical, b64, utf8 } from "./crypto";
+import { encrypt, decrypt, random, sha, now, canonical, deploymentConfigCanonical, b64, utf8 } from "./crypto";
 
 beforeAll(()=>{vi.stubGlobal("fetch",()=>{throw new Error("network disabled in tests");});});
 afterAll(()=>{vi.unstubAllGlobals();});
@@ -308,6 +309,35 @@ async function bootstrapFake(l:Ledger,state:DurableObjectState){
 }
 function configResponse(c=config,hash?:string){return new Response(canonical({deployment_config:c,deployment_config_sha256:hash}));}
 describe("Amendment A bootstrap and recovery",()=>{
+  it("matches Python deployment config bytes, code-point order and string escaping",async()=>{
+    expect(await sha(deploymentConfigCanonical(deploymentVector.deployment_config))).toBe(deploymentVector.deployment_config_sha256);
+    expect(await sha(canonical(deploymentVector.deployment_config))).toBe(deploymentVector.escaped_sha256);
+    expect(deploymentConfigCanonical({"😀":"astral","\ue000":"BMP","é":"\x00\b\f\n\r\t\x1f\"\\\x7fé日本"})).toBe('{"é":"\\u0000\\b\\f\\n\\r\\t\\u001f\\\"\\\\\x7fé日本","\ue000":"BMP","😀":"astral"}');
+    for(const v of ["\ud800","\udfff",{"\ud800":"key"},{key:"\udfff"}])expect(()=>deploymentConfigCanonical(v)).toThrow();
+    expect(()=>deploymentConfigCanonical({key:undefined})).toThrow();
+  });
+  it.each([false,true])("bootstraps Unicode config with backend hash; escaped hash refused=%s",async(escaped)=>fresh("unicode-"+escaped,async(l,state)=>{
+    const {fake,sec}=await bootstrapFake(l,state),c=deploymentVector.bootstrap_config,hash=deploymentVector.bootstrap_sha256;
+    Object.assign(sec,{Connection:c.connection_id,Version:c.scanner_version,Release:c.release_id,Digest:c.binary_sha256,Worker:c.worker_identity});
+    fake.env.DEPLOYMENT_CONFIG=canonical({release_id:c.release_id,scanner_version:c.scanner_version,binary_sha256:c.binary_sha256,worker_identity:c.worker_identity,jurisdiction:c.jurisdiction});
+    const calls:string[]=[];
+    fake.compute.mockImplementation(async(path:string)=>{
+      calls.push(path);expect(await fake.runtimeConfig()).toEqual(c);expect(l.get("config_hash")).toBe(hash);
+      if(path==="/create")return sec;
+      return {...sec,Runner:"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",Receipt:"bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",Ack:"ack"};
+    });
+    const network=vi.fn(async(url:string)=>url.endsWith("/deployment-config")?configResponse(c,escaped?await sha(canonical(c)):hash):new Response(canonical({work_jws:null})));
+    vi.stubGlobal("fetch",network);
+    try{
+      await CloudflareVerifier.prototype.pollTask.call(fake);
+      if(escaped){expect(fake.compute).not.toHaveBeenCalled();expect(l.get("config_hash")).toBeUndefined();expect(l.get("wrap")).toBeUndefined();expect(network).toHaveBeenCalledTimes(1);}
+      else{
+        expect(calls).toEqual(["/create","/register"]);expect(await fake.runtimeConfig()).toEqual(c);expect(l.get("last_poll")).toBeDefined();
+        fake.ledger=new Ledger(state.storage);await CloudflareVerifier.prototype.pollTask.call(fake);expect(calls).toHaveLength(2);expect(network).toHaveBeenCalledTimes(3);
+      }
+    }finally{vi.stubGlobal("fetch",()=>{throw new Error("network disabled");});}
+  }));
+
   it("parses only the shipped identity and refuses scope or invalid identity vars",()=>{
     expect(identity(canonical(shipped))).toEqual(shipped);
     for(const value of [config,{...shipped,binary_sha256:"bad"},{...shipped,jurisdiction:"eu"},{...shipped,worker_identity:{mode:"other",sha256:"c".repeat(64)}},{...shipped,release_id:""},{...shipped,scanner_version:1}])expect(()=>identity(canonical(value))).toThrow();
