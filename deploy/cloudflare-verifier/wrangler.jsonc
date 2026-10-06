@@ -1,0 +1,15 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "aim-cloudflare-verifier",
+  "main": "worker.mjs",
+  "no_bundle": true,
+  "compatibility_date": "2026-10-06",
+  "compatibility_flags": ["nodejs_compat"],
+  "containers": [{"class_name": "CloudflareVerifier", "image": "./Dockerfile", "instance_type": "standard-2", "max_instances": 1, "scheduling_policy": "default"}],
+  "durable_objects": {"bindings": [{"name": "VERIFIER", "class_name": "CloudflareVerifier"}]},
+  "migrations": [{"tag": "v1", "new_sqlite_classes": ["CloudflareVerifier"]}],
+  "r2_buckets": [{"binding": "SOURCE", "bucket_name": "replace-with-existing-listing-bucket"}],
+  "triggers": {"crons": ["* * * * *"]},
+  "vars": {"DEPLOYMENT_CONFIG": "{}"},
+  "observability": {"enabled": true}
+}

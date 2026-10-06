@@ -1,0 +1,26 @@
+{
+  "name": "aim-cloudflare-verifier",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "esbuild worker.ts --bundle --format=esm --platform=neutral --external:cloudflare:* --outfile=worker.mjs",
+    "test": "vitest run",
+    "types": "tsc --noEmit",
+    "deploy": "wrangler deploy"
+  },
+  "dependencies": {
+    "@cloudflare/containers": "0.3.7"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "0.22.0",
+    "@cloudflare/workers-types": "5.20261006.1",
+    "esbuild": "0.28.2",
+    "typescript": "7.0.2",
+    "vitest": "4.1.11",
+    "wrangler": "4.147.0"
+  },
+  "overrides": {
+    "undici": "7.29.1",
+    "sharp": "0.35.5"
+  }
+}
