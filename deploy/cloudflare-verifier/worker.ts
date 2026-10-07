@@ -202,18 +202,23 @@ export class CloudflareVerifier extends Container<Env> {
       if(!sec.Runner){
         try {sec=await this.compute<Secret>("/register",c,sec);await this.save(sec,c);}
         catch(e){
-          if(!(e instanceof Error) || e.message!=="registration_refused" || await sha(this.env.REGISTRATION_TOKEN)===this.ledger.get("config_token_hash"))throw e;
-          // An explicit registration refusal with a replacement token pulls
-          // fresh config and signs a new registration request.
-          const pulled=await this.pullConfig();
+          if(!(e instanceof Error) || e.message!=="registration_refused")throw e;
+          // An explicit refusal means the backend did not accept these bytes, so
+          // signing a fresh nonce and time cannot strand an accepted registration
+          // (a lost acknowledgment is retried with the original bytes above). The
+          // backend refuses a registered_at_utc more than 300 seconds from its
+          // clock, so a refused request is always re-signed. A replacement token also pulls
+          // fresh config under that token.
+          const replaced=await sha(this.env.REGISTRATION_TOKEN)!==this.ledger.get("config_token_hash");
+          const pulled=replaced?await this.pullConfig():undefined;
           const request=JSON.parse(new TextDecoder().decode(unb64(sec.Registration)));
           delete request.key_proof;
-          request.registration_token=this.env.REGISTRATION_TOKEN;request.deployment_config_sha256=pulled.hash;
+          if(pulled){request.registration_token=this.env.REGISTRATION_TOKEN;request.deployment_config_sha256=pulled.hash;}
           request.registration_nonce=random();request.registered_at_utc=new Date(now()*1000).toISOString().replace(".000Z","Z");
           request.key_proof=b64(new Uint8Array(await crypto.subtle.sign("Ed25519",await signingKey(sec),utf8.encode(canonical(request)))));
           sec={...sec,Nonce:request.registration_nonce,Registration:btoa(canonical(request))};
           const cipher=await encrypt(this.ledger.get("wrap")??refuse(),c.connection_id,sec);
-          this.ctx.storage.transactionSync(()=>{this.persistConfig(pulled.config,pulled.hash,pulled.tokenHash);this.ledger.put("secret",cipher);});
+          this.ctx.storage.transactionSync(()=>{if(pulled)this.persistConfig(pulled.config,pulled.hash,pulled.tokenHash);this.ledger.put("secret",cipher);});
           c=await this.runtimeConfig();sec=await this.compute<Secret>("/register",c,sec);await this.save(sec,c);
         }
       }
@@ -245,8 +250,9 @@ export class CloudflareVerifier extends Container<Env> {
     } catch {
       this.ledger.event("refused","",now());
       console.log(JSON.stringify({event:"refused"}));
-      // A subsequent schedule retries recovery, never an admitted traversal.
-      await this.schedule(60,"pollTask");
+      // The next cron or operator wake retries recovery, never an admitted
+      // traversal. Scheduling here added a row per failure and, with SDK 0.3.7
+      // one-shot rows, made refused polls run every few seconds.
     } finally {
       this.ledger.release();this.ledger.prune(now());
       await this.stop();

@@ -2019,19 +2019,22 @@ var CloudflareVerifier = class extends Container {
           sec = await this.compute("/register", c, sec);
           await this.save(sec, c);
         } catch (e) {
-          if (!(e instanceof Error) || e.message !== "registration_refused" || await sha(this.env.REGISTRATION_TOKEN) === this.ledger.get("config_token_hash")) throw e;
-          const pulled = await this.pullConfig();
+          if (!(e instanceof Error) || e.message !== "registration_refused") throw e;
+          const replaced = await sha(this.env.REGISTRATION_TOKEN) !== this.ledger.get("config_token_hash");
+          const pulled = replaced ? await this.pullConfig() : void 0;
           const request = JSON.parse(new TextDecoder().decode(unb64(sec.Registration)));
           delete request.key_proof;
-          request.registration_token = this.env.REGISTRATION_TOKEN;
-          request.deployment_config_sha256 = pulled.hash;
+          if (pulled) {
+            request.registration_token = this.env.REGISTRATION_TOKEN;
+            request.deployment_config_sha256 = pulled.hash;
+          }
           request.registration_nonce = random();
           request.registered_at_utc = new Date(now() * 1e3).toISOString().replace(".000Z", "Z");
           request.key_proof = b64(new Uint8Array(await crypto.subtle.sign("Ed25519", await signingKey(sec), utf8.encode(canonical(request)))));
           sec = { ...sec, Nonce: request.registration_nonce, Registration: btoa(canonical(request)) };
           const cipher = await encrypt(this.ledger.get("wrap") ?? refuse(), c.connection_id, sec);
           this.ctx.storage.transactionSync(() => {
-            this.persistConfig(pulled.config, pulled.hash, pulled.tokenHash);
+            if (pulled) this.persistConfig(pulled.config, pulled.hash, pulled.tokenHash);
             this.ledger.put("secret", cipher);
           });
           c = await this.runtimeConfig();
@@ -2068,7 +2071,6 @@ var CloudflareVerifier = class extends Container {
     } catch {
       this.ledger.event("refused", "", now());
       console.log(JSON.stringify({ event: "refused" }));
-      await this.schedule(60, "pollTask");
     } finally {
       this.ledger.release();
       this.ledger.prune(now());
