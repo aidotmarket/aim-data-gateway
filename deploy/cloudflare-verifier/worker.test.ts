@@ -1,7 +1,7 @@
 import deploymentVector from "../../contract/vectors/verification/deployment_config/unicode.json";
 import { env, runInDurableObject } from "cloudflare:test";
 import { beforeAll, afterAll, describe, it, expect, vi } from "vitest";
-import worker, { CloudflareVerifier, identity } from "./worker.ts";
+import worker, { CloudflareVerifier, ContainerProxy, identity } from "./worker.ts";
 import { Container } from "@cloudflare/containers";
 import { Ledger, RETENTION, type Job } from "./state";
 import { encrypt, decrypt, random, sha, now, canonical, deploymentConfigCanonical, b64, utf8 } from "./crypto";
@@ -142,6 +142,17 @@ describe("seller control and private bridge",()=>{
   it("never overrides alarm and keeps internet enabled with private host interception",()=>{
     expect(CloudflareVerifier.prototype.hasOwnProperty("alarm")).toBe(false);
     expect(Object.keys(CloudflareVerifier.outboundByHost)).toEqual(["r2-bridge.internal"]);
+    expect(Object.hasOwn(CloudflareVerifier,"outboundByHost")).toBe(false);
+  });
+  it("routes the private bridge host through the SDK ContainerProxy registry, not the internet",async()=>{
+    const fetch=vi.fn().mockResolvedValue(new Response(null,{status:200,headers:{"X-Object-Size":"4"}})),namespace=routing({fetch});
+    const e={DEPLOYMENT_CONFIG:"{}",RUN_NOW_SECRET:"s".repeat(43),VERIFIER:namespace};
+    const internet=vi.spyOn(globalThis,"fetch").mockResolvedValue(new Response("origin dns error",{status:530}));
+    try {
+      const proxy={ctx:{props:{className:CloudflareVerifier.name,containerId:"c",enableInternet:true}},env:e};
+      const res=await (ContainerProxy.prototype.fetch as (this:unknown,r:Request)=>Promise<Response>).call(proxy,new Request("http://r2-bridge.internal/member/0",{method:"HEAD"}));
+      expect(res.status).toBe(200);expect(fetch).toHaveBeenCalledTimes(1);expect(internet).not.toHaveBeenCalled();
+    } finally {internet.mockRestore();}
   });
   it("pins all HEAD/full/range reads and refuses list/write/nonmembers/expired capabilities",async()=>{
     const object=await env.SOURCE.put("p/data.csv","x\n1\n");
