@@ -405,6 +405,30 @@ describe("Amendment A bootstrap and recovery",()=>{
     try{await CloudflareVerifier.prototype.pollTask.call(fake);fake.ledger=new Ledger(state.storage);await CloudflareVerifier.prototype.pollTask.call(fake);expect(sent).toEqual([original,original]);expect(network).toHaveBeenCalledTimes(1);expect(network.mock.calls[0][0]).not.toContain("deployment-config");}
     finally{vi.stubGlobal("fetch",()=>{throw new Error("network disabled");});}
   }));
+  it("same-token refusal re-signs a fresh registration without pulling config",async()=>storage("same-token-resign",async(l,state)=>{
+    const {fake,sec,original}=await bootstrapFake(l,state);l.firstStart(random(),now());await fake.save(sec,config);
+    l.put("config_token_hash",await sha(fake.env.REGISTRATION_TOKEN));
+    const before=JSON.parse(original),sent:string[]=[];
+    fake.compute.mockImplementation(async(path:string,c:unknown,s:typeof sec)=>{
+      expect(path).toBe("/register");const raw=new TextDecoder().decode(Uint8Array.from(atob(s.Registration.replaceAll("-","+").replaceAll("_","/")),c=>c.charCodeAt(0)));sent.push(raw);
+      if(sent.length===1)throw new Error("registration_refused");
+      const request=JSON.parse(raw),proof=request.key_proof;delete request.key_proof;
+      expect(request.registration_token).toBe(before.registration_token);expect(request.deployment_config_sha256).toBe(before.deployment_config_sha256);
+      expect(request.registration_nonce).not.toBe(before.registration_nonce);expect(s.Nonce).toBe(request.registration_nonce);
+      const key=await crypto.subtle.importKey("raw",sec.pub,"Ed25519",false,["verify"]);
+      expect(await crypto.subtle.verify("Ed25519",key,Uint8Array.from(atob(proof.replaceAll("-","+").replaceAll("_","/")),c=>c.charCodeAt(0)),utf8.encode(canonical(request)))).toBe(true);
+      return {...s,Runner:"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",Receipt:"bbbbbbbb-bbbb-bbbb-bbbbbbbbbbbb",Ack:"ack"};
+    });
+    let pulls=0;vi.stubGlobal("fetch",async(url:string)=>{if(url.endsWith("/deployment-config")){pulls++;throw new Error("must not pull");}return new Response(canonical({work_jws:null}));});
+    try{await CloudflareVerifier.prototype.pollTask.call(fake);expect(pulls).toBe(0);expect(sent).toHaveLength(2);expect(sent[0]).toBe(original);expect(sent[1]).not.toBe(original);expect(l.get("last_poll")).toBeDefined();}
+    finally{vi.stubGlobal("fetch",()=>{throw new Error("network disabled");});}
+  }));
+  it("a refused poll does not add its own retry schedule",async()=>storage("refused-no-schedule",async(l,state)=>{
+    const {fake,sec}=await bootstrapFake(l,state);l.firstStart(random(),now());await fake.save(sec,config);
+    fake.compute.mockImplementation(async()=>{throw new Error("verification_refused");});
+    await CloudflareVerifier.prototype.pollTask.call(fake);
+    expect(fake.schedule).not.toHaveBeenCalled();expect(l.get("task")).toBe("");expect(fake.stop).toHaveBeenCalled();
+  }));
   it("expired unconsumed token replacement refetches and persists a newly signed hash",async()=>storage("token-replacement",async(l,state)=>{
     const {fake,sec,original}=await bootstrapFake(l,state);l.firstStart(random(),now());await fake.save(sec,config);
     const next={...config,keys:["p/data.csv","p/new.csv"]},hash=await sha(canonical(next)),sent:string[]=[];
