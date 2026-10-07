@@ -1,17 +1,24 @@
+import deploymentVector from "../../contract/vectors/verification/deployment_config/unicode.json";
 import { env, runInDurableObject } from "cloudflare:test";
 import { beforeAll, afterAll, describe, it, expect, vi } from "vitest";
-import worker, { CloudflareVerifier } from "./worker.ts";
+import worker, { CloudflareVerifier, identity } from "./worker.ts";
 import { Container } from "@cloudflare/containers";
 import { Ledger, RETENTION, type Job } from "./state";
-import { encrypt, decrypt, random, sha, now, canonical, b64, utf8 } from "./crypto";
+import { encrypt, decrypt, random, sha, now, canonical, deploymentConfigCanonical, b64, utf8 } from "./crypto";
 
 beforeAll(()=>{vi.stubGlobal("fetch",()=>{throw new Error("network disabled in tests");});});
 afterAll(()=>{vi.unstubAllGlobals();});
 const at=1791290000;
 const config={connection_id:"11111111-1111-1111-1111-111111111111",bucket:"synthetic",prefix:"p/",jurisdiction:"default",keys:["p/data.csv"],release_id:"cloudflare-verifier-v0.1.0",scanner_version:"0.1.0",binary_sha256:"b".repeat(64),worker_identity:{mode:"bundle",sha256:"c".repeat(64)}};
+const shipped={release_id:config.release_id,scanner_version:config.scanner_version,binary_sha256:config.binary_sha256,worker_identity:config.worker_identity,jurisdiction:"default"};
+const routing=(stub:unknown)=>({idFromName:vi.fn((name:string)=>{expect(name).toBe("aim-verifier");return "fixed";}),get:vi.fn((id:string)=>{expect(id).toBe("fixed");return stub;})});
 function job(n:number):Job {return {Token:"authentic-signed-test-"+n,Envelope:{iid:"iid-"+n,spec_hash:"a".repeat(64),variant:"scan"},Payload:{spec_id:"spec-"+n,nonce:"nonce-"+n,owner_authorization_id:"authorization-"+n,listing_id:"listing",expires_at_utc:new Date((at+86400)*1000).toISOString(),accepted_at_utc:new Date(at*1000).toISOString()}};}
 function storage(name:string,fn:(ledger:Ledger,state:DurableObjectState)=>unknown){
-  return runInDurableObject(env.STORAGE.getByName(name),async(_instance,state)=>fn(new Ledger(state.storage),state));
+  return runInDurableObject(env.STORAGE.getByName(name),async(_instance,state)=>{
+    const l=new Ledger(state.storage);
+    if(!l.get("config_hash"))CloudflareVerifier.prototype.persistConfig.call({ledger:l},config,await sha(canonical(config)),await sha("old"));
+    return fn(l,state);
+  });
 }
 describe("SQLite consent and custody",()=>{
   it("serializes duplicate admissions and increments only once",async()=>{
@@ -122,7 +129,7 @@ describe("SQLite consent and custody",()=>{
 describe("seller control and private bridge",()=>{
   it("authenticates seller only, accepts exactly {}, never forwards operator payload",async()=>{
     const enqueue=vi.fn().mockResolvedValue(undefined);
-    const e={DEPLOYMENT_CONFIG:JSON.stringify(config),RUN_NOW_SECRET:"s".repeat(43),VERIFIER:{getByName:()=>({enqueue})}};
+    const e={DEPLOYMENT_CONFIG:JSON.stringify(shipped),RUN_NOW_SECRET:"s".repeat(43),VERIFIER:routing({enqueue,operatorPage:CloudflareVerifier.prototype.operatorPage})};
     const req=(body:string,auth="Bearer "+e.RUN_NOW_SECRET)=>new Request("https://seller.invalid/operator/run-now",{method:"POST",headers:{Authorization:auth},body});
     expect((await worker.fetch(req("{}","wrong"),e)).status).toBe(401);
     expect((await worker.fetch(req('{"spec":"evil"}'),e)).status).toBe(400);
@@ -147,7 +154,7 @@ describe("seller control and private bridge",()=>{
       const key=await crypto.subtle.importKey("raw",Uint8Array.from(atob(wrap.replaceAll("-","+").replaceAll("_","/")),c=>c.charCodeAt(0)),{name:"HMAC",hash:"SHA-256"},false,["sign"]);
       const sig=new Uint8Array(await crypto.subtle.sign("HMAC",key,new TextEncoder().encode("bridge-v1."+text)));
       const token=text+"."+btoa(String.fromCharCode(...sig)).replaceAll("+","-").replaceAll("/","_").replaceAll("=","");l.put("capability",token);
-      const fake={ledger:l,ctx:s,env:{SOURCE:env.SOURCE,DEPLOYMENT_CONFIG:JSON.stringify(config)}};
+      const fake={runtimeConfig:CloudflareVerifier.prototype.runtimeConfig,ledger:l,ctx:s,env:{SOURCE:env.SOURCE,DEPLOYMENT_CONFIG:JSON.stringify(shipped)}};
       const bridge=(path="/member/0",method="GET",extra={})=>CloudflareVerifier.prototype.bridge.call(fake,new Request("http://r2-bridge.internal"+path,{method,headers:{Authorization:"Bearer "+token,...extra}}));
       expect((await bridge("/member/0","HEAD")).headers.get("X-Object-Etag")).toBe(object.etag);
       expect(await (await bridge()).text()).toBe("x\n1\n");
@@ -187,13 +194,13 @@ describe("scheduled recovery without external network",()=>{
     // Use SDK 0.3.7's actual SQL scheduler/alarm, with only Container lifecycle
     // and network stubbed. Its normal-return deletion is part of this test.
     state.storage.sql.exec(`CREATE TABLE container_schedules(id TEXT PRIMARY KEY,callback TEXT NOT NULL,payload TEXT,type TEXT NOT NULL,time INTEGER,delayInSeconds INTEGER)`);
-    const fake={ledger:l,ctx:state,env:{DEPLOYMENT_CONFIG:JSON.stringify(config),SOURCE:source},load:async()=>sec,compute,
+    const fake={runtimeConfig:CloudflareVerifier.prototype.runtimeConfig,ledger:l,ctx:state,env:{DEPLOYMENT_CONFIG:JSON.stringify(shipped),SOURCE:source},load:async()=>sec,compute,
       enqueue:CloudflareVerifier.prototype.enqueue,pollTask:CloudflareVerifier.prototype.pollTask,recover:CloudflareVerifier.prototype.recover,
       schedule:Container.prototype.schedule,scheduleNextAlarm:Container.prototype.scheduleNextAlarm,
       getSchedule:Container.prototype.getSchedule,toSchedule:Container.prototype.toSchedule,
       sql:(strings:TemplateStringsArray,...values:unknown[])=>state.storage.sql.exec(strings.join("?"),...values.map(v=>v===undefined?null:v)).toArray(),
       container:{running:false},syncPendingStoppedEvents:vi.fn().mockResolvedValue(undefined),stop:vi.fn().mockResolvedValue(undefined)};
-    const e={DEPLOYMENT_CONFIG:JSON.stringify(config),RUN_NOW_SECRET:"s".repeat(43),VERIFIER:{getByName:()=>fake}};
+    const e={DEPLOYMENT_CONFIG:JSON.stringify(shipped),RUN_NOW_SECRET:"s".repeat(43),VERIFIER:routing(fake)};
     const triggerWake=async()=>{
       if(trigger==="cron")await worker.scheduled({},e);
       else expect((await worker.fetch(new Request("https://seller.invalid/operator/run-now",{method:"POST",headers:{Authorization:"Bearer "+e.RUN_NOW_SECRET},body:"{}"}),e)).status).toBe(202);
@@ -246,7 +253,7 @@ describe("scheduled recovery without external network",()=>{
       return new Response('{"work_jws":null}');
     });
     const compute=vi.fn().mockRejectedValue(new Error("must not restart compute"));
-    const fake={ledger:l,ctx:state,env:{DEPLOYMENT_CONFIG:JSON.stringify(config)},load:async()=>sec,compute,recover:CloudflareVerifier.prototype.recover,stop:vi.fn().mockResolvedValue(undefined),schedule:vi.fn().mockResolvedValue(undefined)};
+    const fake={runtimeConfig:CloudflareVerifier.prototype.runtimeConfig,ledger:l,ctx:state,env:{DEPLOYMENT_CONFIG:JSON.stringify(shipped)},load:async()=>sec,compute,recover:CloudflareVerifier.prototype.recover,stop:vi.fn().mockResolvedValue(undefined),schedule:vi.fn().mockResolvedValue(undefined)};
     try {
       await CloudflareVerifier.prototype.pollTask.call(fake);
       expect(l.active()?.state).toBe("committed");expect(requests).toHaveLength(1);
@@ -262,7 +269,7 @@ describe("scheduled recovery without external network",()=>{
     let r=l.admit(j,"saved",[],t-900,t-900,t-900)!;
     const sec=await testSecret();
     const compute=vi.fn().mockResolvedValue({body:canonical({terminal_error_code:"scanner_failure"})});
-    const fake={ledger:l,ctx:state,env:{DEPLOYMENT_CONFIG:JSON.stringify(config)},compute};
+    const fake={runtimeConfig:CloudflareVerifier.prototype.runtimeConfig,ledger:l,ctx:state,env:{DEPLOYMENT_CONFIG:JSON.stringify(shipped)},compute};
     await expect(CloudflareVerifier.prototype.recover.call(fake,config,sec)).rejects.toThrow();expect(compute).not.toHaveBeenCalled();
     r={...r,start:t-1021};l.update(r,t);
     let sent=0;vi.stubGlobal("fetch",async()=>{sent++;return new Response(canonical({iid:r.iid,status:"stored"}));});
@@ -280,8 +287,195 @@ describe("scheduled recovery without external network",()=>{
     state.storage.sql.exec("DROP TABLE events");expect(()=>new Ledger(state.storage)).toThrow();
   }));
   it("cron and operator enqueue share durable coalescing through schedule",async()=>storage("coalesced",async(l,state)=>{
-    const schedule=vi.fn().mockResolvedValue(undefined),fake={ledger:l,ctx:state,env:{DEPLOYMENT_CONFIG:JSON.stringify(config)},schedule};
+    const schedule=vi.fn().mockResolvedValue(undefined),fake={ledger:l,ctx:state,env:{DEPLOYMENT_CONFIG:JSON.stringify(shipped)},schedule};
     await Promise.all([CloudflareVerifier.prototype.enqueue.call(fake),CloudflareVerifier.prototype.enqueue.call(fake)]);
     expect(schedule).toHaveBeenCalledTimes(1);expect(schedule).toHaveBeenCalledWith(1,"pollTask");
   }));
 });
+
+function fresh(name:string,fn:(l:Ledger,state:DurableObjectState)=>unknown){
+  return runInDurableObject(env.STORAGE.getByName("bootstrap-"+name),async(_instance,state)=>fn(new Ledger(state.storage),state));
+}
+async function bootstrapFake(l:Ledger,state:DurableObjectState){
+  const sec=await testSecret();sec.Runner="";sec.Receipt="";sec.Ack="";
+  const original=canonical({registration_token:random(),deployment_config_sha256:await sha(canonical(config)),connection_id:config.connection_id,key_proof:"old",registered_at_utc:new Date().toISOString()});
+  sec.Registration=b64(utf8.encode(original));
+  const fake={ledger:l,ctx:state,env:{DEPLOYMENT_CONFIG:canonical(shipped),REGISTRATION_TOKEN:random(),SOURCE:{head:vi.fn(),get:vi.fn()}},
+    runtimeConfig:CloudflareVerifier.prototype.runtimeConfig,persistConfig:CloudflareVerifier.prototype.persistConfig,pullConfig:CloudflareVerifier.prototype.pullConfig,
+    load:CloudflareVerifier.prototype.load,save:CloudflareVerifier.prototype.save,recover:CloudflareVerifier.prototype.recover,
+    compute:vi.fn(async(path:string)=>{if(path==="/create")return sec;if(path==="/register")return {...sec,Runner:"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",Receipt:"bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",Ack:"ack"};throw new Error("unexpected compute");}),
+    schedule:vi.fn().mockResolvedValue(undefined),stop:vi.fn().mockResolvedValue(undefined)};
+  return {fake,sec,original};
+}
+function configResponse(c=config,hash?:string){return new Response(canonical({deployment_config:c,deployment_config_sha256:hash}));}
+describe("Amendment A bootstrap and recovery",()=>{
+  it("matches Python deployment config bytes, code-point order and string escaping",async()=>{
+    expect(await sha(deploymentConfigCanonical(deploymentVector.deployment_config))).toBe(deploymentVector.deployment_config_sha256);
+    expect(await sha(canonical(deploymentVector.deployment_config))).toBe(deploymentVector.escaped_sha256);
+    expect(deploymentConfigCanonical({"😀":"astral","\ue000":"BMP","é":"\x00\b\f\n\r\t\x1f\"\\\x7fé日本"})).toBe('{"é":"\\u0000\\b\\f\\n\\r\\t\\u001f\\\"\\\\\x7fé日本","\ue000":"BMP","😀":"astral"}');
+    for(const v of ["\ud800","\udfff",{"\ud800":"key"},{key:"\udfff"}])expect(()=>deploymentConfigCanonical(v)).toThrow();
+    expect(()=>deploymentConfigCanonical({key:undefined})).toThrow();
+  });
+  it.each([false,true])("bootstraps Unicode config with backend hash; escaped hash refused=%s",async(escaped)=>fresh("unicode-"+escaped,async(l,state)=>{
+    const {fake,sec}=await bootstrapFake(l,state),c=deploymentVector.bootstrap_config,hash=deploymentVector.bootstrap_sha256;
+    Object.assign(sec,{Connection:c.connection_id,Version:c.scanner_version,Release:c.release_id,Digest:c.binary_sha256,Worker:c.worker_identity});
+    fake.env.DEPLOYMENT_CONFIG=canonical({release_id:c.release_id,scanner_version:c.scanner_version,binary_sha256:c.binary_sha256,worker_identity:c.worker_identity,jurisdiction:c.jurisdiction});
+    const calls:string[]=[];
+    fake.compute.mockImplementation(async(path:string)=>{
+      calls.push(path);expect(await fake.runtimeConfig()).toEqual(c);expect(l.get("config_hash")).toBe(hash);
+      if(path==="/create")return sec;
+      return {...sec,Runner:"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",Receipt:"bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",Ack:"ack"};
+    });
+    const network=vi.fn(async(url:string)=>url.endsWith("/deployment-config")?configResponse(c,escaped?await sha(canonical(c)):hash):new Response(canonical({work_jws:null})));
+    vi.stubGlobal("fetch",network);
+    try{
+      await CloudflareVerifier.prototype.pollTask.call(fake);
+      if(escaped){expect(fake.compute).not.toHaveBeenCalled();expect(l.get("config_hash")).toBeUndefined();expect(l.get("wrap")).toBeUndefined();expect(network).toHaveBeenCalledTimes(1);}
+      else{
+        expect(calls).toEqual(["/create","/register"]);expect(await fake.runtimeConfig()).toEqual(c);expect(l.get("last_poll")).toBeDefined();
+        fake.ledger=new Ledger(state.storage);await CloudflareVerifier.prototype.pollTask.call(fake);expect(calls).toHaveLength(2);expect(network).toHaveBeenCalledTimes(3);
+      }
+    }finally{vi.stubGlobal("fetch",()=>{throw new Error("network disabled");});}
+  }));
+
+  it("parses only the shipped identity and refuses scope or invalid identity vars",()=>{
+    expect(identity(canonical(shipped))).toEqual(shipped);
+    for(const value of [config,{...shipped,binary_sha256:"bad"},{...shipped,jurisdiction:"eu"},{...shipped,worker_identity:{mode:"other",sha256:"c".repeat(64)}},{...shipped,release_id:""},{...shipped,scanner_version:1}])expect(()=>identity(canonical(value))).toThrow();
+  });
+  it("refuses malformed deployment identity JSON uniformly",()=>{
+    for(const raw of ["{", "", "undefined", '{"release_id":}'])expect(()=>identity(raw)).toThrowError(new Error("verification_refused"));
+  });
+  it("routes cron, run-now and the private bridge to the fixed DO before config exists",async()=>{
+    const enqueue=vi.fn().mockResolvedValue(undefined),fetch=vi.fn().mockResolvedValue(new Response("refused",{status:403})),namespace=routing({enqueue,fetch,operatorPage:CloudflareVerifier.prototype.operatorPage});
+    const e={DEPLOYMENT_CONFIG:"{}",RUN_NOW_SECRET:"s".repeat(43),VERIFIER:namespace};
+    await worker.scheduled({},e);
+    expect((await worker.fetch(new Request("https://seller.invalid/operator"),e)).status).toBe(200);
+    expect((await worker.fetch(new Request("https://seller.invalid/operator/run-now",{method:"POST",headers:{Authorization:"Bearer "+e.RUN_NOW_SECRET},body:"{}"}),e)).status).toBe(202);
+    await CloudflareVerifier.outboundByHost["r2-bridge.internal"](new Request("http://r2-bridge.internal/member/0",{method:"HEAD"}),e,{containerId:"not-a-routing-input"});
+    expect(namespace.idFromName).toHaveBeenCalledTimes(4);expect(fetch).toHaveBeenCalledTimes(1);
+  });
+  it("bootstraps with canonical token-only request, persists before keys, registers then polls",async()=>fresh("happy",async(l,state)=>{
+    const {fake,sec}=await bootstrapFake(l,state),hash=await sha(canonical(config)),calls:string[]=[];
+    fake.compute.mockImplementation(async(path:string,c:unknown)=>{
+      calls.push(path);expect(await fake.runtimeConfig()).toEqual(config);expect(l.get("config_hash")).toBe(hash);expect(l.get("wrap")).toBeDefined();
+      if(path==="/create")return sec;
+      return {...sec,Runner:"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",Receipt:"bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",Ack:"ack"};
+    });
+    vi.stubGlobal("fetch",async(url:string,init:RequestInit)=>{
+      if(url.endsWith("/deployment-config")){calls.push("pull");expect(init.redirect).toBe("manual");expect(init.body).toBe(canonical({registration_token:fake.env.REGISTRATION_TOKEN}));expect(l.get("wrap")).toBeUndefined();return configResponse(config,hash);}
+      calls.push("poll");return new Response(canonical({work_jws:null}));
+    });
+    try{
+      await CloudflareVerifier.prototype.pollTask.call(fake);expect(calls).toEqual(["pull","/create","/register","poll"]);
+      const stored=await fake.load(config);expect(stored.Runner).not.toBe("");
+      // Reconstruct storage and redeploy the same identity with a new secret.
+      fake.ledger=new Ledger(state.storage);fake.env.REGISTRATION_TOKEN=random();
+      await CloudflareVerifier.prototype.pollTask.call(fake);expect(calls).toEqual(["pull","/create","/register","poll","poll"]);
+      expect(fake.env.SOURCE.head).not.toHaveBeenCalled();expect(fake.env.SOURCE.get).not.toHaveBeenCalled();
+    }finally{vi.stubGlobal("fetch",()=>{throw new Error("network disabled");});}
+  }));
+  it.each(["hash","identity","scope"])("refuses %s before first-start or key generation",async(kind)=>fresh(kind,async(l,state)=>{
+    const {fake}=await bootstrapFake(l,state);
+    const c=kind==="identity"?{...config,binary_sha256:"e".repeat(64)}:kind==="scope"?{...config,keys:["outside"]}:config;
+    vi.stubGlobal("fetch",async()=>configResponse(c,kind==="hash"?"0".repeat(64):await sha(canonical(c))));
+    try{await CloudflareVerifier.prototype.pollTask.call(fake);expect(fake.compute).not.toHaveBeenCalled();expect(l.get("bootstrap")).toBeUndefined();expect(l.get("wrap")).toBeUndefined();expect(l.get("secret")).toBeUndefined();}
+    finally{vi.stubGlobal("fetch",()=>{throw new Error("network disabled");});}
+  }));
+  it("reloads persisted config, refuses corruption and mismatched connection without reads",async()=>storage("config-corrupt",async(l,state)=>{
+    const {fake}=await bootstrapFake(l,state);expect(await fake.runtimeConfig()).toEqual(config);
+    l.put("connection_id","22222222-2222-2222-2222-222222222222");await expect(fake.runtimeConfig()).rejects.toThrow();
+    expect(()=>fake.persistConfig({...config,connection_id:"33333333-3333-3333-3333-333333333333"},"a".repeat(64),"token")).toThrow();
+    l.put("connection_id",config.connection_id);l.put("config_0",canonical({...config,keys:["p/other"]}));await expect(fake.runtimeConfig()).rejects.toThrow();
+    await CloudflareVerifier.prototype.pollTask.call(fake);expect(fake.compute).not.toHaveBeenCalled();
+  }));
+  it("refuses a pre-registration HEAD without any source call or bootstrap pull",async()=>fresh("no-head",async(l,state)=>{
+    const {fake}=await bootstrapFake(l,state),network=vi.fn();vi.stubGlobal("fetch",network);
+    try{await expect(CloudflareVerifier.prototype.bridge.call(fake,new Request("http://r2-bridge.internal/member/0",{method:"HEAD"}))).rejects.toThrow();expect(network).not.toHaveBeenCalled();expect(fake.env.SOURCE.head).not.toHaveBeenCalled();}
+    finally{vi.stubGlobal("fetch",()=>{throw new Error("network disabled");});}
+  }));
+  it("lost-ack retry keeps original bytes even with a replacement secret and never pulls",async()=>storage("lost-registration-ack",async(l,state)=>{
+    const {fake,sec,original}=await bootstrapFake(l,state);l.firstStart(random(),now());await fake.save(sec,config);
+    const sent:string[]=[];let lost=true;
+    fake.compute.mockImplementation(async(path:string,c:unknown,s:typeof sec)=>{
+      expect(path).toBe("/register");sent.push(new TextDecoder().decode(Uint8Array.from(atob(s.Registration.replaceAll("-","+").replaceAll("_","/")),c=>c.charCodeAt(0))));
+      if(lost){lost=false;throw new Error("lost reply");}
+      return {...s,Runner:"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",Receipt:"bbbbbbbb-bbbb-bbbb-bbbbbbbbbbbb",Ack:"ack"};
+    });
+    const network=vi.fn(async()=>new Response(canonical({work_jws:null})));vi.stubGlobal("fetch",network);
+    try{await CloudflareVerifier.prototype.pollTask.call(fake);fake.ledger=new Ledger(state.storage);await CloudflareVerifier.prototype.pollTask.call(fake);expect(sent).toEqual([original,original]);expect(network).toHaveBeenCalledTimes(1);expect(network.mock.calls[0][0]).not.toContain("deployment-config");}
+    finally{vi.stubGlobal("fetch",()=>{throw new Error("network disabled");});}
+  }));
+  it("expired unconsumed token replacement refetches and persists a newly signed hash",async()=>storage("token-replacement",async(l,state)=>{
+    const {fake,sec,original}=await bootstrapFake(l,state);l.firstStart(random(),now());await fake.save(sec,config);
+    const next={...config,keys:["p/data.csv","p/new.csv"]},hash=await sha(canonical(next)),sent:string[]=[];
+    fake.compute.mockImplementation(async(path:string,c:unknown,s:typeof sec)=>{
+      expect(path).toBe("/register");const raw=new TextDecoder().decode(Uint8Array.from(atob(s.Registration.replaceAll("-","+").replaceAll("_","/")),c=>c.charCodeAt(0)));sent.push(raw);
+      if(sent.length===1)throw new Error("registration_refused");
+      const request=JSON.parse(raw),proof=request.key_proof;delete request.key_proof;
+      expect(request.registration_token).toBe(fake.env.REGISTRATION_TOKEN);expect(request.deployment_config_sha256).toBe(hash);expect(l.get("config_hash")).toBe(hash);
+      const key=await crypto.subtle.importKey("raw",sec.pub,"Ed25519",false,["verify"]);
+      expect(await crypto.subtle.verify("Ed25519",key,Uint8Array.from(atob(proof.replaceAll("-","+").replaceAll("_","/")),c=>c.charCodeAt(0)),utf8.encode(canonical(request)))).toBe(true);
+      return {...s,Runner:"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",Receipt:"bbbbbbbb-bbbb-bbbb-bbbbbbbbbbbb",Ack:"ack"};
+    });
+    let pulls=0;vi.stubGlobal("fetch",async(url:string)=>{if(url.endsWith("/deployment-config")){pulls++;return configResponse(next,hash);}return new Response(canonical({work_jws:null}));});
+    try{await CloudflareVerifier.prototype.pollTask.call(fake);expect(pulls).toBe(1);expect(sent[0]).toBe(original);expect(sent[1]).not.toBe(original);expect(await fake.runtimeConfig()).toEqual(next);expect((await fake.load(next)).Registration).not.toBe(sec.Registration);}
+    finally{vi.stubGlobal("fetch",()=>{throw new Error("network disabled");});}
+  }));
+});
+
+it("bootstrap config and first-start roll back together on persistence failure",async()=>fresh("atomic",async(l,state)=>{
+  const {fake}=await bootstrapFake(l,state);fake.persistConfig=()=>{throw new Error("storage failure");};
+  vi.stubGlobal("fetch",async()=>configResponse(config,await sha(canonical(config))));
+  try{await CloudflareVerifier.prototype.pollTask.call(fake);expect(l.get("wrap")).toBeUndefined();expect(l.get("bootstrap")).toBeUndefined();expect(l.get("config_hash")).toBeUndefined();expect(fake.compute).not.toHaveBeenCalled();}
+  finally{vi.stubGlobal("fetch",()=>{throw new Error("network disabled");});}
+}));
+it("rejects a replacement config for another connection",async()=>storage("replacement-connection",async(l,state)=>{
+  const {fake}=await bootstrapFake(l,state),other={...config,connection_id:"22222222-2222-2222-2222-222222222222"};
+  vi.stubGlobal("fetch",async()=>configResponse(other,await sha(canonical(other))));
+  try{await expect(fake.pullConfig()).rejects.toThrow();expect(await fake.runtimeConfig()).toEqual(config);}
+  finally{vi.stubGlobal("fetch",()=>{throw new Error("network disabled");});}
+}));
+it("stores a near-1 MiB config in bounded SQL rows and checks all chunks on reload",async()=>fresh("config-boundary",async(l,state)=>{
+  const {fake}=await bootstrapFake(l,state),large={...config,keys:Array.from({length:17033},(_,i)=>"p/"+"a".repeat(46)+i)};
+  const raw=canonical(large);expect(utf8.encode(raw).length).toBeLessThanOrEqual(1048576);expect(raw.length).toBeGreaterThan(524288);
+  fake.persistConfig(large,await sha(raw),await sha(fake.env.REGISTRATION_TOKEN));
+  expect(l.get("config_chunks")).toBe("2");expect(await fake.runtimeConfig()).toEqual(large);
+  expect(l.storage.sql.exec("SELECT max(length(CAST(v AS BLOB))) n FROM meta").one().n).toBeLessThanOrEqual(524288);
+  l.storage.sql.exec("DELETE FROM meta WHERE k='config_1'");await expect(fake.runtimeConfig()).rejects.toThrow();
+}));
+it("bootstraps and reloads exact UTF-8 config bytes with an astral character across the chunk boundary",async()=>fresh("config-astral-boundary",async(l,state)=>{
+  const {fake}=await bootstrapFake(l,state),c={...config,keys:["p/😀",...Array.from({length:999},(_,i)=>"p/"+i)]};
+  const initial=deploymentConfigCanonical(c),padding=524287-initial.indexOf("😀");
+  c.keys[0]="p/"+"a".repeat(padding)+"😀";
+  const raw=deploymentConfigCanonical(c),bytes=utf8.encode(raw),hash=await sha(bytes);
+  expect(raw.indexOf("😀")).toBe(524287);expect(raw.slice(524287,524289)).toBe("😀");
+  expect(bytes.slice(524287,524291)).toEqual(utf8.encode("😀"));
+  const network=vi.fn(async(url:string)=>url.endsWith("/deployment-config")?configResponse(c,hash):new Response(canonical({work_jws:null})));
+  vi.stubGlobal("fetch",network);
+  try{
+    await CloudflareVerifier.prototype.pollTask.call(fake);
+    expect(l.get("bootstrap")).toBe("saved");expect(l.get("last_poll")).toBeDefined();expect(l.get("config_hash")).toBe(hash);
+    const rows=l.storage.sql.exec<{data:ArrayBuffer;kind:string}>("SELECT v data,typeof(v) kind FROM meta WHERE k IN ('config_0','config_1') ORDER BY k").toArray();
+    expect(rows).toHaveLength(2);for(const row of rows){expect(row.kind).toBe("blob");expect(row.data.byteLength).toBeLessThanOrEqual(524288);}
+    const rebuilt=new Uint8Array(rows.reduce((sum,row)=>sum+row.data.byteLength,0));let offset=0;
+    for(const row of rows){rebuilt.set(new Uint8Array(row.data),offset);offset+=row.data.byteLength;}
+    expect(rebuilt).toEqual(bytes);expect(new TextDecoder("utf-8",{fatal:true}).decode(rebuilt)).toBe(raw);expect(await sha(rebuilt)).toBe(hash);
+    expect(await fake.runtimeConfig()).toEqual(c);expect(fake.compute.mock.calls.map(call=>call[0])).toEqual(["/create","/register"]);
+    // Simulated restart: fresh Worker methods and Ledger over the same real DO SQL storage.
+    const {fake:restarted}=await bootstrapFake(new Ledger(state.storage),state);
+    await CloudflareVerifier.prototype.pollTask.call(restarted);
+    expect(await restarted.runtimeConfig()).toEqual(c);expect(restarted.compute).not.toHaveBeenCalled();
+    expect(network).toHaveBeenCalledTimes(3);
+  }finally{vi.stubGlobal("fetch",()=>{throw new Error("network disabled");});}
+}));
+it("compute carries the saved hash and preserves the Go base64 registration representation",async()=>storage("compute-contract",async(l,state)=>{
+  const {fake,sec}=await bootstrapFake(l,state);
+  const containerFetch=vi.fn(async(url:string,init:RequestInit)=>{
+    const body=JSON.parse(init.body);expect(body.config.deployment_config_sha256).toBe(l.get("config_hash"));
+    expect(body.secret.Registration).toMatch(/^[A-Za-z0-9+/]*={0,2}$/);
+    return new Response(JSON.stringify(sec));
+  });
+  sec.Registration=btoa(canonical({registration_token:fake.env.REGISTRATION_TOKEN,key_proof:"x"}));
+  await CloudflareVerifier.prototype.compute.call({...fake,containerFetch},"/register",config,sec);
+  expect(containerFetch).toHaveBeenCalledTimes(1);
+}));

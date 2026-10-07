@@ -7,9 +7,9 @@ receipts, never cells or R2 access credentials. This subchunk supplies build
 inputs and offline tests. It does not establish a published Cloudflare release,
 website integration or real-account Gate 4 acceptance.
 
-Authority: runbooks `4e07cee955f2227a884ac5ca77fd0a814c414f08`,
+Authority: runbooks Amendment A merged at `10f75e45`,
 `specs/BQ-DATA-VERIFICATION-EVERYWHERE-S1791-GATE2-CHUNK3-CLOUDFLARE.md`
-§1–§9 and §11. AWS registration, signed work, report encoding, scanner policy,
+§3.1, §3.2, §4 and §12. AWS registration, signed work, report encoding, scanner policy,
 key rotation and ISRG transport are mirrored without importing AWS/Lambda SDKs.
 The gateway dependency graph and shared scanner are unchanged.
 
@@ -22,24 +22,42 @@ the committed static linux/amd64 binary with the scratch Dockerfile; it does
 not compile Go. `worker.mjs` bundles Container SDK 0.3.7 and preserves the
 `ContainerProxy` export. Wrangler uploads it with `no_bundle=true`.
 
-The setup integration must substitute the seller's existing listed R2 bucket,
-confirmed `default` jurisdiction, connection UUID, frozen exact keys/prefix,
-and cataloged release identities into `wrangler.jsonc`. The configuration
-contains a deliberately unusable placeholder bucket and empty connection;
-deploying this unconfigured tree cannot register or read data. Do not accept
-an automatically created empty bucket as setup. Scope is limited to 17,033
-retained exact keys and 1 MiB canonical configuration. A newly published key
-outside installed scope requires an explicit seller configuration update.
-The button's existing-bucket selection/config injection is a 3c/3d integration
-and Q1 real-account proof, not a capability established by this artifact alone.
+Start setup on ai.market and use its release-specific Deploy to Cloudflare
+button. Enter exactly the listed bucket name shown on the setup page for the
+`SOURCE` binding. If the deploy flow creates an empty bucket instead, open
+Worker → Settings → Bindings, set `SOURCE` to your listed bucket, and delete
+the empty bucket. Q1 must establish which click-only path Cloudflare supports
+and prove that a later Workers Builds redeploy retains the binding.
 
-Cloudflare's secret prompt installs `REGISTRATION_TOKEN` and `RUN_NOW_SECRET`.
-The registration token is copied from the private setup page. The seller
-generates a 32-byte random base64url run-now secret and keeps it privately;
-ai.market never receives it. Secrets must not enter vars, source control,
-URLs, logs or marketplace telemetry. An expired setup token is replaced through
-the seller's setup page and Cloudflare secret prompt; the exact durable request
-remains bound to its original token. Changed-request retries require fresh setup.
+Paste the registration token and the 43-character run-now secret generated
+by your ai.market setup page into Cloudflare's two secret prompts. Save the
+run-now secret privately. It is generated in your browser and never sent to
+ai.market servers. Secrets must not enter vars, source control, URLs or logs.
+No configuration is pasted or repository edited. The release template var
+contains only release/version/binary/Worker identity and default jurisdiction.
+
+Run now or cron bootstraps the fixed `aim-verifier` DO by pulling the frozen
+config from the fixed marketplace deployment-config endpoint with the token.
+Before generating keys, it verifies the canonical SHA-256, scope and shipped
+identity, and atomically saves config/hash with first-start state. The token
+also reveals the frozen key list until expiry or consumption; it grants no
+scan consent. Scope is limited to 17,033 exact keys and 1 MiB canonical JSON.
+A new published key outside that scope requires a new setup.
+
+Every runtime scope load verifies the persisted config hash and connection.
+After registration, restart, secret replacement and same-release redeploy
+retain config without refetch. Lost acknowledgments resend the original stored
+registration bytes. If an unconsumed token expires, obtain a new setup token
+and replace the Cloudflare secret. After an explicit registration refusal,
+the DO pulls config under that new token and durably saves a newly signed
+request with the new hash before sending it. Missing or corrupt existing
+state requires removal and fresh setup; it never silently resets keys.
+
+Setup and registration perform no R2 HEAD/GET. The consented free probe checks
+the binding. If it returns `source_unreachable`, check that `SOURCE` is your
+listed bucket and retry. `artifact_changed` means the frozen files changed;
+re-publish or run a new check. Readiness proves registration and a successful
+poll; a successful probe proves the binding, before any quote or payment.
 
 After deployment, open the seller-owned Worker at `/operator`, enter the
 run-now secret and select **Run now**. The page retains no browser state.
@@ -52,7 +70,7 @@ Ready requires registration and a successful poll, not a deployment click.
 
 ## Durable state and read boundary
 
-One connection-named Container Durable Object owns SQLite state. The first
+One fixed-name `aim-verifier` Container Durable Object owns SQLite state. The first
 start transaction creates a 32-byte wrapping key and initialization marker.
 The Container generates independent Ed25519 and commitment keys; the exact
 registration request is AES-256-GCM encrypted before sending. Its signed ack
@@ -160,7 +178,7 @@ Worker/DO/R2 reads can add costs; probes also traverse the complete source.
 
 Outstanding spec questions/deviations for this subchunk:
 
-- Q1: two-account full button setup, existing bucket/scope injection, copied
+- Q1: two-account full button setup, existing bucket binding and config pull, copied
   release-byte comparison, deployed no-bundle equality, two seller-built OCI
   digest measurements, registration/poll/probe and update/retirement smoke.
   These are not inferred from the local artifact; OCI digest is nullable

@@ -112,6 +112,8 @@ type HTTPBackend struct {
 	Now    func() time.Time
 }
 
+var ErrRegistrationRefused = errors.New("registration_refused")
+
 func (b HTTPBackend) request(ctx context.Context, s *Secret, method, path string, body []byte, limit int) ([]byte, error) {
 	if len(body) > MaxReport || !strings.HasPrefix(path, "/api/v1/verification-runners/") || strings.ContainsAny(path, "?#\\") {
 		return nil, ErrRefused
@@ -155,6 +157,23 @@ func (b HTTPBackend) request(ctx context.Context, s *Secret, method, path string
 	}
 	defer resp.Body.Close()
 	raw, e := io.ReadAll(io.LimitReader(resp.Body, int64(limit)+1))
+	if e == nil && len(raw) <= limit && path == "/api/v1/verification-runners/register" && (resp.StatusCode == 400 || resp.StatusCode == 401 || resp.StatusCode == 403) {
+		var failure struct {
+			Error  string          `json:"error"`
+			Detail json.RawMessage `json:"detail"`
+		}
+		if json.Unmarshal(raw, &failure) == nil {
+			var detail struct {
+				Error string `json:"error"`
+			}
+			var code string
+			_ = json.Unmarshal(failure.Detail, &detail)
+			_ = json.Unmarshal(failure.Detail, &code)
+			if failure.Error == "registration_refused" || detail.Error == "registration_refused" || code == "registration_refused" {
+				return nil, ErrRegistrationRefused
+			}
+		}
+	}
 	if e != nil || len(raw) > limit || resp.StatusCode != 200 {
 		return nil, ErrRefused
 	}

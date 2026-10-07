@@ -71,7 +71,7 @@ func (s *Secret) validate(c Config) error {
 // CreateSecret is called only after the DO has durably claimed first-start.
 // Its entire result, including the exact request, must be encrypted before send.
 func CreateSecret(c Config, at time.Time) (*Secret, error) {
-	if !validToken(c.Token) {
+	if !validToken(c.Token) || !hex64.MatchString(c.ConfigHash) {
 		return nil, ErrRefused
 	}
 	if e := c.Validate(); e != nil {
@@ -89,7 +89,7 @@ func CreateSecret(c Config, at time.Time) (*Secret, error) {
 	if e != nil {
 		return nil, e
 	}
-	m := map[string]any{"registration_token": c.Token, "connection_id": c.Connection, "kind": "cloudflare", "receipt_public_key": base64.RawURLEncoding.EncodeToString(priv.Public().(ed25519.PublicKey)), "scanner_version": c.Version, "release_id": c.Release, "binary_sha256": c.Binary, "worker_identity": c.Worker, "registration_nonce": s.Nonce, "registered_at_utc": timestamp(at)}
+	m := map[string]any{"registration_token": c.Token, "deployment_config_sha256": c.ConfigHash, "connection_id": c.Connection, "kind": "cloudflare", "receipt_public_key": base64.RawURLEncoding.EncodeToString(priv.Public().(ed25519.PublicKey)), "scanner_version": c.Version, "release_id": c.Release, "binary_sha256": c.Binary, "worker_identity": c.Worker, "registration_nonce": s.Nonce, "registered_at_utc": timestamp(at)}
 	raw, e := core.Canonical(m)
 	if e != nil {
 		return nil, e
@@ -110,7 +110,7 @@ func Register(ctx context.Context, c Config, s *Secret, backend Backend) error {
 	}
 	a, e := backend.Register(ctx, s.Registration)
 	if e != nil {
-		return ErrRefused
+		return e
 	}
 	if !uuid.MatchString(a.Runner) || !uuid.MatchString(a.Receipt) || len(a.Keys) == 0 || wire.ValidateKeySet(a.Keys) != nil {
 		return ErrRefused

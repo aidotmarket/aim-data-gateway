@@ -23,5 +23,18 @@
   "overrides": {
     "undici": "7.29.1",
     "sharp": "0.35.5"
+  },
+  "cloudflare": {
+    "bindings": {
+      "SOURCE": {
+        "description": "Enter exactly the listed bucket name shown on your ai.market setup page."
+      },
+      "REGISTRATION_TOKEN": {
+        "description": "Paste the registration token from your ai.market setup page."
+      },
+      "RUN_NOW_SECRET": {
+        "description": "Paste the run-now secret your ai.market setup page generated; 43 characters."
+      }
+    }
   }
 }

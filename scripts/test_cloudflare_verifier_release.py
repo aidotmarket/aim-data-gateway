@@ -45,7 +45,8 @@ class ReleaseTests(unittest.TestCase):
             self.assertEqual(config["containers"][0]["max_instances"], 1)
             self.assertEqual(config["migrations"][0]["new_sqlite_classes"], ["CloudflareVerifier"])
             self.assertNotIn("account_id", config)
-            self.assertEqual(json.loads(config["vars"]["DEPLOYMENT_CONFIG"])["keys"], [])
+            self.assertEqual(set(json.loads(config["vars"]["DEPLOYMENT_CONFIG"])),
+                             set("release_id scanner_version binary_sha256 worker_identity jurisdiction".split()))
             tree_hash = catalog["template_tree_sha256"]
             release.export(record, output)
             again = json.loads((output / "catalog.json").read_text())["default"]

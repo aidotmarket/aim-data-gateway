@@ -3,6 +3,7 @@ package cloudflareverification
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"sync/atomic"
@@ -76,6 +77,10 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	result, e := s.invoke(ctx, r.URL.Path, in)
 	if e != nil {
+		if errors.Is(e, ErrRegistrationRefused) {
+			http.Error(w, "registration_refused", 409)
+			return
+		}
 		http.Error(w, "verification_refused", 403)
 		return
 	}
