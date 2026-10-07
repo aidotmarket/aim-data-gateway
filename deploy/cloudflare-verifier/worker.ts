@@ -206,8 +206,8 @@ export class CloudflareVerifier extends Container<Env> {
           // An explicit refusal means the backend did not accept these bytes, so
           // signing a fresh nonce and time cannot strand an accepted registration
           // (a lost acknowledgment is retried with the original bytes above). The
-          // backend only accepts registrations signed in the last 300 seconds, so
-          // a refused request is always re-signed. A replacement token also pulls
+          // backend refuses a registered_at_utc more than 300 seconds from its
+          // clock, so a refused request is always re-signed. A replacement token also pulls
           // fresh config under that token.
           const replaced=await sha(this.env.REGISTRATION_TOKEN)!==this.ledger.get("config_token_hash");
           const pulled=replaced?await this.pullConfig():undefined;

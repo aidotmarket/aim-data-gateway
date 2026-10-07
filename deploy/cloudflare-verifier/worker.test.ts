@@ -420,7 +420,9 @@ describe("Amendment A bootstrap and recovery",()=>{
       return {...s,Runner:"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",Receipt:"bbbbbbbb-bbbb-bbbb-bbbbbbbbbbbb",Ack:"ack"};
     });
     let pulls=0;vi.stubGlobal("fetch",async(url:string)=>{if(url.endsWith("/deployment-config")){pulls++;throw new Error("must not pull");}return new Response(canonical({work_jws:null}));});
-    try{await CloudflareVerifier.prototype.pollTask.call(fake);expect(pulls).toBe(0);expect(sent).toHaveLength(2);expect(sent[0]).toBe(original);expect(sent[1]).not.toBe(original);expect(l.get("last_poll")).toBeDefined();}
+    try{await CloudflareVerifier.prototype.pollTask.call(fake);expect(pulls).toBe(0);expect(sent).toHaveLength(2);expect(sent[0]).toBe(original);expect(sent[1]).not.toBe(original);expect(l.get("last_poll")).toBeDefined();
+      const resigned=JSON.parse(sent[1]);expect(resigned.registered_at_utc).not.toBe(before.registered_at_utc);expect(resigned.registered_at_utc).toMatch(/Z$/);
+      const saved=await fake.load(config);expect(saved.Runner).toBe("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa");expect(new TextDecoder().decode(Uint8Array.from(atob(saved.Registration.replaceAll("-","+").replaceAll("_","/")),c=>c.charCodeAt(0)))).toBe(sent[1]);}
     finally{vi.stubGlobal("fetch",()=>{throw new Error("network disabled");});}
   }));
   it("a refused poll does not add its own retry schedule",async()=>storage("refused-no-schedule",async(l,state)=>{
