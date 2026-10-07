@@ -4,7 +4,7 @@ export const now = () => Math.floor(Date.now()/1000);
 export function b64(b: Uint8Array): string { return btoa(String.fromCharCode(...b)).replaceAll("+","-").replaceAll("/","_").replaceAll("=",""); }
 export function unb64(s: string): Uint8Array<ArrayBuffer> {return Uint8Array.from(atob(s.replaceAll("-","+").replaceAll("_","/")),c=>c.charCodeAt(0));}
 export function random(): string { return b64(crypto.getRandomValues(new Uint8Array(32))); }
-export async function sha(s: string): Promise<string> {return Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256",utf8.encode(s))),b=>b.toString(16).padStart(2,"0")).join("");}
+export async function sha(s: string | Uint8Array<ArrayBuffer>): Promise<string> {return Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256",typeof s==="string"?utf8.encode(s):s)),b=>b.toString(16).padStart(2,"0")).join("");}
 // Python ensure_ascii=True, sorted compact JSON for control envelopes.
 export function canonical(v: unknown): string {
   if (Array.isArray(v)) return "["+v.map(canonical).join(",")+"]";

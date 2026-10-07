@@ -342,6 +342,9 @@ describe("Amendment A bootstrap and recovery",()=>{
     expect(identity(canonical(shipped))).toEqual(shipped);
     for(const value of [config,{...shipped,binary_sha256:"bad"},{...shipped,jurisdiction:"eu"},{...shipped,worker_identity:{mode:"other",sha256:"c".repeat(64)}},{...shipped,release_id:""},{...shipped,scanner_version:1}])expect(()=>identity(canonical(value))).toThrow();
   });
+  it("refuses malformed deployment identity JSON uniformly",()=>{
+    for(const raw of ["{", "", "undefined", '{"release_id":}'])expect(()=>identity(raw)).toThrowError(new Error("verification_refused"));
+  });
   it("routes cron, run-now and the private bridge to the fixed DO before config exists",async()=>{
     const enqueue=vi.fn().mockResolvedValue(undefined),fetch=vi.fn().mockResolvedValue(new Response("refused",{status:403})),namespace=routing({enqueue,fetch,operatorPage:CloudflareVerifier.prototype.operatorPage});
     const e={DEPLOYMENT_CONFIG:"{}",RUN_NOW_SECRET:"s".repeat(43),VERIFIER:namespace};
@@ -439,6 +442,31 @@ it("stores a near-1 MiB config in bounded SQL rows and checks all chunks on relo
   expect(l.get("config_chunks")).toBe("2");expect(await fake.runtimeConfig()).toEqual(large);
   expect(l.storage.sql.exec("SELECT max(length(CAST(v AS BLOB))) n FROM meta").one().n).toBeLessThanOrEqual(524288);
   l.storage.sql.exec("DELETE FROM meta WHERE k='config_1'");await expect(fake.runtimeConfig()).rejects.toThrow();
+}));
+it("bootstraps and reloads exact UTF-8 config bytes with an astral character across the chunk boundary",async()=>fresh("config-astral-boundary",async(l,state)=>{
+  const {fake}=await bootstrapFake(l,state),c={...config,keys:["p/😀",...Array.from({length:999},(_,i)=>"p/"+i)]};
+  const initial=deploymentConfigCanonical(c),padding=524287-initial.indexOf("😀");
+  c.keys[0]="p/"+"a".repeat(padding)+"😀";
+  const raw=deploymentConfigCanonical(c),bytes=utf8.encode(raw),hash=await sha(bytes);
+  expect(raw.indexOf("😀")).toBe(524287);expect(raw.slice(524287,524289)).toBe("😀");
+  expect(bytes.slice(524287,524291)).toEqual(utf8.encode("😀"));
+  const network=vi.fn(async(url:string)=>url.endsWith("/deployment-config")?configResponse(c,hash):new Response(canonical({work_jws:null})));
+  vi.stubGlobal("fetch",network);
+  try{
+    await CloudflareVerifier.prototype.pollTask.call(fake);
+    expect(l.get("bootstrap")).toBe("saved");expect(l.get("last_poll")).toBeDefined();expect(l.get("config_hash")).toBe(hash);
+    const rows=l.storage.sql.exec<{data:ArrayBuffer;kind:string}>("SELECT v data,typeof(v) kind FROM meta WHERE k IN ('config_0','config_1') ORDER BY k").toArray();
+    expect(rows).toHaveLength(2);for(const row of rows){expect(row.kind).toBe("blob");expect(row.data.byteLength).toBeLessThanOrEqual(524288);}
+    const rebuilt=new Uint8Array(rows.reduce((sum,row)=>sum+row.data.byteLength,0));let offset=0;
+    for(const row of rows){rebuilt.set(new Uint8Array(row.data),offset);offset+=row.data.byteLength;}
+    expect(rebuilt).toEqual(bytes);expect(new TextDecoder("utf-8",{fatal:true}).decode(rebuilt)).toBe(raw);expect(await sha(rebuilt)).toBe(hash);
+    expect(await fake.runtimeConfig()).toEqual(c);expect(fake.compute.mock.calls.map(call=>call[0])).toEqual(["/create","/register"]);
+    // Simulated restart: fresh Worker methods and Ledger over the same real DO SQL storage.
+    const {fake:restarted}=await bootstrapFake(new Ledger(state.storage),state);
+    await CloudflareVerifier.prototype.pollTask.call(restarted);
+    expect(await restarted.runtimeConfig()).toEqual(c);expect(restarted.compute).not.toHaveBeenCalled();
+    expect(network).toHaveBeenCalledTimes(3);
+  }finally{vi.stubGlobal("fetch",()=>{throw new Error("network disabled");});}
 }));
 it("compute carries the saved hash and preserves the Go base64 registration representation",async()=>storage("compute-contract",async(l,state)=>{
   const {fake,sec}=await bootstrapFake(l,state);

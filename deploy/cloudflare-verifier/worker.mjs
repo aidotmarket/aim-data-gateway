@@ -1705,7 +1705,7 @@ function random() {
   return b64(crypto.getRandomValues(new Uint8Array(32)));
 }
 async function sha(s) {
-  return Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", utf8.encode(s))), (b) => b.toString(16).padStart(2, "0")).join("");
+  return Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", typeof s === "string" ? utf8.encode(s) : s)), (b) => b.toString(16).padStart(2, "0")).join("");
 }
 function canonical(v) {
   if (Array.isArray(v)) return "[" + v.map(canonical).join(",") + "]";
@@ -1786,7 +1786,12 @@ async function bounded(response, limit) {
 // worker.ts
 var releaseFields = "binary_sha256 jurisdiction release_id scanner_version worker_identity";
 function identity(raw) {
-  const c = JSON.parse(raw);
+  let c;
+  try {
+    c = JSON.parse(raw);
+  } catch {
+    refuse();
+  }
   if (!c || Object.keys(c).sort().join(" ") !== releaseFields || c.jurisdiction !== "default" || typeof c.release_id !== "string" || typeof c.scanner_version !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(c.release_id) || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(c.scanner_version) || !/^[a-f0-9]{64}$/.test(c.binary_sha256) || !c.worker_identity || Object.keys(c.worker_identity).sort().join(" ") !== "mode sha256" || !/^[a-f0-9]{64}$/.test(c.worker_identity.sha256) || !["bundle", "source_tree_lockfile"].includes(c.worker_identity.mode)) refuse();
   return c;
 }
@@ -1902,9 +1907,22 @@ var CloudflareVerifier = class extends Container {
   async runtimeConfig() {
     const count = Number(this.ledger.get("config_chunks")), hash = this.ledger.get("config_hash");
     if (!Number.isSafeInteger(count) || count < 1 || count > 2 || !hash) refuse();
-    let raw = "";
-    for (let n = 0; n < count; n++) raw += this.ledger.get("config_" + n) ?? refuse();
-    if (await sha(raw) !== hash) refuse();
+    const chunks = [];
+    let size = 0;
+    for (let n = 0; n < count; n++) {
+      const data = this.ledger.storage.sql.exec("SELECT CAST(v AS BLOB) data FROM meta WHERE k=?", "config_" + n).toArray()[0]?.data ?? refuse();
+      if (data.byteLength < 1 || size + data.byteLength > 1048576) refuse();
+      chunks.push(data);
+      size += data.byteLength;
+    }
+    const bytes = new Uint8Array(size);
+    let offset = 0;
+    for (const data of chunks) {
+      bytes.set(new Uint8Array(data), offset);
+      offset += data.byteLength;
+    }
+    if (await sha(bytes) !== hash) refuse();
+    const raw = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
     const c = config(JSON.parse(raw));
     if (deploymentConfigCanonical(c) !== raw || !matches(c, identity(this.env.DEPLOYMENT_CONFIG)) || c.connection_id !== this.ledger.get("connection_id")) refuse();
     return c;
@@ -1912,8 +1930,8 @@ var CloudflareVerifier = class extends Container {
   persistConfig(c, hash, tokenHash) {
     const existing = this.ledger.get("connection_id");
     if (existing && existing !== c.connection_id) refuse();
-    const raw = deploymentConfigCanonical(c), count = Math.ceil(raw.length / 524288);
-    for (let n = 0; n < count; n++) this.ledger.put("config_" + n, raw.slice(n * 524288, (n + 1) * 524288));
+    const bytes = utf8.encode(deploymentConfigCanonical(c)), count = Math.ceil(bytes.length / 524288);
+    for (let n = 0; n < count; n++) this.ledger.storage.sql.exec("INSERT OR REPLACE INTO meta VALUES (?,?)", "config_" + n, bytes.slice(n * 524288, (n + 1) * 524288));
     this.ledger.put("config_chunks", String(count));
     this.ledger.put("config_hash", hash);
     this.ledger.put("connection_id", c.connection_id);

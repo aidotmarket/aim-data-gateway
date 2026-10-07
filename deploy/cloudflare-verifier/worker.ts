@@ -12,7 +12,7 @@ type Secret = {Private:string;Commitment:number[];Runner:string;Receipt:string;V
 type Prepared = {job:Job;snapshot:string;objects:Member[];rotation?:boolean;secret?:Secret};
 const releaseFields="binary_sha256 jurisdiction release_id scanner_version worker_identity";
 export function identity(raw:string):ReleaseIdentity {
-  const c=JSON.parse(raw);
+  let c;try {c=JSON.parse(raw);}catch {refuse();}
   if(!c || Object.keys(c).sort().join(" ")!==releaseFields || c.jurisdiction!=="default" || typeof c.release_id!=="string" || typeof c.scanner_version!=="string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(c.release_id) || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(c.scanner_version) || !/^[a-f0-9]{64}$/.test(c.binary_sha256) || !c.worker_identity || Object.keys(c.worker_identity).sort().join(" ")!=="mode sha256" || !/^[a-f0-9]{64}$/.test(c.worker_identity.sha256) || !["bundle","source_tree_lockfile"].includes(c.worker_identity.mode))refuse();
   return c;
 }
@@ -114,16 +114,24 @@ export class CloudflareVerifier extends Container<Env> {
   async runtimeConfig():Promise<Config> {
     const count=Number(this.ledger.get("config_chunks")),hash=this.ledger.get("config_hash");
     if(!Number.isSafeInteger(count) || count<1 || count>2 || !hash)refuse();
-    let raw="";for(let n=0;n<count;n++)raw+=this.ledger.get("config_"+n)??refuse();
-    if(await sha(raw)!==hash)refuse();
+    const chunks:ArrayBuffer[]=[];let size=0;
+    for(let n=0;n<count;n++){
+      const data=this.ledger.storage.sql.exec<{data:ArrayBuffer}>("SELECT CAST(v AS BLOB) data FROM meta WHERE k=?","config_"+n).toArray()[0]?.data??refuse();
+      if(data.byteLength<1 || size+data.byteLength>1048576)refuse();
+      chunks.push(data);size+=data.byteLength;
+    }
+    const bytes=new Uint8Array(size);let offset=0;
+    for(const data of chunks){bytes.set(new Uint8Array(data),offset);offset+=data.byteLength;}
+    if(await sha(bytes)!==hash)refuse();
+    const raw=new TextDecoder("utf-8",{fatal:true}).decode(bytes);
     const c=config(JSON.parse(raw));
     if(deploymentConfigCanonical(c)!==raw || !matches(c,identity(this.env.DEPLOYMENT_CONFIG)) || c.connection_id!==this.ledger.get("connection_id"))refuse();
     return c;
   }
   persistConfig(c:Config,hash:string,tokenHash:string):void {
     const existing=this.ledger.get("connection_id");if(existing && existing!==c.connection_id)refuse();
-    const raw=deploymentConfigCanonical(c),count=Math.ceil(raw.length/524288);
-    for(let n=0;n<count;n++)this.ledger.put("config_"+n,raw.slice(n*524288,(n+1)*524288));
+    const bytes=utf8.encode(deploymentConfigCanonical(c)),count=Math.ceil(bytes.length/524288);
+    for(let n=0;n<count;n++)this.ledger.storage.sql.exec("INSERT OR REPLACE INTO meta VALUES (?,?)","config_"+n,bytes.slice(n*524288,(n+1)*524288));
     this.ledger.put("config_chunks",String(count));this.ledger.put("config_hash",hash);
     this.ledger.put("connection_id",c.connection_id);this.ledger.put("config_token_hash",tokenHash);
   }
@@ -195,8 +203,8 @@ export class CloudflareVerifier extends Container<Env> {
         try {sec=await this.compute<Secret>("/register",c,sec);await this.save(sec,c);}
         catch(e){
           if(!(e instanceof Error) || e.message!=="registration_refused" || await sha(this.env.REGISTRATION_TOKEN)===this.ledger.get("config_token_hash"))throw e;
-          // Retry the original request first: a consumed token's lost ack must
-          // never cause a config pull, even after secret replacement.
+          // An explicit registration refusal with a replacement token pulls
+          // fresh config and signs a new registration request.
           const pulled=await this.pullConfig();
           const request=JSON.parse(new TextDecoder().decode(unb64(sec.Registration)));
           delete request.key_proof;
