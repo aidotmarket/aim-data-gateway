@@ -52,14 +52,19 @@ export class CloudflareVerifier extends Container<Env> {
   sleepAfter="20m";
   enableInternet=true;
   readonly ledger:Ledger;
-  static outboundByHost={
-    "r2-bridge.internal": async (request:Request, env:Env, _ctx:OutboundHandlerContext) => {
-      const u=new URL(request.url);
-      if(u.protocol!=="http:" || u.hostname!=="r2-bridge.internal" || (u.port && u.port!=="80"))return new Response("verification_refused",{status:403});
-      // One fixed instance per seller deployment; capability still binds its ID.
-      return verifier(env).fetch(request);
-    },
-  };
+  // Assign through the SDK's inherited static setter so ContainerProxy finds the handler in its
+  // class-name registry. A class field (static outboundByHost={...}) defines an own property that
+  // shadows the setter, leaves the registry empty, and sends r2-bridge.internal to the internet.
+  static {
+    this.outboundByHost={
+      "r2-bridge.internal": async (request:Request, env:Env, _ctx:OutboundHandlerContext) => {
+        const u=new URL(request.url);
+        if(u.protocol!=="http:" || u.hostname!=="r2-bridge.internal" || (u.port && u.port!=="80"))return new Response("verification_refused",{status:403});
+        // One fixed instance per seller deployment; capability still binds its ID.
+        return verifier(env).fetch(request);
+      },
+    };
+  }
   constructor(ctx:DurableObjectState<{}>,env:Env) {
     super(ctx,env);this.ledger=new Ledger(ctx.storage);
   }

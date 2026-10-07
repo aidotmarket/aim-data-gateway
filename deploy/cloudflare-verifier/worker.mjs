@@ -1834,13 +1834,15 @@ var CloudflareVerifier = class extends Container {
   sleepAfter = "20m";
   enableInternet = true;
   ledger;
-  static outboundByHost = {
-    "r2-bridge.internal": async (request, env, _ctx) => {
-      const u = new URL(request.url);
-      if (u.protocol !== "http:" || u.hostname !== "r2-bridge.internal" || u.port && u.port !== "80") return new Response("verification_refused", { status: 403 });
-      return verifier(env).fetch(request);
-    }
-  };
+  static {
+    this.outboundByHost = {
+      "r2-bridge.internal": async (request, env, _ctx) => {
+        const u = new URL(request.url);
+        if (u.protocol !== "http:" || u.hostname !== "r2-bridge.internal" || u.port && u.port !== "80") return new Response("verification_refused", { status: 403 });
+        return verifier(env).fetch(request);
+      }
+    };
+  }
   constructor(ctx, env) {
     super(ctx, env);
     this.ledger = new Ledger(ctx.storage);
