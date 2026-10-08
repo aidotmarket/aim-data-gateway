@@ -640,3 +640,57 @@ func TestPendingRefusalsRetryInsertOnly(t *testing.T) {
 		})
 	}
 }
+
+func TestUnreachableProbeDocument(t *testing.T) {
+	for _, stage := range []string{"eligibility", "probe"} {
+		t.Run(stage, func(t *testing.T) {
+			ctx := context.Background()
+			f := newRunner(t)
+			f.start(t)
+			token, j := f.job(t, 1, "probe")
+			open := f.r.OpenFile
+			f.r.OpenFile = func(v ledger.File) (*os.File, error) {
+				if stage == "eligibility" || f.opens.Load() >= 3 {
+					return nil, errors.New("source unreachable")
+				}
+				return open(v)
+			}
+			if e := f.r.Submit(ctx, token); e != nil {
+				t.Fatal(e)
+			}
+			a := f.wait(t, j.Text("spec_id"))
+			var body struct {
+				Variant  string `json:"variant"`
+				Document string `json:"document_b64"`
+			}
+			if e := json.Unmarshal(a.Result, &body); e != nil {
+				t.Fatal(e)
+			}
+			if body.Variant != "probe" {
+				t.Fatal("expected probe report", body.Variant)
+			}
+			raw, e := wire.DecodeDocument(body.Document, wire.MaxScanDocument)
+			if e != nil {
+				t.Fatal(e)
+			}
+			var document map[string]json.RawMessage
+			if e := json.Unmarshal(raw, &document); e != nil {
+				t.Fatal(e)
+			}
+			expected, e := core.Canonical(map[string]any{
+				"listing_id": j.Text("listing_id"), "source_handle_id": j.Text("source_handle_id"),
+				"connector_type": "aim_gateway", "connector_version": "aim_gateway-v1",
+				"owner_consent": true, "source_reachable": false,
+				"objects_discovered": 3, "size_class": "small", "estimated_max_input_tokens": 8192,
+				"supported_capabilities": []string{"complete_traversal", "deterministic_object_order", "fixed_bucket_aggregates", "exact_or_declared_estimated_row_counts"},
+				"preview_requested":      j.Preview(),
+			})
+			if e != nil {
+				t.Fatal(e)
+			}
+			if !bytes.Equal(document["probe"], expected) {
+				t.Fatalf("unreachable probe differs: %s; want %s", document["probe"], expected)
+			}
+		})
+	}
+}
