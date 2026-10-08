@@ -117,7 +117,8 @@ func seededFiles(t *testing.T) []file {
 	return []file{{Key: markers[1] + "/" + markers[3] + "/data.csv", Format: "csv", Data: b.Bytes()}, {Key: markers[1] + "/" + markers[3] + "/comment.parquet", Format: "parquet", Data: pq.Bytes()}}
 }
 
-func TestE2ByteCaptures(t *testing.T) {
+// Captures are produced only inside E3, while the live commitment keys exist.
+func captureE2Frames(t *testing.T) {
 	var captures []capture
 	for _, kind := range kinds {
 		t.Run(kind, func(t *testing.T) {
