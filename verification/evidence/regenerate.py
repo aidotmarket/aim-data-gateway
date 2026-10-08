@@ -66,7 +66,7 @@ def main():
         provenance = json.loads((ROOT/'provenance.json').read_text())
         provenance['continuation_evidence_commit'] = evidence_commit
         shutil.copytree('verification/evidence', ROOT/('continuation-harness-'+evidence_commit[:12]))
-    command([PYTHON, '-B', 'verification/evidence/raw_locator.py', BACKEND, str(ROOT/'tamper/raw_locator')])
+    command(['/Users/max/Projects/ai-market/ai-market-backend/.venv/bin/python', '-B', 'verification/evidence/raw_locator.py', BACKEND, str(ROOT/'tamper/raw_locator')])
     command(['go', 'vet', '-tags', 'evidence', './...'])
     command(['go', 'vet', './...'])
     command(['git', 'diff', '--check'])

@@ -25,7 +25,7 @@ schema mutations are positive/normalization cases, not mislabeled negatives.
 The re-encoding audit includes gateway registration over the original decoded dict.
 
 `raw_locator.py BACKEND OUTPUT` is independently executable with the backend's
-`.venv-ci/bin/python -B`. It creates disposable local PostgreSQL databases via RC
+`.venv/bin/python -B` (the environment with the complete service dependencies). It creates disposable local PostgreSQL databases via RC
 fixture setup and calls real gateway, shared-cloud, and AWS receipt validators.
 A valid receipt is the control. The same report re-signed over a binding replacing
 `artifact_locator_commitment` with `raw_locator` must fail signature verification.
