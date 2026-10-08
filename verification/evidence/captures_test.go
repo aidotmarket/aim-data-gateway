@@ -123,6 +123,9 @@ func TestE2ByteCaptures(t *testing.T) {
 		t.Run(kind, func(t *testing.T) {
 			h := newHarness(t, kind)
 			save := func(class string, raw []byte) {
+				if frameObserver != nil {
+					frameObserver(t, kind, class, raw)
+				}
 				if len(raw) == 0 {
 					t.Fatal("empty capture", class)
 				}

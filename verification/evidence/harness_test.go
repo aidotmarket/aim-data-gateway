@@ -201,6 +201,11 @@ type harness struct {
 func newHarness(t *testing.T, kind string) *harness {
 	t.Helper()
 	h := &harness{kind: kind}
+	defer func() {
+		if keyObserver != nil {
+			keyObserver(h)
+		}
+	}()
 	if kind == "aim_gateway" {
 		dir, e := filepath.EvalSymlinks(t.TempDir())
 		must(t, e)
