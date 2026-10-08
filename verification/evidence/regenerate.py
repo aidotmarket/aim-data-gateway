@@ -24,7 +24,7 @@ def main():
     if resume:
         assert not (ROOT/'manifest.json').exists(), 'generation already finalized'
         commands = json.loads((ROOT/'commands.json').read_text())
-        assert commands[-1]['exit_code'] == 1 and commands[-1]['argv'][-1] == '--directional', 'resume only the recorded directional criterion failure'
+        assert commands[-1]['exit_code'] == 1 and (commands[-1]['argv'][-1] == '--directional' or 'verification/evidence/raw_locator.py' in commands[-1]['argv']), 'resume only recorded analysis/standalone fixture failure'
         # Resume analysis of the very same captures; never run serializers again.
         assert len(list((ROOT/'captures').rglob('*.frame'))) == 36
     else:
@@ -65,7 +65,7 @@ def main():
     else:
         provenance = json.loads((ROOT/'provenance.json').read_text())
         provenance['continuation_evidence_commit'] = evidence_commit
-        shutil.copytree('verification/evidence', ROOT/'continuation-harness')
+        shutil.copytree('verification/evidence', ROOT/('continuation-harness-'+evidence_commit[:12]))
     command([PYTHON, '-B', 'verification/evidence/raw_locator.py', BACKEND, str(ROOT/'tamper/raw_locator')])
     command(['go', 'vet', '-tags', 'evidence', './...'])
     command(['go', 'vet', './...'])

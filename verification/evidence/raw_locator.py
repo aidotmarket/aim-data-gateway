@@ -117,7 +117,9 @@ if __name__ == '__main__':
     os.environ.setdefault('DATABASE_URL', 'postgresql://test:test@localhost:5432/test')
     os.environ.setdefault('ENVIRONMENT', 'test')
     os.environ.setdefault('TESTING', '1')
+    os.environ.setdefault('SECRET_KEY', 'test-secret-key-for-pytest-only-32chars!')
     os.chdir(backend)
     output = Path(args.output).resolve()
-    output.mkdir(parents=True, exist_ok=False)
+    output.mkdir(parents=True, exist_ok=True)
+    assert not any(output.iterdir()), 'refusing to overwrite raw-locator artifacts'
     asyncio.run(run(backend, output))
