@@ -39,3 +39,10 @@ is external in `manifest.sha256`, avoiding a recursively defined self-hash.
 Private evidence is not committed. All Go harness files remain evidence build-tagged.
 These local serializer/model/receipt checks do not claim live TLS, deployed cloud,
 customer IAM custody, or approval of a replacement checkpoint criterion.
+
+If analysis discovers a failed directional byte-equality check, preserve the
+failure and finish the remaining categories using `regenerate.py --resume`. This
+continuation is allowed only after that recorded failure and never reruns captures
+or Go fixture tests. Both harness revisions are retained. The manifest separates
+frame-integrity self-check success from the failed directional release criterion;
+the overall generator exits 1 when a recorded check failed.

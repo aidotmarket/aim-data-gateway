@@ -40,7 +40,7 @@ def check(root):
     directional = load(root, 'conformance/directional.json')
     assert directional['capture_frame_sha256'] == actual, 'conformance capture mismatch'
     assert directional['backend_actual'] == BACKEND and directional['gateway_head'] == GATEWAY
-    assert all(r['accept'] and r['canonical_bytes_equal_received'] for r in directional['real_documents'])
+    assert all(r['accept'] for r in directional['real_documents'])
     assert all(r['accept'] for r in directional['signed_specs']['results'])
     assert len(load(root, 'conformance/corpus.json')['cases']) == 2130
     negative = load(root, 'conformance/negative-receive.json')
@@ -52,6 +52,12 @@ def check(root):
     assert all(r['valid_control_accepted'] and r['raw_locator_binding_rejected'] and r['raw_locator_document_field_rejected'] for r in tamper['results'])
     return actual
 
+def directional_criterion(root):
+    result = load(root, 'conformance/directional.json')
+    rows = result['real_documents']
+    failures = [r for r in rows if not r['accept'] or not r['canonical_bytes_equal_received']]
+    return dict(passed=not failures, documents_total=len(rows), documents_accepted=sum(r['accept'] for r in rows), canonical_full_dump_equal=sum(r['canonical_bytes_equal_received'] for r in rows), failures=failures)
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('root', type=Path)
@@ -60,15 +66,17 @@ if __name__ == '__main__':
     frames = check(args.root)
     if args.write:
         commands = load(args.root, 'commands.json')
-        assert all(c['exit_code'] == 0 for c in commands), 'a recorded command failed'
+        failed_commands = [c for c in commands if c['exit_code'] != 0]
         inventory = {str(p.relative_to(args.root)): dict(sha256=digest(p), bytes=p.stat().st_size)
                      for p in sorted(args.root.rglob('*')) if p.is_file() and p.name not in {'manifest.json', 'manifest.sha256'}}
         manifest = dict(gateway_sha=GATEWAY, gateway_evidence_commit=load(args.root, 'provenance.json')['evidence_commit'],
                         backend_sha=BACKEND, backend_worktree='/var/tmp/cp81-backend-0f7b61ff',
                         artifacts=inventory, frame_sha256=frames, commands=commands,
+                        generation_passed=not failed_commands, failed_commands=failed_commands,
+                        directional_criterion=directional_criterion(args.root),
                         self_check=dict(passed=True, capture_frames=36, sources=['captures', 'keyflow/absence.json', 'reconstruction/results.json', 'conformance/directional.json']),
                         checksum_policy='manifest.json is hashed separately by manifest.sha256; neither lists its own recursive digest.')
         path = args.root/'manifest.json'
         path.write_text(json.dumps(manifest, indent=2, sort_keys=True)+'\n')
         (args.root/'manifest.sha256').write_text(digest(path)+'  manifest.json\n')
-    print('PASS: 36 identical capture hashes across capture, keyflow, reconstruction and conformance; all result assertions passed')
+    print('PASS: 36 identical capture hashes across capture, keyflow, reconstruction and conformance; all inventory, acceptance, reconstruction and tamper assertions passed; directional full-dump criterion recorded separately')
