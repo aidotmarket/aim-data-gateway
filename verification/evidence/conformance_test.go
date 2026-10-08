@@ -16,8 +16,9 @@ import (
 )
 
 const cp81Authority = "5d8267dc"
-const conformanceDir = "/Users/max/koskadeux-state/s1791/cp81/conformance"
-const keyflowDir = "/Users/max/koskadeux-state/s1791/cp81/keyflow"
+
+var conformanceDir = filepath.Join(filepath.Dir(outDir()), "conformance")
+var keyflowDir = filepath.Join(filepath.Dir(outDir()), "keyflow")
 
 // This exercises the existing receiving boundary, without adding a validator.
 // Report/probe payloads currently receive canonical JSON validation only in Go.

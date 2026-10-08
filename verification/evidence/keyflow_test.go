@@ -26,13 +26,18 @@ import (
 
 // Hooks observe exactly the E2 frames with the corresponding live local key;
 // keys never enter durable evidence. These tests deliberately run serially.
+var capturedHarnesses = map[string]*harness{}
+
 var keyObserver func(*harness)
 var frameObserver func(*testing.T, string, string, []byte)
 
 func TestE3KeyAbsenceE2Frames(t *testing.T) {
 	keys := map[string][32]byte{}
 	var rows []map[string]any
-	keyObserver = func(h *harness) { keys[h.kind] = h.key }
+	keyObserver = func(h *harness) {
+		keys[h.kind] = h.key
+		capturedHarnesses[h.kind] = h
+	}
 	frameObserver = func(t *testing.T, kind, class string, raw []byte) {
 		key := keys[kind]
 		if key == [32]byte{} {
@@ -82,7 +87,7 @@ func TestE3KeyAbsenceE2Frames(t *testing.T) {
 		}
 	}
 	defer func() { keyObserver = nil; frameObserver = nil }()
-	TestE2ByteCaptures(t)
+	captureE2Frames(t)
 	writeJSON(t, filepath.Join(keyflowDir, "absence.json"), map[string]any{"authority": cp81Authority, "frames": rows})
 }
 

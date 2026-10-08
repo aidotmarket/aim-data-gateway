@@ -33,7 +33,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 )
 
-const baseSHA = "32d0efd0c5fcad1b1c58e45f476e0cfd3286f2dd"
+const baseSHA = "25779953b1c27e0dec5f39ba871422a6b81f8cff"
 const authoritySHA = "2870b0b6389b491aaa3089d215a9f3af5280d5ee"
 
 var ctx = context.Background()
@@ -66,6 +66,16 @@ func canonical(t *testing.T, v any) []byte {
 func write(t *testing.T, path string, b []byte) {
 	t.Helper()
 	must(t, os.MkdirAll(filepath.Dir(path), 0700))
+	generation := filepath.Dir(outDir()) + string(filepath.Separator)
+	if strings.HasPrefix(filepath.Clean(path), generation) {
+		f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+		must(t, err)
+		_, err = f.Write(b)
+		closeErr := f.Close()
+		must(t, err)
+		must(t, closeErr)
+		return
+	}
 	must(t, os.WriteFile(path, b, 0600))
 }
 func writeJSON(t *testing.T, path string, v any) {
@@ -78,7 +88,7 @@ func outDir() string {
 	if s := os.Getenv("EVIDENCE_OUT"); s != "" {
 		return filepath.Clean(s)
 	}
-	return "/Users/max/koskadeux-state/s1791/cp81/captures"
+	panic("EVIDENCE_OUT must name a fresh generation captures directory")
 }
 func vector(t *testing.T, name string) map[string]any {
 	t.Helper()
