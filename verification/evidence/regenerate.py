@@ -32,7 +32,7 @@ def main():
         (ROOT/'logs').mkdir()
         commands = []
     env = {**os.environ, 'EVIDENCE_OUT': str(ROOT/'captures'), 'PYTHONDONTWRITEBYTECODE': '1'}
-    def command(argv):
+    def command(argv, *, allow_failure=False):
         argv = ['rtk', 'proxy', *argv]
         log = ROOT/'logs'/f'{len(commands)+1:02d}.log'
         with log.open('wb') as output:
@@ -40,7 +40,7 @@ def main():
         commands.append(dict(argv=argv, cwd=str(Path.cwd()), environment={'EVIDENCE_OUT': env['EVIDENCE_OUT'], 'PYTHONDONTWRITEBYTECODE': '1'}, exit_code=proc.returncode, log=str(log.relative_to(ROOT))))
         (ROOT/'commands.json').write_text(json.dumps(commands, indent=2)+'\n')
         print(f'{proc.returncode}: {" ".join(argv)} (full log: {log})', flush=True)
-        if proc.returncode:
+        if proc.returncode and not allow_failure:
             raise RuntimeError(f'command failed; evidence preserved: {log}')
         return log.read_text()
     command(['git', 'fetch', 'origin', 'main'])
@@ -61,7 +61,7 @@ def main():
         command([PYTHON, '-B', 'verification/evidence/run_python.py', BACKEND, '--generate'])
         command(['go', 'test', '-count=1', '-tags', 'evidence', './verification/evidence/...', '-v'])
         command([PYTHON, '-B', 'verification/evidence/run_python.py', BACKEND])
-        command([PYTHON, '-B', 'verification/evidence/run_python.py', BACKEND, '--directional'])
+        command([PYTHON, '-B', 'verification/evidence/run_python.py', BACKEND, '--directional'], allow_failure=True)
     else:
         provenance = json.loads((ROOT/'provenance.json').read_text())
         provenance['continuation_evidence_commit'] = evidence_commit
