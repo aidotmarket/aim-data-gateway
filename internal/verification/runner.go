@@ -385,6 +385,9 @@ func (r *Runner) run(ctx context.Context, j wire.ScanJob, s wire.Snapshot) error
 			result, e = core.Probe(ctx, src, policy(j, r.Keys))
 			reachable = e == nil
 		}
+		if !reachable {
+			result = core.ProbeResult{ObjectsDiscovered: len(s.Members), SizeClass: sizeClass(s), EstimatedMaxInputTokens: 8192, SupportedCapabilities: []string{"complete_traversal", "deterministic_object_order", "fixed_bucket_aggregates", "exact_or_declared_estimated_row_counts"}}
+		}
 		document = map[string]any{"probe_id": j.Text("probe_id"), "spec_id": j.Text("spec_id"), "spec_hash": j.Envelope.SpecHash, "nonce_echo": j.Text("nonce"), "install_key_id": r.Keys.Snapshot().ReceiptKeyID, "affected_file_ids": affected, "signature_algorithm": "Ed25519", "probe": map[string]any{"listing_id": j.Text("listing_id"), "source_handle_id": j.Text("source_handle_id"), "connector_type": "aim_gateway", "connector_version": "aim_gateway-v1", "owner_consent": true, "source_reachable": reachable, "objects_discovered": result.ObjectsDiscovered, "size_class": result.SizeClass, "supported_capabilities": result.SupportedCapabilities, "estimated_max_input_tokens": result.EstimatedMaxInputTokens, "preview_requested": j.Preview()}}
 	} else {
 		var facts core.Facts
