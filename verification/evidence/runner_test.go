@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -24,14 +25,14 @@ import (
 )
 
 func TestRunnerHostRefusal(t *testing.T) {
-	for _, raw := range []string{"https://api.ai.market", "http://api.ai.market", "https://localhost:18000", "http://example.com", "http://localhost.example.com", "http://127.0.0.2", "http://[::1]", "http://backend.evil", "http://localhost@api.ai.market", "http://user@localhost", "http://localhost:18000/prefix", "http://localhost?x=1", "http://localhost#x", "http://localhost:", "http://localhost:abc", "http://localhost./", "//localhost:18000"} {
+	for _, raw := range []string{"https://api.ai.market", "http://api.ai.market", "https://localhost:18000", "http://example.com", "http://localhost.example.com", "http://127.0.0.2", "http://[::1]", "http://backend.evil", "http://localhost@api.ai.market", "http://user@localhost", "http://localhost:18000/prefix", "http://localhost?x=1", "http://localhost#x", "http://localhost:", "http://localhost:abc", "http://localhost./", "//localhost:18000", "http://localhost:18000", "http://127.0.0.1:18000", "http://backend:8000", "https://backend:8000", "https://backend", "https://backend:08443", "https://BACKEND:8443", "https://backend:8443/prefix", "https://user@backend:8443", "https://backend:8443?x=1", "https://backend:8443?", "https://backend:8443#x"} {
 		t.Run(raw, func(t *testing.T) {
 			if _, err := testBase(raw); err == nil {
 				t.Fatal("accepted unsafe origin")
 			}
 		})
 	}
-	for _, raw := range []string{"http://localhost:18000", "http://127.0.0.1:18000/", "http://backend:8000"} {
+	for _, raw := range []string{"https://backend:8443", "https://backend:8443/"} {
 		if _, err := testBase(raw); err != nil {
 			t.Fatal(raw, err)
 		}
@@ -39,13 +40,13 @@ func TestRunnerHostRefusal(t *testing.T) {
 }
 
 func TestRunnerTransportPreservesSignedBytes(t *testing.T) {
-	base, err := testBase("http://localhost:18000")
+	base, err := testBase("https://backend:8443")
 	must(t, err)
 	body := []byte(`{"document_b64":"signed-exact-bytes"}`)
 	called := 0
 	tr := testTransport{base: base, next: trip(func(req *http.Request) (*http.Response, error) {
 		called++
-		if req.URL.Scheme != "http" || req.URL.Host != base.Host || req.Host != base.Host || req.Header.Get("Authorization") != "Bearer unchanged.signature.bytes" {
+		if req.URL.Scheme != "https" || req.URL.Host != base.Host || req.Host != base.Host || req.Header.Get("Authorization") != "Bearer unchanged.signature.bytes" {
 			t.Fatal("unexpected transport mapping")
 		}
 		raw, e := io.ReadAll(req.Body)
@@ -98,7 +99,7 @@ func TestRunnerFramesIdenticalToGen2Capture(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	result := make(chan error, 1)
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ws, e := websocket.Accept(w, r, nil)
 		if e != nil {
 			result <- e
@@ -152,12 +153,13 @@ func TestRunnerFramesIdenticalToGen2Capture(t *testing.T) {
 		result <- nil
 		<-ctx.Done()
 	}))
+	cert, ca := runnerTLSCertificate(t, "backend", false)
+	srv.TLS = &tls.Config{Certificates: []tls.Certificate{cert}}
+	srv.StartTLS()
 	defer srv.Close()
 	_, key, err := ed25519.GenerateKey(rand.Reader)
 	must(t, err)
-	base, err := testBase(srv.URL)
-	must(t, err)
-	c := channel.Client{URL: "ws" + strings.TrimPrefix(srv.URL, "http") + "/api/v1/gateway-channel", HTTPClient: testClient(base), Log: h.gateway.Log, Version: "1.2.3",
+	c := channel.Client{URL: "wss://backend:8443/api/v1/gateway-channel", HTTPClient: runnerLocalTLSClient(t, ca, srv.Listener.Addr().String()), Log: h.gateway.Log, Version: "1.2.3",
 		State:     &pairing.State{Private: key, Pins: pairing.Pins{GatewayID: h.gateway.GatewayID}},
 		Delivered: func(context.Context, audit.Entry) error { cancel(); return nil }}
 	_ = c.Connect(ctx) // Expected context cancellation after the final real ack.

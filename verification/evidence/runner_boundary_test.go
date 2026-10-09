@@ -8,12 +8,15 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"net"
 	"net/http"
 	"net/netip"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -32,9 +35,9 @@ func TestRunnerResolvedDestinationBoundary(t *testing.T) {
 		ips                       []string
 		want                      string
 	}{
-		{"loopback", "localhost", "", "", []string{"127.0.0.1"}, "127.0.0.1:8000"},
-		{"IPv6 loopback", "localhost", "", "", []string{"::1"}, "[::1]:8000"},
-		{"Compose", "backend", "172.28.90.0/24", "172.28.90.5", []string{"172.28.90.5"}, "172.28.90.5:8000"},
+		{"loopback", "localhost", "", "", []string{"127.0.0.1"}, ""},
+		{"IPv6 loopback", "localhost", "", "", []string{"::1"}, ""},
+		{"Compose", "backend", "172.28.90.0/24", "172.28.90.5", []string{"172.28.90.5"}, "172.28.90.5:8443"},
 		{"public localhost", "localhost", "", "", []string{"8.8.8.8"}, ""},
 		{"public backend", "backend", "172.28.90.0/24", "172.28.90.5", []string{"8.8.8.8"}, ""},
 		{"mixed answer", "localhost", "", "", []string{"127.0.0.1", "8.8.8.8"}, ""},
@@ -61,7 +64,7 @@ func TestRunnerResolvedDestinationBoundary(t *testing.T) {
 				}
 				return nil, nil
 			}
-			_, err = d.DialContext(context.Background(), "tcp", net.JoinHostPort(tc.host, "8000"))
+			_, err = d.DialContext(context.Background(), "tcp", net.JoinHostPort(tc.host, "8443"))
 			if tc.want == "" {
 				if err == nil || calls != 0 {
 					t.Fatal("refused resolution connected", err, calls)
@@ -72,7 +75,7 @@ func TestRunnerResolvedDestinationBoundary(t *testing.T) {
 					t.Fatal(calls)
 				}
 			}
-			if resolves != 1 {
+			if resolves != 1 && tc.host == "backend" {
 				t.Fatal("unexpected re-resolution", resolves)
 			}
 		})
@@ -85,29 +88,39 @@ func TestRunnerResolvedDestinationBoundary(t *testing.T) {
 }
 
 func TestRunnerAllSignerClasses(t *testing.T) {
-	pub, _, err := ed25519.GenerateKey(rand.Reader)
-	must(t, err)
-	pin := wire.Key{KID: "approved", Alg: "EdDSA", Key: base64.RawURLEncoding.EncodeToString(pub)}
-	good := pairing.Pins{PermissionKeys: []wire.Key{pin}, ListingKeys: []wire.Key{pin}, ScanSpecKeys: []wire.Key{pin}}
-	must(t, validateTestPins(good, "approved", pub))
-	for _, class := range []string{"permission", "listing", "scan-spec"} {
-		for _, mutation := range []string{"missing", "wrong kid", "wrong key", "extra key", "wrong alg"} {
-			t.Run(class+"/"+mutation, func(t *testing.T) {
+	expected, good := runnerTestPins(t)
+	must(t, validateTestPins(good, expected))
+	classes := []struct {
+		name string
+		keys []wire.Key
+	}{{"permission", good.PermissionKeys}, {"listing", good.ListingKeys}, {"scan-spec", good.ScanSpecKeys}}
+	for _, class := range classes {
+		for _, mutation := range []string{"missing", "wrong kid", "wrong key", "extra key", "wrong alg", "swap permission", "swap listing", "swap scan-spec"} {
+			t.Run(class.name+"/"+mutation, func(t *testing.T) {
 				p := good
-				keys := []wire.Key{pin}
+				keys := slices.Clone(class.keys)
 				switch mutation {
 				case "missing":
 					keys = nil
 				case "wrong kid":
-					keys[0].KID = "other"
+					keys[0].KID = "foreign"
 				case "wrong key":
 					keys[0].Key = base64.RawURLEncoding.EncodeToString(make([]byte, 32))
 				case "extra key":
-					keys = append(keys, wire.Key{KID: "other"})
+					keys = append(keys, wire.Key{KID: "foreign"})
 				case "wrong alg":
-					keys[0].Alg = "other"
+					keys[0].Alg = "RS256"
+				default:
+					for _, other := range classes {
+						if mutation == "swap "+other.name {
+							if class.name == other.name {
+								return
+							}
+							keys = other.keys
+						}
+					}
 				}
-				switch class {
+				switch class.name {
 				case "permission":
 					p.PermissionKeys = keys
 				case "listing":
@@ -115,12 +128,36 @@ func TestRunnerAllSignerClasses(t *testing.T) {
 				case "scan-spec":
 					p.ScanSpecKeys = keys
 				}
-				if validateTestPins(p, "approved", pub) == nil {
-					t.Fatal("unexpected signer accepted")
+				if validateTestPins(p, expected) == nil {
+					t.Fatal("unexpected class signer accepted")
 				}
 			})
 		}
 	}
+	bad := expected
+	bad.Listing.Public = expected.Permission.Public
+	if bad.validate() == nil {
+		t.Fatal("equal class keys accepted")
+	}
+	bad = expected
+	bad.Scan.KID = "foreign"
+	if bad.validate() == nil {
+		t.Fatal("foreign expected KID accepted")
+	}
+}
+
+func runnerTestPins(t *testing.T) (testPinExpectations, pairing.Pins) {
+	t.Helper()
+	var expected testPinExpectations
+	for kid, pin := range map[string]*testPin{"s1656-test-permission-v1": &expected.Permission, "s1656-test-listing-v1": &expected.Listing, "s1656-test-scan_spec-v1": &expected.Scan} {
+		pub, _, err := ed25519.GenerateKey(rand.Reader)
+		must(t, err)
+		*pin = testPin{kid, pub}
+	}
+	keys := func(p testPin) []wire.Key {
+		return []wire.Key{{KID: p.KID, Alg: "EdDSA", Key: base64.RawURLEncoding.EncodeToString(p.Public)}}
+	}
+	return expected, pairing.Pins{PermissionKeys: keys(expected.Permission), ListingKeys: keys(expected.Listing), ScanSpecKeys: keys(expected.Scan)}
 }
 
 func TestRunnerProductAdmissionWithPairedExpiry(t *testing.T) {
@@ -183,7 +220,8 @@ func TestRunnerProductAdmissionWithPairedExpiry(t *testing.T) {
 	}
 	fetches := 0
 	g.Verifier.HTTP = &http.Client{Transport: trip(func(req *http.Request) (*http.Response, error) { fetches++; return response(req, snapshotToken), nil })}
-	control := evidenceChannel(g, "1.2.3", pins).Verification
+	c := evidenceChannel(g, "1.2.3", pins)
+	control := c.Verification
 	must(t, g.Verifier.Start(context.Background(), dir))
 	// With the worker ready, exercise expiry: no snapshot fetch or admission.
 	if err = control(context.Background(), token); err == nil {
@@ -195,8 +233,37 @@ func TestRunnerProductAdmissionWithPairedExpiry(t *testing.T) {
 	if _, err = g.Ledger.Verification(context.Background(), j.Text("spec_id")); err == nil {
 		t.Fatal("expired signer created admission")
 	}
-	// Paired state changes remain visible to the providers installed by the product.
+	// Rotate through the same product callback used after channel verification.
+	// Expired old keys remain historical, while only the new key admits work.
+	_, next, err := ed25519.GenerateKey(rand.Reader)
+	must(t, err)
+	i := wire.Instruction{Op: "key_rotation", Audience: j.Envelope.Audience, IID: "99999999-9999-4999-8999-999999999999", IssuedAt: now.Unix(), Keys: []wire.Key{{KID: "next-scan", Alg: "EdDSA", Key: base64.RawURLEncoding.EncodeToString(next.Public().(ed25519.PublicKey))}}}
+	// Authentic outgoing signature is verified by the channel before Handle.
 	g.State.Pins.KeyExpires["test-only-scan-key"] = now.Add(time.Hour).Format(time.RFC3339Nano)
+	rotation, err := wire.Sign("aim-keys+jwt", "test-only-scan-key", i, key)
+	must(t, err)
+	verified, err := wire.VerifyScanRotation(rotation, g.Verifier.ActivePins())
+	must(t, err)
+	_, _, err = c.Handle(context.Background(), verified, "scan", "test-only-scan-key")
+	must(t, err)
+	g.State.Pins.KeyExpires["test-only-scan-key"] = now.Add(-time.Minute).Format(time.RFC3339Nano)
+	if g.Verifier.ActivePins()["test-only-scan-key"] != nil || g.Verifier.Pins()["test-only-scan-key"] == nil || g.Verifier.ActivePins()["next-scan"] == nil {
+		t.Fatal("product active/historical rotation providers changed")
+	}
+	if control(context.Background(), token) == nil {
+		t.Fatal("retired key admitted work")
+	}
+	payload["platform_key_id"] = "next-scan"
+	raw = canonical(t, payload)
+	in["payload_b64"] = base64.RawURLEncoding.EncodeToString(raw)
+	in["spec_hash"] = wire.Digest(raw)
+	token, err = wire.Sign("aim-scan-spec+jwt", "next-scan", in, next)
+	must(t, err)
+	parts := strings.Split(snapshotToken, ".")
+	snapshotBody, err := base64.RawURLEncoding.DecodeString(parts[1])
+	must(t, err)
+	snapshotToken, err = wire.Sign("aim-scan-snapshot+jwt", "next-scan", json.RawMessage(snapshotBody), next)
+	must(t, err)
 	must(t, control(context.Background(), token))
 	if fetches != 1 {
 		t.Fatal("valid work did not reach product Submit snapshot path", fetches)
