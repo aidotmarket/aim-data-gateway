@@ -10,14 +10,17 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/aidotmarket/aim-data-gateway/internal/audit"
+	"github.com/aidotmarket/aim-data-gateway/internal/channel"
 	"github.com/aidotmarket/aim-data-gateway/internal/config"
 	"github.com/aidotmarket/aim-data-gateway/internal/gateway"
 	"github.com/aidotmarket/aim-data-gateway/internal/pairing"
@@ -26,6 +29,7 @@ import (
 
 type RunnerOptions struct {
 	BaseURL, PairingCode, Directory, Version, SignerKID string
+	ComposeCIDR, ComposeBackendIP                       string
 	SignerPublic                                        ed25519.PublicKey
 }
 
@@ -48,7 +52,8 @@ func TestRunnerS1656(t *testing.T) {
 	defer cancel()
 	err = RunEvidenceRunner(ctx, RunnerOptions{BaseURL: base,
 		PairingCode: os.Getenv("TEST_PAIRING_CODE"), Directory: os.Getenv("CP82_RUNNER_DIR"),
-		Version: os.Getenv("TEST_SCANNER_VERSION"), SignerKID: os.Getenv("TEST_SCAN_KID"), SignerPublic: pub})
+		Version: os.Getenv("TEST_SCANNER_VERSION"), SignerKID: os.Getenv("TEST_SCAN_KID"), SignerPublic: pub,
+		ComposeCIDR: os.Getenv("CP82_COMPOSE_CIDR"), ComposeBackendIP: os.Getenv("CP82_COMPOSE_BACKEND_IP")})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -69,6 +74,10 @@ func RunEvidenceRunner(ctx context.Context, o RunnerOptions) error {
 	if os.Getenv("AIM_GATEWAY_IMAGE_DIGEST") == "" {
 		return errors.New("explicit test AIM_GATEWAY_IMAGE_DIGEST required for product registration")
 	}
+	httpClient, err := constrainedClient(base, o.ComposeCIDR, o.ComposeBackendIP)
+	if err != nil {
+		return err
+	}
 	dir, err := filepath.Abs(o.Directory)
 	if err != nil {
 		return err
@@ -88,22 +97,13 @@ func RunEvidenceRunner(ctx context.Context, o RunnerOptions) error {
 	if err = os.WriteFile(filepath.Join(root, "data.csv"), []byte(SyntheticFixture), 0600); err != nil {
 		return err
 	}
-	httpClient := testClient(base)
 	state, err := pairing.Pair(ctx, stateDir, o.PairingCode, o.Version, base.String()+"/api/v1/gateway-channel/pair", httpClient)
 	if err != nil {
 		return err
 	}
 	pins := map[string]ed25519.PublicKey{o.SignerKID: o.SignerPublic}
-	matched := false
-	for _, p := range state.Pins.ScanSpecKeys {
-		pub, e := base64.RawURLEncoding.DecodeString(p.Key)
-		if e != nil || p.Alg != "EdDSA" || p.KID != o.SignerKID || !o.SignerPublic.Equal(ed25519.PublicKey(pub)) {
-			return errors.New("paired scan pins differ from explicit test signer")
-		}
-		matched = true
-	}
-	if !matched {
-		return errors.New("test backend must supply scan pins at pairing")
+	if err = validateTestPins(state.Pins, o.SignerKID, o.SignerPublic); err != nil {
+		return err
 	}
 	cfg := config.Config{VerificationEnabled: true, Sources: []config.Source{{Name: "synthetic", Path: root}}}
 	if err = cfg.Validate(); err != nil {
@@ -118,8 +118,6 @@ func RunEvidenceRunner(ctx context.Context, o RunnerOptions) error {
 		return err
 	}
 	defer g.Verifier.Close()
-	g.Verifier.Pins = func() map[string]ed25519.PublicKey { return pins }
-	g.Verifier.ActivePins = g.Verifier.Pins
 	g.Verifier.HTTP = httpClient
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -129,28 +127,10 @@ func RunEvidenceRunner(ctx context.Context, o RunnerOptions) error {
 	if err = g.RegisterVerification(); err != nil {
 		return err
 	}
-	c := g.EvidenceChannel(o.Version)
+	c := evidenceChannel(g, o.Version, pins)
 	u := *base
 	u.Scheme, u.Path = "ws", "/api/v1/gateway-channel"
 	c.URL, c.HTTPClient = u.String(), httpClient
-	control := c.Verification
-	c.Verification = func(ctx context.Context, token string) error {
-		// Validate backend-issued work with the explicit test key, then let the
-		// product Submit repeat verification and enforce durable admission.
-		var h wire.Header
-		if parts, e := splitHeader(token); e != nil {
-			return e
-		} else {
-			h = parts
-		}
-		if h.Type == "aim-scan-spec+jwt" {
-			b := g.Verifier.Keys.Snapshot()
-			if _, e := wire.VerifyScan(token, pins, state.Pins.GatewayID, b.RunnerID, o.Version, time.Now()); e != nil {
-				return e
-			}
-		}
-		return control(ctx, token)
-	}
 	var mu sync.Mutex
 	seen := map[string]bool{}
 	complete := false
@@ -214,4 +194,69 @@ func splitHeader(token string) (wire.Header, error) {
 	}
 	err = json.Unmarshal(raw, &h)
 	return h, err
+}
+
+// The explicit signer is an extra restriction; InitVerification retains ownership
+// of historical and active admission pins, including expiry and paired rotation.
+func restrictedControl(g *gateway.Gateway, version string, pins map[string]ed25519.PublicKey) func(context.Context, string) error {
+	return func(ctx context.Context, token string) error {
+		h, err := splitHeader(token)
+		if err != nil {
+			return err
+		}
+		if h.Type == "aim-scan-spec+jwt" {
+			b := g.Verifier.Keys.Snapshot()
+			if _, err = wire.VerifyScan(token, pins, g.State.Pins.GatewayID, b.RunnerID, version, time.Now()); err != nil {
+				return err
+			}
+		}
+		return g.VerificationControl(ctx, token)
+	}
+}
+
+func validateTestPins(p pairing.Pins, kid string, key ed25519.PublicKey) error {
+	for name, keys := range map[string][]wire.Key{"permission": p.PermissionKeys, "listing": p.ListingKeys, "scan-spec": p.ScanSpecKeys} {
+		if len(keys) == 0 {
+			return fmt.Errorf("test backend must supply %s pins", name)
+		}
+		for _, pin := range keys {
+			pub, err := base64.RawURLEncoding.DecodeString(pin.Key)
+			if err != nil || pin.Alg != "EdDSA" || pin.KID != kid || !key.Equal(ed25519.PublicKey(pub)) {
+				return fmt.Errorf("paired %s pins differ from explicit test signer", name)
+			}
+		}
+	}
+	return nil
+}
+
+// Serialize paired-state changes from channel callbacks with the test-side pin
+// snapshot. Product Handle/VerificationControl still own rotation and admission.
+func evidenceChannel(g *gateway.Gateway, version string, pins map[string]ed25519.PublicKey) *channel.Client {
+	var mu sync.Mutex
+	c := &channel.Client{State: &g.State, Log: g.Log, Version: version,
+		Complete: func(ctx context.Context, iid string) error { _, err := g.Ledger.Seen(ctx, iid); return err },
+		Scan:     g.Scan, Poll: g.Poll, Delivered: g.Delivered, Reconcile: g.Reconcile,
+		VerificationRefused: g.Verifier.QueueRefusal}
+	c.Handle = func(ctx context.Context, i wire.Instruction, class, signer string) (string, any, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		return g.Handle(ctx, i, class, signer)
+	}
+	control := restrictedControl(g, version, pins)
+	c.Verification = func(ctx context.Context, token string) error {
+		mu.Lock()
+		defer mu.Unlock()
+		return control(ctx, token)
+	}
+	c.PinsSnapshot = func() pairing.Pins {
+		mu.Lock()
+		defer mu.Unlock()
+		p := g.State.Pins
+		p.PermissionKeys = slices.Clone(p.PermissionKeys)
+		p.ListingKeys = slices.Clone(p.ListingKeys)
+		p.ScanSpecKeys = slices.Clone(p.ScanSpecKeys)
+		p.KeyExpires = maps.Clone(p.KeyExpires)
+		return p
+	}
+	return c
 }
