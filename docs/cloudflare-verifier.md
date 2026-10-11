@@ -1,5 +1,7 @@
 # Cloudflare verifier (S1791 Chunk 3b)
 
+> **Scope of this document:** the technical notes and outstanding questions below record the original Chunk 3b build. Statements about an unshipped backend or unpublished release describe that build stage, not current availability. For published releases, catalog activation, current operator procedures and remaining real-account evidence, use the [gateway operations guide](https://github.com/aidotmarket/runbooks/blob/main/aim-data-gateway.md). A published artifact still does not prove a seller deployment upgraded or completed acceptance.
+
 This adapter runs optional complete probes and paid scans in the seller's
 Cloudflare account. It uses the shared gateway scanner and the shipped 3a R2
 reader. The marketplace receives control envelopes, aggregates, findings and
@@ -136,7 +138,7 @@ Go checks: `go test ./internal/cloudflareverification ./cmd/aim-cloudflare-verif
 focused race tests, gateway/AWS/shared scanner regressions, vector digests,
 module/line budgets and `git diff --check`.
 
-Run `python3 scripts/cloudflare-verifier-release.py --version 0.1.0`.
+Run `python3 scripts/cloudflare-verifier-release.py --version X.Y.Z`, replacing `X.Y.Z` with the intended build version. The script embeds that version in the binary and release identity; `0.1.0` was the first-release example, not a default for current source. To reproduce a published release, use that release's exact source tag and recorded toolchain rather than current main.
 It compiles twice with separate caches, CGO disabled, linux/amd64, trimpath,
 empty build ID and embedded release/version. It bundles twice with the locked
 esbuild/SDK and compares bytes. Go build is offline (`GOPROXY=off`); fetch
