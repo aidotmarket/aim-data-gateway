@@ -42,8 +42,8 @@ def canonical(value):
 
 
 def build(version, output, verify_committed=False):
-    if run("go", "version").split()[2] != "go1.27.1":
-        raise ValueError("use repository-pinned Go 1.27.1")
+    if run("go", "version").split()[2] != "go1.27.2":
+        raise ValueError("use repository-pinned Go 1.27.2")
     output.mkdir(parents=True, exist_ok=True)
     binaries, bundles = [], []
     with tempfile.TemporaryDirectory(prefix="cloudflare-verifier-build-") as temp:
