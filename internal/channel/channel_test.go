@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -922,6 +923,142 @@ func waitRefusalEvents(t *testing.T, ctx context.Context, l *ledger.Ledger, want
 			t.Error("missing refusal evidence", n, want)
 			return
 		case <-time.After(10 * time.Millisecond):
+		}
+	}
+}
+
+// TestConnectReaderStopsAfterDeliveryError keeps the reconnect parent alive while
+// an independent owner error ends a connection with a frame pending delivery.
+func TestConnectReaderStopsAfterDeliveryError(t *testing.T) {
+	c, _ := fixture(t)
+	parent, cancelParent := context.WithCancel(context.Background())
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	unblock := func() { releaseOnce.Do(func() { close(release) }) }
+	ownerErr := errors.New("injected acknowledgment delivery failure")
+	c.Delivered = func(context.Context, audit.Entry) error {
+		close(entered)
+		<-release
+		return ownerErr
+	}
+	peerDone := make(chan struct{})
+	s := server(t, func(ctx context.Context, ws *websocket.Conn) {
+		defer close(peerDone)
+		if err := ws.Write(ctx, websocket.MessageText, []byte(`{"resume":{"seq":0,"entry_hash":""}}`)); err != nil {
+			t.Error(err)
+			return
+		}
+		for range 2 {
+			if _, _, err := ws.Read(ctx); err != nil {
+				t.Error(err)
+				return
+			}
+		}
+		if err := ws.Write(ctx, websocket.MessageText, []byte(`{"ack":2}`)); err != nil {
+			t.Error(err)
+			return
+		}
+		select {
+		case <-entered:
+		case <-ctx.Done():
+			return
+		}
+		if err := ws.Write(ctx, websocket.MessageText, []byte(`{}`)); err != nil {
+			t.Error(err)
+			return
+		}
+		// Keep the peer open until the connection owner closes its socket.
+		_, _, _ = ws.Read(ctx)
+	})
+	c.URL = "ws" + strings.TrimPrefix(s.URL, "http")
+	done := make(chan error, 1)
+	go func() { done <- c.Connect(parent) }()
+	returned := false
+	readerID := ""
+	t.Cleanup(func() {
+		cancelParent()
+		unblock()
+		if !returned {
+			select {
+			case <-done:
+			case <-time.After(5 * time.Second):
+				t.Error("Connect did not settle during cleanup")
+			}
+		}
+		if readerID != "" {
+			waitChannelReader(t, func(stacks string) bool {
+				return !strings.Contains(stacks, "goroutine "+readerID+" [")
+			}, "reader did not settle after parent cleanup")
+		}
+		s.Close()
+		select {
+		case <-peerDone:
+		case <-time.After(5 * time.Second):
+			t.Error("peer did not settle during cleanup")
+		}
+	})
+
+	// Locate the actual reader's select using its source line, without relying
+	// on compiler-assigned closure numbers or process-wide goroutine counts.
+	_, testFile, _, _ := runtime.Caller(0)
+	source, err := os.ReadFile(filepath.Join(filepath.Dir(testFile), "channel.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	marker := "\t\t\tcase reads <- b:"
+	at := strings.Index(string(source), marker)
+	if at < 0 {
+		t.Fatal("reader delivery select not found")
+	}
+	selectLine := strings.Count(string(source[:at]), "\n") // select precedes the case
+	location := "channel.go:" + strconv.Itoa(selectLine)
+	waitChannelReader(t, func(stacks string) bool {
+		for _, stack := range strings.Split(stacks, "\n\n") {
+			if strings.Contains(stack, "(*Client).Connect.func") && strings.Contains(stack, location+" ") && strings.Contains(stack, "[select]") {
+				readerID = strings.Fields(stack)[1]
+				return true
+			}
+		}
+		return false
+	}, "reader never reached pending frame delivery")
+	unblock()
+	select {
+	case err := <-done:
+		returned = true
+		if !errors.Is(err, ownerErr) {
+			t.Fatalf("Connect returned %v, want independent owner error", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Connect did not return the owner error")
+	}
+	if parent.Err() != nil {
+		t.Fatal("parent canceled before reader lifetime assertion")
+	}
+	waitChannelReader(t, func(stacks string) bool {
+		return !strings.Contains(stacks, "goroutine "+readerID+" [")
+	}, "reader retained after connection ended with parent still alive")
+}
+
+func waitChannelReader(t *testing.T, ready func(string) bool, failure string) {
+	t.Helper()
+	deadline := time.NewTimer(2 * time.Second)
+	defer deadline.Stop()
+	tick := time.NewTicker(time.Millisecond)
+	defer tick.Stop()
+	for {
+		buf := make([]byte, 1<<20)
+		n := runtime.Stack(buf, true)
+		if n == len(buf) {
+			t.Fatal("goroutine stack snapshot truncated")
+		}
+		if ready(string(buf[:n])) {
+			return
+		}
+		select {
+		case <-deadline.C:
+			t.Fatalf("%s\n%s", failure, buf[:n])
+		case <-tick.C:
 		}
 	}
 }
