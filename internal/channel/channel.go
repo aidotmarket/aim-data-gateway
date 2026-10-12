@@ -443,14 +443,14 @@ func (c *Client) Connect(ctx context.Context) error {
 	errorsCh := make(chan error, 1)
 	go func() {
 		for {
-			_, b, e := ws.Read(ctx)
+			_, b, e := ws.Read(workCtx)
 			if e != nil {
 				errorsCh <- e
 				return
 			}
 			select {
 			case reads <- b:
-			case <-ctx.Done():
+			case <-workCtx.Done():
 				return
 			}
 		}
