@@ -5,7 +5,7 @@ Backend read-only source: 0f7b61ff58463a1bd1fe40f89d824059d1bb2bc3
 Frozen image: sha256:fe7c6cbdbf9aae906d033a9230316a8f6e415025179a47b54fe8ad1005514d1b
 
 Root cause
-RunEvidenceRunner calls RegisterVerification at runner_live_test.go:182.
+RunEvidenceRunner calls RegisterVerification at runner_live_test.go:169.
 gateway.RegisterVerification builds the registration successfully via
 Keys.Registration, then calls g.Log.Append("scan_report", body) at
 internal/gateway/gateway.go:540. Log.Append calls ValidateScanReportBody at
