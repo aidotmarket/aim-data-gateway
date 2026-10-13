@@ -15,6 +15,7 @@ import (
 	"math"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strconv"
 	"testing"
 
@@ -146,10 +147,50 @@ func mac(key [32]byte, preimage string) string {
 }
 func TestE4Reconstruction(t *testing.T) {
 	results := []reconstruction{}
+	var inventory struct {
+		Captures []capture `json:"captures"`
+	}
+	must(t, json.Unmarshal(read(t, filepath.Join(outDir(), "summary.json")), &inventory))
+	frameHashes := map[string]string{}
+	for _, frame := range inventory.Captures {
+		actual := wire.Digest(read(t, filepath.Join(outDir(), frame.File)))
+		if actual != frame.SHA256 {
+			t.Fatal("capture changed before reconstruction", frame.File)
+		}
+		frameHashes[frame.File] = actual
+	}
+	// Apply the same aggregate, locator/object and content dictionary attacks
+	// directly to E2's successful reports, retaining their original live keys.
+	// The 216 scanner fixtures below are additional reports, with their own hashes.
+	capturedResults := []reconstruction{}
+	for _, kind := range kinds {
+		h := capturedHarnesses[kind]
+		if h == nil {
+			t.Fatal("E3 captures must run before reconstruction")
+		}
+		raw := read(t, filepath.Join(outDir(), kind, "scan.frame"))
+		body, doc := document(t, raw)
+		r := reconstruction{Runner: kind, Fixture: "captures/" + kind + "/scan.frame", ReportSHA256: wire.Digest(raw), Recovered: []any{}, Confirmed: []any{}, Linkable: []any{}, Attempts: []any{}}
+		for _, object := range doc["objects"].([]any) {
+			r.Recovered = append(r.Recovered, attemptAggregates(t, object.(map[string]any))...)
+		}
+		files := seededFiles(t)
+		if kind == "aim_gateway" {
+			for _, f := range files {
+				r.Attempts = append(r.Attempts, gatewayDictionary(t, h, f, doc, files))
+			}
+		} else {
+			for _, f := range files {
+				r.Attempts = append(r.Attempts, contentDictionary(t, body, f, &r))
+			}
+		}
+		r.ExpectationsMatched = !t.Failed()
+		capturedResults = append(capturedResults, r)
+	}
 	dir := filepath.Join(filepath.Dir(outDir()), "reconstruction")
 	// Persist results even on expectation failures (including failed subtests).
 	defer func() {
-		writeJSON(t, filepath.Join(dir, "results.json"), map[string]any{"release_candidate": baseSHA, "authority": authoritySHA, "results": results, "interpretation": "Suppression protects small occupancies, not row count/schema or all row properties. Cloud member hashes confirm guessed whole-file content and link equal bytes. Dictionary nonmatches are finite empirical evidence, not a cryptographic proof."})
+		writeJSON(t, filepath.Join(dir, "results.json"), map[string]any{"release_candidate": baseSHA, "authority": authoritySHA, "results": results, "capture_results": capturedResults, "capture_frame_sha256": frameHashes, "interpretation": "Suppression protects small occupancies, not row count/schema or all row properties. Cloud member hashes confirm guessed whole-file content and link equal bytes. Dictionary nonmatches are finite empirical evidence, not a cryptographic proof."})
 	}()
 	for _, kind := range kinds {
 		for _, f := range newFixtures() {
@@ -324,11 +365,28 @@ func gatewayContentDictionary(t *testing.T, f file, doc map[string]any, r *recon
 	return map[string]any{"attack": "gateway_whole_snapshot_content_dictionary", "public_file_id_granted": true, "candidates": len(candidates), "confirmed": confirmed, "field": "content_sha256"}
 }
 
-func gatewayDictionary(t *testing.T, h *harness, f file, doc map[string]any) any {
+func gatewayDictionary(t *testing.T, h *harness, f file, doc map[string]any, snapshot ...[]file) any {
 	t.Helper()
 	obj := doc["objects"].([]any)[0].(map[string]any)
 	manifest := wire.Digest(canonical(t, []file{f}))
 	gateway := h.gateway.GatewayID
+	if len(snapshot) > 0 {
+		files := append([]file(nil), snapshot[0]...)
+		sort.Slice(files, func(i, j int) bool { return files[i].Key < files[j].Key })
+		manifest = wire.Digest(canonical(t, files))
+		expected := mac(h.key, "object\x00gateway_listing\x00"+gateway+"\x00"+wire.Digest([]byte(f.Key))[:32]+"\x00"+wire.Digest(f.Data))
+		found := false
+		for _, v := range doc["objects"].([]any) {
+			candidate := v.(map[string]any)
+			if candidate["object_id"] == expected {
+				obj = candidate
+				found = true
+			}
+		}
+		if !found {
+			t.Fatal("capture object not found for exact local-key control")
+		}
+	}
 	paths := []string{"data/problems.csv", "exports/problems.csv", "datasets/eolymp/problems.csv", "backups/problems.csv", "s3://customer-data/problems.csv", "r2://datasets/problems.csv", f.Key}
 	keys := [][32]byte{{}, sha256.Sum256(h.private.Public().(ed25519.PublicKey)), sha256.Sum256(h.private.Seed()), sha256.Sum256([]byte(manifest))}
 	attempts, hits := 0, 0
