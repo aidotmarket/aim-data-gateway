@@ -1,0 +1,105 @@
+S1791 A4 attempt 24: diagnosis only
+
+Frozen base: 141b037deed06cd06b57bb9c66db874f93e93e90
+Backend read-only source: 0f7b61ff58463a1bd1fe40f89d824059d1bb2bc3
+Frozen image: sha256:fe7c6cbdbf9aae906d033a9230316a8f6e415025179a47b54fe8ad1005514d1b
+
+Root cause
+RunEvidenceRunner calls RegisterVerification at runner_live_test.go:182.
+gateway.RegisterVerification builds the registration successfully via
+Keys.Registration, then calls g.Log.Append("scan_report", body) at
+internal/gateway/gateway.go:540. Log.Append calls ValidateScanReportBody at
+internal/audit/audit.go:200. Its registration condition at
+internal/wire/verification.go:360 fails and line 361 returns wire.ErrVerification.
+The failing term is !identifier.MatchString(str("scanner_version")):
+identifier is ^[A-Za-z0-9_.-]{1,128}$ (same file:19).
+The '+' in 0.2.1+s1656.cp82.a4 is excluded. This is an opaque-identifier
+validation rule, not a SemVer parser or minimum-version comparison.
+
+Pair's ValidateKeySet, validateTestPins, gateway.Open, InitVerification/OpenKeys,
+Verifier.Start, and Keys.Registration all pass. On fresh state Ack is empty,
+so InitVerification does not invoke VerifyBinding. The complete supplied digest
+passes. Pair does not parse minimum_version or canary values beyond checking
+nonempty strings. Pair response contains no key_expires. Channel and canary
+callbacks are not reached. Registration is a local audit append, not HTTP;
+therefore HTTP 200 pairing followed by failure with no further backend request
+matches the observed incident.
+
+Backend response derivation
+app/api/v1/endpoints/aim_gateway.py:581-587 returns exactly these seven fields:
+gateway_id: str(uuid4())
+permission_keys: json.loads(settings.GATEWAY_PERMISSION_PUBLIC_KEYS)
+listing_keys: json.loads(settings.GATEWAY_LISTING_PUBLIC_KEYS)
+scan_spec_keys: json.loads(settings.GATEWAY_SCAN_SPEC_PUBLIC_KEYS)
+minimum_version: settings.GATEWAY_MINIMUM_VERSION
+canary_host: settings.GATEWAY_CANARY_HOST
+canary_zone: settings.GATEWAY_CANARY_ZONE
+_pairing_configuration at lines 108-125 checks release configuration and loads
+permission/listing arrays. There is no response version echo or key_expires.
+The diagnostic fixture uses the supplied exact public keys and KIDs, a fixed
+valid UUID in place of uuid4(), and required S1656 canary names. Deployment's
+exact minimum_version was not provided; 0.2.1 is a representative nonempty
+value, not a claimed capture of the live response. That value cannot affect
+the reproduced failure because it is not compared along this startup path.
+
+Reproduction
+verification/evidence/runner_s1791_diagnosis_test.go
+go test -tags=evidence ./verification/evidence -run '^TestS1791A4InvalidVerification$' -count=1 -v
+
+Uses the same startup sequence as RunEvidenceRunner, with the existing A4
+runnerLocalTLSClient helper redirecting only the socket to an httptest TLS
+server. Logical origin/SNI is backend:8443, explicit test CA is verified,
+proxy is disabled. Compose values are local test stand-ins 172.28.90.0/24 and
+172.28.90.5, not assertions about live networking. TEST_* public hex and KID
+env are derived from the supplied public keys; scanner version and full digest
+are the incident values. No backend private keys or external services needed.
+
+Observed output (full output in private evidence /var/tmp/s1791-a4-private-evidence/test.log):
+pairing.Pair (including ValidateKeySet): PASS, HTTP 200
+validateTestPins: PASS
+gateway.Open: PASS
+InitVerification/OpenKeys: PASS; fresh binding has no Ack, VerifyBinding skipped
+Verifier.Start: PASS
+Keys.Registration: PASS
+RegisterVerification -> Log.Append -> wire.ValidateScanReportBody: invalid_verification; audit seq=0
+changing only scanner_version '+' to '-': ValidateScanReportBody PASS
+backend requests=1 (pair only); stopped before channel/door/canary
+Full startup controls with 0.2.1-s1656.cp82.a4 and 0.2.1 both persist registration
+(audit seq=1) and reach the pre-channel boundary. All three subtests PASS,
+meaning the expected rejection and successful controls were asserted.
+This reproduces startup only; it does not claim end-to-end A4 success.
+
+Fix options (proposals only; none applied)
+(a) Preferred: money-path-test-environment driver sets TEST_SCANNER_VERSION to
+0.2.1-s1656.cp82.a4 (or another approved identifier such as 0.2.1). Keep the
+complete AIM_GATEWAY_IMAGE_DIGEST unchanged. Coordinate the same version/digest
+pair in S1656 VERIFICATION_SCANNER_ALLOWLIST and any version assertions or
+release metadata so the version honestly identifies the frozen artifact.
+The runner accepts a runtime version; this does not rebuild or change its
+frozen image digest. Driver/config edits do not change any existing image's
+digest. If config is baked into another image, rebuilding changes that image.
+Backend allowed_runner uses exact version-key/digest membership in
+app/services/verification_runner_service.py:67-87.
+
+(b) Backend pairing response or minimum-version/canary/key config edits alone
+cannot fix the '+' rejection: scanner_version comes from runner input, not
+the response. The viable backend configuration contribution is the matching
+scanner allowlist entry for (a). No backend code change is needed for (a).
+Changing backend validators alone cannot make the frozen gateway accept '+'.
+
+(c) If '+' must be retained, change gateway scanner-version validation to
+accept the intended version grammar (prefer a dedicated scanner-version
+validator instead of broadening every generic identifier). Cover both
+ValidateScanReportBody:360 and VerifyScan:213, which otherwise rejects '+'
+later for scan jobs. Align backend RunnerRegistration.scanner_version:25
+(OpaqueId from app/schemas/data_verification.py) and the shared report/signing
+contract wherever scanner version uses the same opaque-identifier rule.
+Update approved release metadata/allowlist consistently. This changes product
+code and requires a new evidence image digest and attestation; it cannot be
+retroactively applied to the frozen A4 digest. A harness-only override of the
+runtime version is equivalent to (a) but rebuilding the harness also changes
+the evidence image, so an environment override is smaller.
+
+Scope
+Only a diagnostic test and this report were added. No product code changed.
+No live S1656, Cloudflare, Infisical, Stripe, pairing-code creation, or PR.
