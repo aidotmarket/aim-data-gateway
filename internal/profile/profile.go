@@ -164,17 +164,49 @@ func FileContext(ctx context.Context, r inventory.Record, rule config.Columns) (
 	if e := checkDeadline(ctx); e != nil {
 		return Description{}, e
 	}
-	sha := hex.EncodeToString(r.SHA256[:])
 	switch r.Phase1.MediaType {
-	case "text/csv", "text/tab-separated-values":
-		return delimited(ctx, r, rule, sha)
-	case "application/x-ndjson":
-		return jsonLines(ctx, r, rule, sha)
-	case "application/vnd.apache.parquet":
-		return parquetFile(ctx, r, rule, sha)
+	case "text/csv", "text/tab-separated-values", "application/x-ndjson", "application/vnd.apache.parquet":
 	default:
 		return Description{}, ErrUnsupportedFormat
 	}
+	f, e := r.Open()
+	if e != nil {
+		return Description{}, e
+	}
+	defer f.Close()
+	stop := context.AfterFunc(ctx, func() { _ = f.Close() })
+	defer stop()
+	d, e := fileFromReader(ctx, r, rule, f)
+	if timeout := checkDeadline(ctx); timeout != nil {
+		return Description{}, timeout
+	}
+	return d, e
+}
+
+func fileFromReader(ctx context.Context, r inventory.Record, rule config.Columns, source profileSource) (Description, error) {
+	f, e := newVerifiedReader(ctx, source, r)
+	if e != nil {
+		return Description{}, e
+	}
+	sha := hex.EncodeToString(r.SHA256[:])
+	var d Description
+	switch r.Phase1.MediaType {
+	case "text/csv", "text/tab-separated-values":
+		d, e = delimited(ctx, r, rule, sha, f)
+	case "application/x-ndjson":
+		d, e = jsonLines(ctx, rule, sha, f)
+	case "application/vnd.apache.parquet":
+		d, e = parquetFile(ctx, rule, sha, f)
+	default:
+		return Description{}, ErrUnsupportedFormat
+	}
+	if e == nil {
+		e = f.verify()
+	}
+	if e != nil {
+		return Description{}, e
+	}
+	return d, nil
 }
 func checkDeadline(ctx context.Context) error {
 	if ctx.Err() != nil {
@@ -182,14 +214,7 @@ func checkDeadline(ctx context.Context) error {
 	}
 	return nil
 }
-func delimited(ctx context.Context, r inventory.Record, rule config.Columns, sha string) (Description, error) {
-	f, e := r.Open()
-	if e != nil {
-		return Description{}, e
-	}
-	defer f.Close()
-	stop := context.AfterFunc(ctx, func() { f.Close() })
-	defer stop()
+func delimited(ctx context.Context, r inventory.Record, rule config.Columns, sha string, f *verifiedReader) (Description, error) {
 	cr := csv.NewReader(f)
 	if r.Phase1.MediaType == "text/tab-separated-values" {
 		cr.Comma = '\t'
@@ -234,14 +259,7 @@ func delimited(ctx context.Context, r inventory.Record, rule config.Columns, sha
 	}
 	return describe(acc, rows, rule, sha), nil
 }
-func jsonLines(ctx context.Context, r inventory.Record, rule config.Columns, sha string) (Description, error) {
-	f, e := r.Open()
-	if e != nil {
-		return Description{}, e
-	}
-	defer f.Close()
-	stop := context.AfterFunc(ctx, func() { f.Close() })
-	defer stop()
+func jsonLines(ctx context.Context, rule config.Columns, sha string, f *verifiedReader) (Description, error) {
 	sc := bufio.NewScanner(f)
 	sc.Buffer(make([]byte, 64*1024), 16<<20)
 	acc := map[string]*accumulator{}
@@ -298,14 +316,7 @@ func jsonLines(ctx context.Context, r inventory.Record, rule config.Columns, sha
 	}
 	return describe(cols, rows, rule, sha), nil
 }
-func parquetFile(ctx context.Context, r inventory.Record, rule config.Columns, sha string) (Description, error) {
-	f, e := r.Open()
-	if e != nil {
-		return Description{}, e
-	}
-	defer f.Close()
-	stop := context.AfterFunc(ctx, func() { f.Close() })
-	defer stop()
+func parquetFile(ctx context.Context, rule config.Columns, sha string, f *verifiedReader) (Description, error) {
 	pf, e := file.NewParquetReader(f)
 	if e != nil {
 		return Description{}, e
