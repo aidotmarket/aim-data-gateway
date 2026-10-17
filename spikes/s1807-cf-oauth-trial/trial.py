@@ -529,7 +529,7 @@ class Trial:
         return value
 
     def readback(self, bundle):
-        content = self.request("worker_content_readback", "GET", self.path + "/content")
+        content = self.request("worker_content_readback", "GET", self.path + "/content/v2")
         self.ok(content)
         actual = sha(module_bytes(content.content, content.headers.get("Content-Type", "")))
         self.ev["readback"] = {"bundle_sha256": actual, "bundle_pass": actual == BUNDLE_SHA,
@@ -913,7 +913,7 @@ def self_test():
                         result["bindings"][0]["namespace_id"] = ns_id
                     else:
                         return httpx.Response(404, json={"errors": [{"code": 10007}]})
-                elif path.endswith("/content"):
+                elif path.endswith("/content/v2"):
                     body, mime = multipart(bundle + (b"corrupt" if corrupt else b""), metadata())
                     return httpx.Response(200, content=body, headers={"Content-Type": mime})
                 elif req.method == "PUT":
