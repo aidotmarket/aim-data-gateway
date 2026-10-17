@@ -39,6 +39,8 @@ ROOT = Path("/Users/max/koskadeux-state/s1807/cf-oauth-trial")
 IMAGE_RE = r"(?:[A-Za-z0-9][A-Za-z0-9.-]*(?::[0-9]+)?/)?[a-z0-9][a-z0-9._/-]*@sha256:[a-fA-F0-9]{64}"
 REUSE_APP = "a030d580-f639-48c8-9627-f10c1f3ce6e4"
 DENIED_NAMES = ("aim-cloudflare-verifier", "allai-dead-man-switch", "get-ai-market", "vectoraiz-installer")
+RESPONSE_BYTE_CAP = 2 * 1024 * 1024
+REQUEST_TIMEOUT = httpx.Timeout(connect=5, read=5, write=5, pool=5)
 
 
 def authorize_url(client_id, state, verifier):
@@ -178,7 +180,9 @@ class Trial:
         self.revocation_deadline = self.deadline
         self.cleaning_up = False
         self.finishing = False
-        self.client = client or httpx.Client(follow_redirects=False, trust_env=False, timeout=8)
+        self.revoking = False
+        self.client = client or httpx.Client(follow_redirects=False, trust_env=False,
+                                            timeout=REQUEST_TIMEOUT)
         self.access = self.refresh = None
         self.sensitive = []
         self.tokens = []
@@ -217,6 +221,35 @@ class Trial:
                 self.tokens.append(value)
         return value
 
+    def phase_deadline(self, revocation=False):
+        if revocation:
+            return min(self.deadline, self.revocation_deadline)
+        if self.finishing or self.cleaning_up:
+            return min(self.deadline - 90, self.cleanup_deadline)
+        return min(self.deadline, self.work_deadline)
+
+    def streamed_request(self, method, url, cutoff, **kwargs):
+        require(time.monotonic() < cutoff, "deadline")
+        with self.client.stream(method, url, timeout=REQUEST_TIMEOUT,
+                                follow_redirects=False, **kwargs) as response:
+            chunks, size = [], 0
+            body = response.iter_bytes()
+            while True:
+                require(time.monotonic() < cutoff, "deadline")
+                try:
+                    chunk = next(body)
+                except StopIteration:
+                    break
+                require(time.monotonic() < cutoff, "deadline")
+                size += len(chunk)
+                require(size <= RESPONSE_BYTE_CAP, "response_byte_cap")
+                chunks.append(chunk)
+            require(time.monotonic() < cutoff, "deadline")
+            # Cache the bounded decoded body just as Response.read() does, so
+            # existing callers can use content/json() after the stream closes.
+            response._content = b"".join(chunks)
+            return response
+
     def request(self, step, method, path, oauth=False, revocation=False, **kwargs):
         require(not self.args.dry_run, "cloudflare_forbidden_in_dry_run")
         # No caller-supplied hosts, redirects, proxies, auth URLs or pagination links.
@@ -229,12 +262,7 @@ class Trial:
                 self.guard_write(method, path, kwargs)
             url = API + path
             kwargs["headers"] = {**kwargs.get("headers", {}), "Authorization": "Bearer " + self.access}
-        if revocation:
-            cutoff = min(self.deadline, self.revocation_deadline)
-        elif self.finishing or self.cleaning_up:
-            cutoff = min(self.deadline - 90, self.cleanup_deadline)
-        else:
-            cutoff = self.work_deadline
+        cutoff = self.phase_deadline(revocation)
         remaining = cutoff - time.monotonic()
         require(remaining > 0.1, "deadline")
         start = time.monotonic()
@@ -242,8 +270,7 @@ class Trial:
                   "http_status": None, "cf_error_codes": []}
         self.ev["steps"].append(record)
         try:
-            response = self.client.request(method, url, timeout=min(8, remaining),
-                                           follow_redirects=False, **kwargs)
+            response = self.streamed_request(method, url, cutoff, **kwargs)
             record["http_status"] = response.status_code
             try:
                 data = response.json()
@@ -312,7 +339,7 @@ class Trial:
         else:
             require(not self.args.dry_run, "offline_dry_run_requires_artifact_file")
             # Separate unauthenticated, fixed GitHub artifact host. Never reuse CF headers.
-            response = self.client.get(ARTIFACT, follow_redirects=False, timeout=20)
+            response = self.streamed_request("GET", ARTIFACT, self.phase_deadline())
             self.ev["steps"].append({"step": "artifact_fetch", "at": utc(),
                                       "http_status": response.status_code,
                                       "elapsed_ms": round((time.monotonic() - start) * 1000),
@@ -725,11 +752,15 @@ def run_prepared(a, directory):
     # Suppress third-party request logging, core dumps and tracebacks containing locals.
     logging.disable(logging.CRITICAL)
     resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
-    def interrupted(*_):
-        if trial.finishing:
-            # The final alarm/cancel forbids any further network calls, even if an
-            # individual cleanup attempt catches this exception to save evidence.
+    def interrupted(sig, *_):
+        if trial.finishing and sig != signal.SIGALRM:
+            # A second operator cancellation still stops all further calls.
             trial.deadline = min(trial.deadline, time.monotonic())
+        elif trial.revoking:
+            trial.revocation_deadline = min(trial.revocation_deadline, time.monotonic())
+        elif trial.finishing:
+            # A cleanup alarm must never close the reserved revocation window.
+            trial.cleanup_deadline = min(trial.cleanup_deadline, time.monotonic())
         else:
             # socketserver may consume handler exceptions; the write gate must
             # still reject all main-work requests after a cancel/deadline.
@@ -765,11 +796,21 @@ def run_prepared(a, directory):
                 if a.command == "finish":
                     trial.delete_pkce(directory / "pkce.json")
                 trial.finishing = True
-                signal.setitimer(signal.ITIMER_REAL, max(0.01, trial.deadline - time.monotonic() - 2))
+                signal.setitimer(signal.ITIMER_REAL, 0)
                 if not a.dry_run:
                     # Independent attempts: cleanup failures MUST NOT skip revocation.
+                    # Interrupt even a blocked read exactly at cleanup's cutoff.
+                    signal.setitimer(signal.ITIMER_REAL,
+                                     max(0.01, trial.phase_deadline() - time.monotonic()))
                     trial.attempt("cleanup", trial.cleanup)
+                    signal.setitimer(signal.ITIMER_REAL, 0)
+                    trial.revoking = True
+                    # The final guard belongs only to revocation, with two
+                    # seconds left for local evidence handling.
+                    signal.setitimer(signal.ITIMER_REAL,
+                                     max(0.01, trial.phase_deadline(True) - time.monotonic() - 2))
                     trial.attempt("revoke", trial.revoke)
+                    signal.setitimer(signal.ITIMER_REAL, 0)
                 trial.ev["resource_manifest"] = {"worker_name": trial.name,
                     "worker_create_attempted": trial.worker_attempted,
                     "container_create_attempted": trial.app_attempted,
@@ -1131,6 +1172,134 @@ def self_test():
                 clock[0] = trial.revocation_deadline
                 with self.assertRaisesRegex(Refusal, "deadline"):
                     trial.revoke_one(access, "access_token")
+
+        def test_streamed_response_deadlines_and_byte_cap(self):
+            from unittest.mock import patch
+            for phase in ("work", "cleanup", "revocation", "artifact", "byte_cap"):
+                with self.subTest(phase=phase):
+                    clock, streams = [0.0], []
+                    class Body(httpx.SyncByteStream):
+                        closed = False
+                        reads = 0
+
+                        def __iter__(self):
+                            for _ in range(100):
+                                self.reads += 1
+                                clock[0] += 7
+                                yield b"x" * (RESPONSE_BYTE_CAP // 2) if phase == "byte_cap" else b" "
+
+                        def close(self):
+                            self.closed = True
+
+                    def handler(req):
+                        self.assertEqual(req.extensions["timeout"],
+                                         {"connect": 5, "read": 5, "write": 5, "pool": 5})
+                        stream = Body()
+                        streams.append(stream)
+                        return httpx.Response(200, stream=stream)
+
+                    with patch(__name__ + ".time.monotonic", side_effect=lambda: clock[0]):
+                        trial = Trial(self.args(), httpx.Client(transport=httpx.MockTransport(handler)))
+                        trial.access = "synthetic-access"
+                        trial.cleaning_up = phase == "cleanup"
+                        cutoff = trial.phase_deadline(phase == "revocation")
+                        clock[0] = 0 if phase == "byte_cap" else cutoff - 10
+                        with self.assertRaisesRegex(Refusal, "response_byte_cap" if phase == "byte_cap" else "deadline"):
+                            if phase == "artifact":
+                                trial.fetch_bundle()
+                            else:
+                                trial.request("bounded", "GET", trial.apps, revocation=phase == "revocation")
+                    self.assertEqual(streams[0].reads, 3 if phase == "byte_cap" else 2)
+                    self.assertTrue(streams[0].closed)
+                    trial.client.close()
+
+        def test_trickling_cleanup_preserves_full_revocation_window(self):
+            import tempfile
+            from unittest.mock import patch
+            clock, alarm, handlers, calls, arms, streams = [0.0], [None], {}, [], [], []
+            access, refresh = secrets.token_urlsafe(32), secrets.token_urlsafe(32)
+
+            def set_handler(sig, handler):
+                previous = handlers.get(sig, signal.SIG_DFL)
+                handlers[sig] = handler
+                return previous
+
+            def set_timer(_, seconds):
+                alarm[0] = clock[0] + seconds if seconds else None
+                if seconds:
+                    arms.append((clock[0], seconds))
+
+            def advance(seconds):
+                # Deliver the phase alarm at its wall-clock instant even when a
+                # transport read is in progress; no real sleep or signal needed.
+                target = clock[0] + seconds
+                if alarm[0] is not None and target >= alarm[0]:
+                    clock[0], alarm[0] = alarm[0], None
+                    handlers[signal.SIGALRM](signal.SIGALRM, None)
+                clock[0] = target
+
+            class Trickle(httpx.SyncByteStream):
+                closed = False
+                reads = 0
+
+                def __iter__(self):
+                    # Without a wall-clock bound this body finishes at 609,
+                    # exhausting cleanup and the entire revocation allowance.
+                    for _ in range(27):
+                        self.reads += 1
+                        advance(7)
+                        yield b" "
+                    yield b'{"result": []}'
+
+                def close(self):
+                    self.closed = True
+
+            def handler(req):
+                calls.append((req.url.path, clock[0]))
+                if req.url.path.endswith("/containers/applications"):
+                    stream = Trickle()
+                    streams.append(stream)
+                    return httpx.Response(200, stream=stream)
+                advance(1)
+                if req.url.path.endswith("/revoke"):
+                    return httpx.Response(200)
+                if req.url.path.endswith("/workers/scripts"):
+                    return httpx.Response(403)
+                if req.url.path.endswith("/token"):
+                    return httpx.Response(400, json={"error": "invalid_grant"})
+                self.fail("unexpected mock endpoint")
+
+            with tempfile.TemporaryDirectory() as tmp, \
+                 patch(__name__ + ".time.monotonic", side_effect=lambda: clock[0]), \
+                 patch.object(signal, "signal", side_effect=set_handler), \
+                 patch.object(signal, "setitimer", side_effect=set_timer):
+                trial = Trial(self.args(), httpx.Client(transport=httpx.MockTransport(handler)))
+
+                def install(_):
+                    trial.access = trial.remember(access, token=True)
+                    trial.refresh = trial.remember(refresh, token=True)
+                    trial.account_read_baseline = trial.collisions_cleared = trial.scopes_verified = True
+                    trial.app_attempted = trial.worker_attempted = True
+                    trial.app_ids.add("d" * 32)
+                    clock[0] = trial.work_deadline
+
+                with patch.dict(os.environ, {}, clear=True), patch(__name__ + ".ROOT", Path(tmp)), \
+                     patch(__name__ + ".Trial", return_value=trial), \
+                     patch.object(trial, "fetch_bundle", return_value=b"synthetic bundle"), \
+                     patch.object(trial, "authorize"), patch.object(trial, "install", side_effect=install):
+                    self.assertEqual(run(trial.args), 1)
+                self.assertEqual(arms, [(0, 420), (420, 90), (510, 88)])
+                self.assertEqual(streams[0].reads, 13)
+                self.assertTrue(streams[0].closed)
+                self.assertEqual(len(streams), 1)
+                self.assertEqual(len(trial.ev["residual_resources"]), 3)
+                self.assertEqual([path.rsplit("/", 1)[-1] for path, _ in calls[1:]],
+                                 ["revoke", "revoke", "scripts", "token"])
+                self.assertGreaterEqual(trial.deadline - calls[1][1], 90)
+                self.assertEqual(calls[1][1], trial.cleanup_deadline)
+                self.assertTrue(all(at < trial.deadline for _, at in calls))
+                self.assertLess(clock[0], trial.deadline)
+                self.assertEqual(trial.ev["findings"]["U9"]["revocation_and_denial"], "pass")
 
         def test_unlink_failure_retains_tokens_and_canary(self):
             import tempfile

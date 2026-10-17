@@ -189,6 +189,11 @@ are recorded as residual. The last 90 seconds are reserved exclusively for
 access/refresh revocation and denial checks, using the hard revocation deadline.
 Cleanup failure cannot skip revocation. Only fixed API/OAuth/artifact hosts are
 used, without redirects or environment proxies, with bounded request timeouts.
+Every HTTP response, including the artifact download, is streamed with a 2 MiB
+body cap and monotonic phase-deadline checks between chunks. Connect, read, write
+and pool waits each have a five-second timeout. A separate cleanup alarm interrupts
+an in-flight read at the cleanup cutoff without disabling revocation; the final
+alarm is armed only when revocation starts, two seconds before its hard deadline.
 SIGINT/SIGTERM enter finalization; a second cancellation stops further calls.
 Crashes/SIGKILL cannot revoke in-memory tokens: inspect the fresh reserved name,
 residual manifest and Cloudflare connected-app controls before claiming recovery.
