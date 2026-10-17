@@ -3,7 +3,7 @@ export { ContainerProxy } from "@cloudflare/containers";
 import { Ledger, LEASE_GRACE, refuse, type Admission, type Job, type Member } from "./state";
 import { b64, unb64, utf8, random, sha, canonical, deploymentConfigCanonical, encrypt, decrypt, equalSecret, bounded, now } from "./crypto";
 
-type Env = Omit<RuntimeEnv,"VERIFIER"> & { VERIFIER: DurableObjectNamespace<CloudflareVerifier>; REGISTRATION_TOKEN: string; RUN_NOW_SECRET: string };
+type Env = Omit<RuntimeEnv,"VERIFIER"> & { VERIFIER: DurableObjectNamespace<CloudflareVerifier>; REGISTRATION_TOKEN: string; BOOTSTRAP_WAKE_SECRET: string; BOOTSTRAP_INSTALL: string };
 
 export type Identity = {mode: "bundle" | "source_tree_lockfile"; sha256: string};
 export type ReleaseIdentity = {release_id:string;scanner_version:string;binary_sha256:string;worker_identity:Identity;jurisdiction:"default"};
@@ -24,6 +24,11 @@ export function config(c:Config):Config {
 function matches(c:Config,i:ReleaseIdentity):boolean {
   return releaseFields.split(" ").every(k=>canonical(c[k as keyof Config])===canonical(i[k as keyof ReleaseIdentity]));
 }
+function installBinding(env:Env) {
+  const b=JSON.parse(env.BOOTSTRAP_INSTALL);
+  if(!b || Object.keys(b).sort().join(" ")!=="expires_at intent_id registration_expires_at" || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(b.intent_id) || !Number.isSafeInteger(b.expires_at) || !Number.isSafeInteger(b.registration_expires_at) || b.expires_at<=0 || b.registration_expires_at<b.expires_at)refuse();
+  return b as {intent_id:string;expires_at:number;registration_expires_at:number};
+}
 function verifier(env:Env){return env.VERIFIER.get(env.VERIFIER.idFromName("aim-verifier"));}
 async function signingKey(secret: Secret): Promise<CryptoKey> {
   // Go stores the raw Ed25519 private key (seed || public); PKCS8 wraps the seed.
@@ -39,6 +44,7 @@ async function marketplace(c: Config,s: Secret,path: string,body: string,limit: 
   const jws=token+"."+b64(new Uint8Array(await crypto.subtle.sign("Ed25519",await signingKey(s),utf8.encode(token))));
   if(jws.length>4096)refuse();
   const response=await fetch("https://api.ai.market"+path,{method:"POST",headers:{"Content-Type":"application/json",Authorization:"Bearer "+jws},body,redirect:"manual",signal:AbortSignal.timeout(30000)});
+  if([401,403,404,409,410].includes(response.status))throw new Error("poll_stopped");
   if(response.status!==200)refuse();return bounded(response,limit);
 }
 async function capability(wrap: string, payload: object): Promise<string> {
@@ -107,12 +113,23 @@ export class CloudflareVerifier extends Container<Env> {
     }else if(object.range && (!("offset" in object.range) || !("length" in object.range) || object.range.offset!==0 || object.range.length!==m.Size))refuse();
     return new Response(object.body,{status:range?206:200,headers});
   }
-  operatorPage():string {return `<!doctype html><meta charset="utf-8"><title>Verifier control</title><h1>Run a check</h1><p>Enter your seller control secret. Scheduled checks are a best-effort backstop.</p><input id="secret" type="password" autocomplete="off"><button id="run">Run now</button><p id="result"></p><script>document.getElementById('run').onclick=async()=>{const input=document.getElementById('secret');const secret=input.value;input.value='';const r=await fetch('/operator/run-now',{method:'POST',headers:{Authorization:'Bearer '+secret,'Content-Type':'application/json'},body:'{}'});document.getElementById('result').textContent=r.status===202?'Check scheduled':'Check refused';};</script>`;}
+  async bootstrapInstall():Promise<void> {
+    const binding=installBinding(this.env),fingerprint=await sha(canonical([binding,this.env.BOOTSTRAP_WAKE_SECRET]));
+    if(this.ledger.consumeInstall(fingerprint,now(),binding.expires_at))await this.enqueue();
+  }
+  async nextPoll(delay:number):Promise<void> {
+    // SDK 0.3.7 schedules are one-shot SQL rows; replace before every insert.
+    this.deleteSchedules("pollTask");
+    await this.schedule(delay,"pollTask");
+  }
   async enqueue():Promise<void> {
     identity(this.env.DEPLOYMENT_CONFIG);
-    if(this.ledger.get("bootstrap"))await this.runtimeConfig();
+    const b=installBinding(this.env);
+    if(!this.ledger.get("install") || this.ledger.get("poll_stopped"))return;
+    if(!this.ledger.get("registered") && now()>=b.registration_expires_at){this.ledger.put("poll_stopped","1");this.deleteSchedules("pollTask");return;}
+    if(now()<Number(this.ledger.get("next_poll")??0))return;
     if(this.ledger.wake(now())){
-      try {await this.schedule(1,"pollTask");}
+      try {await this.nextPoll(1);}
       catch(e){this.ledger.release();throw e;}
     }
   }
@@ -144,6 +161,7 @@ export class CloudflareVerifier extends Container<Env> {
     const i=identity(this.env.DEPLOYMENT_CONFIG),token=this.env.REGISTRATION_TOKEN;
     if(typeof token!=="string" || unb64(token).length!==32)refuse();
     const response=await fetch("https://api.ai.market/api/v1/verification-runners/cloudflare/deployment-config",{method:"POST",headers:{"Content-Type":"application/json"},body:canonical({registration_token:token}),redirect:"manual",signal:AbortSignal.timeout(30000)});
+    if([401,403,404,409,410].includes(response.status))throw new Error("poll_stopped");
     if(response.status!==200)refuse();
     const result=JSON.parse(await bounded(response,(1<<20)+256));
     if(!result || Object.keys(result).sort().join(" ")!=="deployment_config deployment_config_sha256" || !/^[a-f0-9]{64}$/.test(result.deployment_config_sha256) || await sha(deploymentConfigCanonical(result.deployment_config))!==result.deployment_config_sha256)refuse();
@@ -154,7 +172,7 @@ export class CloudflareVerifier extends Container<Env> {
   async save(secret:Secret,c:Config):Promise<void> {
     const wrap=this.ledger.get("wrap")??refuse();
     const cipher=await encrypt(wrap,c.connection_id,secret);
-    this.ctx.storage.transactionSync(()=>{this.ledger.put("secret",cipher);this.ledger.put("bootstrap","saved");});
+    this.ctx.storage.transactionSync(()=>{this.ledger.put("secret",cipher);this.ledger.put("bootstrap","saved");if(secret.Runner)this.ledger.put("registered","1");});
   }
   async load(c:Config):Promise<Secret> {
     const wrap=this.ledger.get("wrap"),cipher=this.ledger.get("secret");if(!wrap || !cipher)refuse();
@@ -184,12 +202,11 @@ export class CloudflareVerifier extends Container<Env> {
     console.log(JSON.stringify({event:"reported",hash:r.hash}));
   }
   async pollTask():Promise<void> {
-    const start=now();
+    const start=now();let failed=false;
+    if(this.ledger.get("poll_stopped")){this.deleteSchedules("pollTask");return;}
+    if(this.env.BOOTSTRAP_INSTALL && !this.ledger.get("registered") && start>=installBinding(this.env).registration_expires_at){this.ledger.put("poll_stopped","1");this.deleteSchedules("pollTask");return;}
     if(!this.ledger.claim(start)){
-      // SDK 0.3.7 deletes this one-shot schedule on normal return. Preserve
-      // recovery with a new schedule beyond the running task's lease grace.
-      await this.schedule(Math.max(1,Number(this.ledger.get("lease"))+LEASE_GRACE+1-start),"pollTask");
-      return;
+      await this.nextPoll(Math.min(900,Math.max(1,Number(this.ledger.get("lease"))+LEASE_GRACE+1-start)));return;
     }
     try {
       let c:Config;
@@ -201,13 +218,17 @@ export class CloudflareVerifier extends Container<Env> {
           this.persistConfig(pulled.config,pulled.hash,pulled.tokenHash);
         });
         c=await this.runtimeConfig();
-        const sec=await this.compute<Secret>("/create",{...c,registration_token:this.env.REGISTRATION_TOKEN});await this.save(sec,c);
       }else c=await this.runtimeConfig();
+      if(this.ledger.get("bootstrap")==="initializing"){
+        if(this.ledger.get("secret"))refuse();
+        const sec=await this.compute<Secret>("/create",{...c,registration_token:this.env.REGISTRATION_TOKEN});await this.save(sec,c);
+      }
       let sec=await this.load(c);
       if(!sec.Runner){
         try {sec=await this.compute<Secret>("/register",c,sec);await this.save(sec,c);}
         catch(e){
           if(!(e instanceof Error) || e.message!=="registration_refused")throw e;
+          if(this.env.BOOTSTRAP_INSTALL)throw new Error("poll_stopped");
           // An explicit refusal means the backend did not accept these bytes, so
           // signing a fresh nonce and time cannot strand an accepted registration
           // (a lost acknowledgment is retried with the original bytes above). The
@@ -227,6 +248,7 @@ export class CloudflareVerifier extends Container<Env> {
           c=await this.runtimeConfig();sec=await this.compute<Secret>("/register",c,sec);await this.save(sec,c);
         }
       }
+      this.ledger.put("registered","1");
       // No poll can precede committed-outbox recovery, including empty wakes.
       await this.recover(c,sec);
       const pickup=now();
@@ -252,15 +274,22 @@ export class CloudflareVerifier extends Container<Env> {
       this.ledger.commit(admitted,result.body,await sha(result.body),now());
       console.log(JSON.stringify({event:"committed",hash:admitted.hash}));
       await this.recover(c,sec);
-    } catch {
+    } catch(e) {
+      failed=true;
+      if(e instanceof Error && e.message==="poll_stopped"){this.ledger.put("poll_stopped","1");this.deleteSchedules("pollTask");}
       this.ledger.event("refused","",now());
       console.log(JSON.stringify({event:"refused"}));
-      // The next cron or operator wake retries recovery, never an admitted
-      // traversal. Scheduling here added a row per failure and, with SDK 0.3.7
-      // one-shot rows, made refused polls run every few seconds.
     } finally {
       this.ledger.release();this.ledger.prune(now());
-      await this.stop();
+      try{await this.stop();}catch{failed=true;}
+      if(this.env.BOOTSTRAP_INSTALL && !this.ledger.get("poll_stopped")){
+        const failures=failed?Math.min(5,Number(this.ledger.get("poll_failures")??0)+1):0;
+        let delay=failed?[60,120,240,480,900][failures-1]:60;
+        if(!this.ledger.get("registered"))delay=Math.min(delay,installBinding(this.env).registration_expires_at-now());
+        if(delay<=0){this.ledger.put("poll_stopped","1");this.deleteSchedules("pollTask");return;}
+        this.ledger.put("poll_failures",String(failures));this.ledger.put("next_poll",String(now()+delay));
+        await this.nextPoll(delay);
+      }
     }
   }
 }
@@ -268,14 +297,11 @@ export class CloudflareVerifier extends Container<Env> {
 export default {
   async fetch(request:Request,env:Env):Promise<Response> {
     const u=new URL(request.url),headers={"Cache-Control":"no-store","Referrer-Policy":"no-referrer","Content-Security-Policy":"default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'"};
-    if(u.pathname==="/operator" && request.method==="GET" && !u.search){
-      return new Response(await verifier(env).operatorPage(),{headers:{...headers,"Content-Type":"text/html; charset=utf-8"}});
-    }
-    if(u.pathname!=="/operator/run-now" || request.method!=="POST" || u.search)return new Response("Not found",{status:404,headers});
-    if(!env.RUN_NOW_SECRET || !/^[A-Za-z0-9_-]{43}$/.test(env.RUN_NOW_SECRET) || !(await equalSecret(request.headers.get("Authorization")??"","Bearer "+env.RUN_NOW_SECRET)))return new Response("Unauthorized",{status:401,headers});
+    if(u.pathname!=="/bootstrap/install" || request.method!=="POST" || u.search)return new Response("Not found",{status:404,headers});
+    if(!/^[A-Za-z0-9_-]{43}$/.test(env.BOOTSTRAP_WAKE_SECRET??"") || !(await equalSecret(request.headers.get("Authorization")??"","Bearer "+env.BOOTSTRAP_WAKE_SECRET)))return new Response("Unauthorized",{status:401,headers});
     try {
       if(await bounded(new Response(request.body),3)!=="{}")refuse();
-      await verifier(env).enqueue();
+      await verifier(env).bootstrapInstall();
       return new Response(null,{status:202,headers});
     }catch{return new Response("verification_refused",{status:400,headers});}
   },

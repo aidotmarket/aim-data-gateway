@@ -1591,6 +1591,19 @@ var Ledger = class {
     if (!id) return;
     return this.record(id) ?? refuse();
   }
+  consumeInstall(fingerprint, now2, expires) {
+    return this.storage.transactionSync(() => {
+      this.clock(now2);
+      const previous = this.get("install");
+      if (previous) {
+        if (previous !== fingerprint) refuse();
+        return false;
+      }
+      if (now2 >= expires) refuse();
+      this.put("install", fingerprint);
+      return true;
+    });
+  }
   wake(now2) {
     return this.storage.transactionSync(() => {
       this.clock(now2);
@@ -1803,6 +1816,11 @@ function config(c) {
 function matches(c, i) {
   return releaseFields.split(" ").every((k) => canonical(c[k]) === canonical(i[k]));
 }
+function installBinding(env) {
+  const b = JSON.parse(env.BOOTSTRAP_INSTALL);
+  if (!b || Object.keys(b).sort().join(" ") !== "expires_at intent_id registration_expires_at" || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(b.intent_id) || !Number.isSafeInteger(b.expires_at) || !Number.isSafeInteger(b.registration_expires_at) || b.expires_at <= 0 || b.registration_expires_at < b.expires_at) refuse();
+  return b;
+}
 function verifier(env) {
   return env.VERIFIER.get(env.VERIFIER.idFromName("aim-verifier"));
 }
@@ -1821,6 +1839,7 @@ async function marketplace(c, s, path, body, limit) {
   const jws = token + "." + b64(new Uint8Array(await crypto.subtle.sign("Ed25519", await signingKey(s), utf8.encode(token))));
   if (jws.length > 4096) refuse();
   const response = await fetch("https://api.ai.market" + path, { method: "POST", headers: { "Content-Type": "application/json", Authorization: "Bearer " + jws }, body, redirect: "manual", signal: AbortSignal.timeout(3e4) });
+  if ([401, 403, 404, 409, 410].includes(response.status)) throw new Error("poll_stopped");
   if (response.status !== 200) refuse();
   return bounded(response, limit);
 }
@@ -1891,15 +1910,27 @@ var CloudflareVerifier = class extends Container {
     } else if (object.range && (!("offset" in object.range) || !("length" in object.range) || object.range.offset !== 0 || object.range.length !== m.Size)) refuse();
     return new Response(object.body, { status: range ? 206 : 200, headers });
   }
-  operatorPage() {
-    return `<!doctype html><meta charset="utf-8"><title>Verifier control</title><h1>Run a check</h1><p>Enter your seller control secret. Scheduled checks are a best-effort backstop.</p><input id="secret" type="password" autocomplete="off"><button id="run">Run now</button><p id="result"></p><script>document.getElementById('run').onclick=async()=>{const input=document.getElementById('secret');const secret=input.value;input.value='';const r=await fetch('/operator/run-now',{method:'POST',headers:{Authorization:'Bearer '+secret,'Content-Type':'application/json'},body:'{}'});document.getElementById('result').textContent=r.status===202?'Check scheduled':'Check refused';};</script>`;
+  async bootstrapInstall() {
+    const binding = installBinding(this.env), fingerprint = await sha(canonical([binding, this.env.BOOTSTRAP_WAKE_SECRET]));
+    if (this.ledger.consumeInstall(fingerprint, now(), binding.expires_at)) await this.enqueue();
+  }
+  async nextPoll(delay) {
+    this.deleteSchedules("pollTask");
+    await this.schedule(delay, "pollTask");
   }
   async enqueue() {
     identity(this.env.DEPLOYMENT_CONFIG);
-    if (this.ledger.get("bootstrap")) await this.runtimeConfig();
+    const b = installBinding(this.env);
+    if (!this.ledger.get("install") || this.ledger.get("poll_stopped")) return;
+    if (!this.ledger.get("registered") && now() >= b.registration_expires_at) {
+      this.ledger.put("poll_stopped", "1");
+      this.deleteSchedules("pollTask");
+      return;
+    }
+    if (now() < Number(this.ledger.get("next_poll") ?? 0)) return;
     if (this.ledger.wake(now())) {
       try {
-        await this.schedule(1, "pollTask");
+        await this.nextPoll(1);
       } catch (e) {
         this.ledger.release();
         throw e;
@@ -1943,6 +1974,7 @@ var CloudflareVerifier = class extends Container {
     const i = identity(this.env.DEPLOYMENT_CONFIG), token = this.env.REGISTRATION_TOKEN;
     if (typeof token !== "string" || unb64(token).length !== 32) refuse();
     const response = await fetch("https://api.ai.market/api/v1/verification-runners/cloudflare/deployment-config", { method: "POST", headers: { "Content-Type": "application/json" }, body: canonical({ registration_token: token }), redirect: "manual", signal: AbortSignal.timeout(3e4) });
+    if ([401, 403, 404, 409, 410].includes(response.status)) throw new Error("poll_stopped");
     if (response.status !== 200) refuse();
     const result = JSON.parse(await bounded(response, (1 << 20) + 256));
     if (!result || Object.keys(result).sort().join(" ") !== "deployment_config deployment_config_sha256" || !/^[a-f0-9]{64}$/.test(result.deployment_config_sha256) || await sha(deploymentConfigCanonical(result.deployment_config)) !== result.deployment_config_sha256) refuse();
@@ -1956,6 +1988,7 @@ var CloudflareVerifier = class extends Container {
     this.ctx.storage.transactionSync(() => {
       this.ledger.put("secret", cipher);
       this.ledger.put("bootstrap", "saved");
+      if (secret.Runner) this.ledger.put("registered", "1");
     });
   }
   async load(c) {
@@ -1998,8 +2031,18 @@ var CloudflareVerifier = class extends Container {
   }
   async pollTask() {
     const start = now();
+    let failed = false;
+    if (this.ledger.get("poll_stopped")) {
+      this.deleteSchedules("pollTask");
+      return;
+    }
+    if (this.env.BOOTSTRAP_INSTALL && !this.ledger.get("registered") && start >= installBinding(this.env).registration_expires_at) {
+      this.ledger.put("poll_stopped", "1");
+      this.deleteSchedules("pollTask");
+      return;
+    }
     if (!this.ledger.claim(start)) {
-      await this.schedule(Math.max(1, Number(this.ledger.get("lease")) + LEASE_GRACE + 1 - start), "pollTask");
+      await this.nextPoll(Math.min(900, Math.max(1, Number(this.ledger.get("lease")) + LEASE_GRACE + 1 - start)));
       return;
     }
     try {
@@ -2012,9 +2055,12 @@ var CloudflareVerifier = class extends Container {
           this.persistConfig(pulled.config, pulled.hash, pulled.tokenHash);
         });
         c = await this.runtimeConfig();
+      } else c = await this.runtimeConfig();
+      if (this.ledger.get("bootstrap") === "initializing") {
+        if (this.ledger.get("secret")) refuse();
         const sec2 = await this.compute("/create", { ...c, registration_token: this.env.REGISTRATION_TOKEN });
         await this.save(sec2, c);
-      } else c = await this.runtimeConfig();
+      }
       let sec = await this.load(c);
       if (!sec.Runner) {
         try {
@@ -2022,6 +2068,7 @@ var CloudflareVerifier = class extends Container {
           await this.save(sec, c);
         } catch (e) {
           if (!(e instanceof Error) || e.message !== "registration_refused") throw e;
+          if (this.env.BOOTSTRAP_INSTALL) throw new Error("poll_stopped");
           const replaced = await sha(this.env.REGISTRATION_TOKEN) !== this.ledger.get("config_token_hash");
           const pulled = replaced ? await this.pullConfig() : void 0;
           const request = JSON.parse(new TextDecoder().decode(unb64(sec.Registration)));
@@ -2044,6 +2091,7 @@ var CloudflareVerifier = class extends Container {
           await this.save(sec, c);
         }
       }
+      this.ledger.put("registered", "1");
       await this.recover(c, sec);
       const pickup = now();
       const raw = await marketplace(c, sec, "/api/v1/verification-runners/" + sec.Runner + "/work", "{}", 64 << 10);
@@ -2070,27 +2118,46 @@ var CloudflareVerifier = class extends Container {
       this.ledger.commit(admitted, result.body, await sha(result.body), now());
       console.log(JSON.stringify({ event: "committed", hash: admitted.hash }));
       await this.recover(c, sec);
-    } catch {
+    } catch (e) {
+      failed = true;
+      if (e instanceof Error && e.message === "poll_stopped") {
+        this.ledger.put("poll_stopped", "1");
+        this.deleteSchedules("pollTask");
+      }
       this.ledger.event("refused", "", now());
       console.log(JSON.stringify({ event: "refused" }));
     } finally {
       this.ledger.release();
       this.ledger.prune(now());
-      await this.stop();
+      try {
+        await this.stop();
+      } catch {
+        failed = true;
+      }
+      if (this.env.BOOTSTRAP_INSTALL && !this.ledger.get("poll_stopped")) {
+        const failures = failed ? Math.min(5, Number(this.ledger.get("poll_failures") ?? 0) + 1) : 0;
+        let delay = failed ? [60, 120, 240, 480, 900][failures - 1] : 60;
+        if (!this.ledger.get("registered")) delay = Math.min(delay, installBinding(this.env).registration_expires_at - now());
+        if (delay <= 0) {
+          this.ledger.put("poll_stopped", "1");
+          this.deleteSchedules("pollTask");
+          return;
+        }
+        this.ledger.put("poll_failures", String(failures));
+        this.ledger.put("next_poll", String(now() + delay));
+        await this.nextPoll(delay);
+      }
     }
   }
 };
 var worker_default = {
   async fetch(request, env) {
     const u = new URL(request.url), headers = { "Cache-Control": "no-store", "Referrer-Policy": "no-referrer", "Content-Security-Policy": "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'" };
-    if (u.pathname === "/operator" && request.method === "GET" && !u.search) {
-      return new Response(await verifier(env).operatorPage(), { headers: { ...headers, "Content-Type": "text/html; charset=utf-8" } });
-    }
-    if (u.pathname !== "/operator/run-now" || request.method !== "POST" || u.search) return new Response("Not found", { status: 404, headers });
-    if (!env.RUN_NOW_SECRET || !/^[A-Za-z0-9_-]{43}$/.test(env.RUN_NOW_SECRET) || !await equalSecret(request.headers.get("Authorization") ?? "", "Bearer " + env.RUN_NOW_SECRET)) return new Response("Unauthorized", { status: 401, headers });
+    if (u.pathname !== "/bootstrap/install" || request.method !== "POST" || u.search) return new Response("Not found", { status: 404, headers });
+    if (!/^[A-Za-z0-9_-]{43}$/.test(env.BOOTSTRAP_WAKE_SECRET ?? "") || !await equalSecret(request.headers.get("Authorization") ?? "", "Bearer " + env.BOOTSTRAP_WAKE_SECRET)) return new Response("Unauthorized", { status: 401, headers });
     try {
       if (await bounded(new Response(request.body), 3) !== "{}") refuse();
-      await verifier(env).enqueue();
+      await verifier(env).bootstrapInstall();
       return new Response(null, { status: 202, headers });
     } catch {
       return new Response("verification_refused", { status: 400, headers });

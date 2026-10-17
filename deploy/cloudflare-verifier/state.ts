@@ -106,6 +106,15 @@ export class Ledger {
     if (!id) return;
     return this.record(id) ?? refuse();
   }
+  consumeInstall(fingerprint:string,now:number,expires:number):boolean {
+    return this.storage.transactionSync(()=>{
+      this.clock(now);
+      const previous=this.get("install");
+      if(previous){if(previous!==fingerprint)refuse();return false;}
+      if(now>=expires)refuse();
+      this.put("install",fingerprint);return true;
+    });
+  }
   wake(now: number): boolean {
     return this.storage.transactionSync(() => {
       this.clock(now);

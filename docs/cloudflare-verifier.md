@@ -15,7 +15,59 @@ Authority: runbooks Amendment A merged at `10f75e45`,
 key rotation and ISRG transport are mirrored without importing AWS/Lambda SDKs.
 The gateway dependency graph and shared scanner are unchanged.
 
-## Seller deployment
+## OAuth distribution oauth-install-r1 (S1807 I3)
+
+This separately cataloged distribution adds one-use bootstrap and bounded polling.
+Existing button installations remain on their frozen source and retain manual controls.
+The binary stays `cloudflare-verifier-v0.1.1`, scanner `0.1.1`, SHA-256
+`45b5bf95b784bf6cc572fe84f8faba77bb09682a3d5cb1f25cae6eb4e6a1c8a6`.
+The Container image is pinned to
+`docker.io/aidotmarket/aim-cloudflare-verifier@sha256:19b7035f37e422df2dbf1af950af9eef7c6c15e9842c61b35a9274bbb04c60ba`.
+The new Worker hash selects a new binary/Worker allowlist pair; the old pair remains.
+Use the unchanged strict catalog entry in `CLOUDFLARE_OAUTH_INSTALL_RELEASE_CATALOG`
+(default `{}`, refusing new setup), selected internally only for installer intents.
+Backend catalog selection/activation belongs to the installer backend chunks.
+
+Installer metadata supplies `REGISTRATION_TOKEN` and `BOOTSTRAP_WAKE_SECRET` as
+`secret_text`, plus `BOOTSTRAP_INSTALL` as a nonsecret canonical JSON string:
+`{"expires_at":<Unix seconds>,"intent_id":"<intent UUID>","registration_expires_at":<Unix seconds>}`.
+The spec leaves binding names/format open: this defines absolute UTC second deadlines;
+registration expiry is the existing token's mint time + 30 minutes, never extended.
+Wake expiry is the install work deadline. No reusable run-now binding or operator
+page is exported. Upload with no cron; after exact module/config/image/DO readback,
+enable minute cron and POST exact `{}` to `/bootstrap/install` with
+`Authorization: Bearer <BOOTSTRAP_WAKE_SECRET>`. Only empty 202 is an acknowledgment.
+The DO stores a fingerprint of the intent, deadlines and secret before scheduling.
+Identical lost-ack retries return empty 202 even after wake expiry, with no second
+wake; changed or expired unused bindings refuse. Cron cannot start an unconsumed install.
+
+One SDK next-poll row replaces the previous row; cron respects the next deadline.
+Failures back off 1/2/4/8/15 minutes, capped at 15; success returns to minute polling.
+Terminal control refusal or unused registration-token expiry stops scheduling.
+Lease recovery resends committed outbox or produces a terminal failure; it never
+repeats an admitted traversal. Pending `/create` may retry while no signing state
+has been saved or registered (e.g. unavailable image); saved keys are never replaced.
+Bootstrap/config/register/first empty poll open zero R2 objects. Ready still requires
+backend observation and installer cleanup proof; 202 alone does not establish Ready.
+
+Build locally with `COMMAND_PROXY="rtk proxy" python3 scripts/cloudflare-verifier-release.py
+--version 0.1.1 --distribution oauth-install-r1 --output /absolute/candidate/path`
+(on one shell line). Copy only the new `worker.mjs` into the tracked template and
+repeat with `--verify-committed`; the approved binary must remain byte-identical.
+The frozen binary source archive comes from gateway commit
+`baec125846638b65e211be9a11949d8898cdd128` (Go 1.27.1). Main
+now uses Go 1.27.2: distribution builds copy/check the approved binary and reproduce
+only the Worker, avoiding a changed binary hash from rebuilding current main.
+The candidate uses immutable repository/tag `cloudflare-verifier-oauth-install-r1`,
+its own bundle hash and Cosign workflow identity/signatures. Frozen v0.1.1 signing
+is rejected; the original repository, tag and signatures are never replaced.
+The tag workflow signs only the new distribution through the existing facilities;
+local exports do not sign, publish, create repositories or deploy anything.
+The exported template has the pinned image, no cron and no run-now prompt.
+Live multipart secret binding/readback, fresh image pull/boot and provider accounting
+remain T1/T5/T10 Gate 4 evidence; offline tests cannot establish them.
+
+## Seller deployment (frozen button releases)
 
 Use the release-specific Deploy to Cloudflare button provided by the website.
 It copies a frozen public repository into the seller's GitHub/GitLab account.
@@ -138,7 +190,7 @@ Go checks: `go test ./internal/cloudflareverification ./cmd/aim-cloudflare-verif
 focused race tests, gateway/AWS/shared scanner regressions, vector digests,
 module/line budgets and `git diff --check`.
 
-Run `python3 scripts/cloudflare-verifier-release.py --version X.Y.Z`, replacing `X.Y.Z` with the intended build version. The script embeds that version in the binary and release identity; `0.1.0` was the first-release example, not a default for current source. To reproduce a published release, use that release's exact source tag and recorded toolchain rather than current main.
+At the original release source tag, run `python3 scripts/cloudflare-verifier-release.py --version X.Y.Z`, replacing `X.Y.Z` with the intended build version. The script embeds that version in the binary and release identity; `0.1.0` was the first-release example, not a default for current source. To reproduce a published release, use that release's exact source tag and recorded toolchain rather than current main.
 It compiles twice with separate caches, CGO disabled, linux/amd64, trimpath,
 empty build ID and embedded release/version. It bundles twice with the locked
 esbuild/SDK and compares bytes. Go build is offline (`GOPROXY=off`); fetch
