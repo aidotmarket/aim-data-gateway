@@ -111,7 +111,9 @@ was present. Before any management write, the scope set must be exactly
 `{workers-scripts.admin, containers.write}`. Missing `scope` fails closed unless
 `--accept-missing-scope-field` is explicitly supplied (default off); that override
 and omission are recorded. It never accepts an explicit wrong/empty scope set.
-Issued tokens are retained for finally revocation even when scope validation fails.
+Issued tokens are retained before PKCE deletion and for finally revocation even when
+scope validation fails. PKCE deletion is attempted on every path; failure sets the
+non-secret `pkce_delete_failed` evidence flag without discarding issued tokens.
 
 Account verification is the harmless, paginated
 `GET /accounts/<approved-account>/workers/scripts`. A 403/404 or other refusal
@@ -182,6 +184,9 @@ for independent finally attempts: delete created Container apps → delete the
 created Worker including its DO namespace (`force=true`) → confirm absence →
 revoke access/refresh separately → verify access denial and refresh `invalid_grant`.
 Unexpectedly renewed tokens are immediately revoked and the trial fails.
+Cleanup requests stop at the hard deadline minus 90 seconds; unfinished resources
+are recorded as residual. The last 90 seconds are reserved exclusively for
+access/refresh revocation and denial checks, using the hard revocation deadline.
 Cleanup failure cannot skip revocation. Only fixed API/OAuth/artifact hosts are
 used, without redirects or environment proxies, with bounded request timeouts.
 SIGINT/SIGTERM enter finalization; a second cancellation stops further calls.

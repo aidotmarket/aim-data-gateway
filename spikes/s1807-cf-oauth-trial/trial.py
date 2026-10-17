@@ -174,6 +174,9 @@ class Trial:
         self.started = time.monotonic()
         self.deadline = self.started + 600
         self.work_deadline = self.started + 420
+        self.cleanup_deadline = self.deadline - 90
+        self.revocation_deadline = self.deadline
+        self.cleaning_up = False
         self.finishing = False
         self.client = client or httpx.Client(follow_redirects=False, trust_env=False, timeout=8)
         self.access = self.refresh = None
@@ -214,7 +217,7 @@ class Trial:
                 self.tokens.append(value)
         return value
 
-    def request(self, step, method, path, oauth=False, **kwargs):
+    def request(self, step, method, path, oauth=False, revocation=False, **kwargs):
         require(not self.args.dry_run, "cloudflare_forbidden_in_dry_run")
         # No caller-supplied hosts, redirects, proxies, auth URLs or pagination links.
         if oauth:
@@ -226,7 +229,13 @@ class Trial:
                 self.guard_write(method, path, kwargs)
             url = API + path
             kwargs["headers"] = {**kwargs.get("headers", {}), "Authorization": "Bearer " + self.access}
-        remaining = (self.deadline if self.finishing else self.work_deadline) - time.monotonic()
+        if revocation:
+            cutoff = min(self.deadline, self.revocation_deadline)
+        elif self.finishing or self.cleaning_up:
+            cutoff = min(self.deadline - 90, self.cleanup_deadline)
+        else:
+            cutoff = self.work_deadline
+        remaining = cutoff - time.monotonic()
         require(remaining > 0.1, "deadline")
         start = time.monotonic()
         record = {"step": step, "at": utc(), "method": method,
@@ -366,6 +375,8 @@ class Trial:
                 remaining = 600 - (time.time() - stat.st_mtime)
                 self.deadline = min(self.deadline, time.monotonic() + remaining)
                 self.work_deadline = min(self.work_deadline, self.deadline - 180)
+                self.cleanup_deadline = self.deadline - 90
+                self.revocation_deadline = self.deadline
                 signal.setitimer(signal.ITIMER_REAL, max(0.01, self.work_deadline - time.monotonic()))
                 require(self.work_deadline > time.monotonic(), "pkce_work_window_expired")
                 saved = json.load(stream)
@@ -385,20 +396,27 @@ class Trial:
             else:
                 self.exchange(code, verifier, pkce)
         finally:
+            self.delete_pkce(pkce)
+
+    def delete_pkce(self, pkce):
+        try:
             pkce.unlink(missing_ok=True)
+        except BaseException:
+            # Never retain exception text or let local housekeeping skip revocation.
+            self.ev["pkce_delete_failed"] = True
 
     def exchange(self, code, verifier, pkce=None):
         form = {"grant_type": "authorization_code", "client_id": self.args.client_id,
                 "redirect_uri": REDIRECT, "code": code, "code_verifier": verifier}
         try:
             response = self.request("code_exchange", "POST", "/token", oauth=True, data=form)
+            data = response.json()
+            # Retain issued credentials before validation or fallible local housekeeping.
+            self.access = self.remember(data.get("access_token"), token=True)
+            self.refresh = self.remember(data.get("refresh_token"), token=True)
         finally:
-            # Remove single-use verifier before parsing/validating any response.
             if pkce is not None:
-                pkce.unlink(missing_ok=True)
-        data = response.json()
-        self.access = self.remember(data.get("access_token"), token=True)
-        self.refresh = self.remember(data.get("refresh_token"), token=True)
+                self.delete_pkce(pkce)
         self.ev["token"] = {"token_type": data.get("token_type"),
                             "expires_in": data.get("expires_in"),
                             "refresh_token_issued": bool(self.refresh),
@@ -522,6 +540,13 @@ class Trial:
             return False
 
     def cleanup(self):
+        self.cleaning_up = True
+        try:
+            self.cleanup_resources()
+        finally:
+            self.cleaning_up = False
+
+    def cleanup_resources(self):
         # Reconcile timed-out creates by unique reserved name; do not blindly retry writes.
         if self.app_attempted:
             def reconcile_apps():
@@ -561,7 +586,7 @@ class Trial:
 
     def revoke_one(self, token, hint):
         form = {"client_id": self.args.client_id, "token": token, "token_type_hint": hint}
-        self.ok(self.request("revoke_" + hint, "POST", "/revoke", oauth=True, data=form))
+        self.ok(self.request("revoke_" + hint, "POST", "/revoke", oauth=True, revocation=True, data=form))
 
     def revoke(self):
         outcomes = []
@@ -572,7 +597,7 @@ class Trial:
             def denial():
                 # Same GET successfully used before installation: no deleted-resource 404 shortcut.
                 response = self.request("revoked_access_denial", "GET", f"/accounts/{self.args.account_id}/workers/scripts",
-                                        params={"page": 1, "per_page": 100})
+                                        revocation=True, params={"page": 1, "per_page": 100})
                 require(response.status_code in (401, 403), "access_revocation_unproven")
                 require(self.account_read_baseline, "revocation_read_baseline_missing")
             outcomes.append(self.attempt("revoked_access_denial", denial))
@@ -580,7 +605,7 @@ class Trial:
             def renewal_denial():
                 form = {"client_id": self.args.client_id, "grant_type": "refresh_token",
                         "refresh_token": self.refresh}
-                response = self.request("revoked_refresh_denial", "POST", "/token", oauth=True, data=form)
+                response = self.request("revoked_refresh_denial", "POST", "/token", oauth=True, revocation=True, data=form)
                 data = response.json()
                 unexpected = []
                 for key in ("access_token", "refresh_token"):
@@ -684,7 +709,12 @@ def run(a):
         return run_prepared(a, directory)
     finally:
         if directory is not None:
-            (directory / "pkce.json").unlink(missing_ok=True)
+            try:
+                (directory / "pkce.json").unlink(missing_ok=True)
+            except OSError:
+                # run_prepared already records deletion failure in trial evidence.
+                # This fallback also covers validation failures before a trial exists.
+                pass
 
 
 def run_prepared(a, directory):
@@ -733,7 +763,7 @@ def run_prepared(a, directory):
                     "reason": str(exc) if isinstance(exc, Refusal) else type(exc).__name__})
             finally:
                 if a.command == "finish":
-                    trial.attempt("pkce_delete", lambda: (directory / "pkce.json").unlink(missing_ok=True))
+                    trial.delete_pkce(directory / "pkce.json")
                 trial.finishing = True
                 signal.setitimer(signal.ITIMER_REAL, max(0.01, trial.deadline - time.monotonic() - 2))
                 if not a.dry_run:
@@ -1056,6 +1086,96 @@ def self_test():
                 with self.assertRaises(Refusal):
                     trial.fetch_bundle()
                 self.assertEqual([str(u) for u in seen], [ARTIFACT])
+
+        def test_cleanup_exhaustion_preserves_revocation_budget(self):
+            from unittest.mock import patch
+            clock, calls = [0.0], []
+            access, refresh = secrets.token_urlsafe(32), secrets.token_urlsafe(32)
+            def handler(req):
+                calls.append((req.url.path, clock[0]))
+                if req.url.path.endswith("/containers/applications"):
+                    # Many slow pages consume the entire cleanup allowance, obeying
+                    # the per-request timeout, without a real sleep or network.
+                    clock[0] += req.extensions["timeout"]["read"]
+                    return httpx.Response(200, json={"result": [],
+                                                     "result_info": {"total_pages": 100}})
+                clock[0] += 1
+                if req.url.path.endswith("/revoke"):
+                    return httpx.Response(200)
+                if req.url.path.endswith("/workers/scripts"):
+                    return httpx.Response(403)
+                if req.url.path.endswith("/token"):
+                    return httpx.Response(400, json={"error": "invalid_grant"})
+                self.fail("unexpected mock endpoint")
+            with patch(__name__ + ".time.monotonic", side_effect=lambda: clock[0]):
+                trial = Trial(self.args(), httpx.Client(transport=httpx.MockTransport(handler)))
+                trial.access = trial.remember(access, token=True)
+                trial.refresh = trial.remember(refresh, token=True)
+                trial.account_read_baseline = True
+                trial.app_attempted = trial.worker_attempted = True
+                trial.app_ids.add("d" * 32)
+                trial.finishing = True
+                clock[0] = trial.work_deadline
+                trial.cleanup()
+                self.assertEqual(clock[0], trial.cleanup_deadline)
+                self.assertGreaterEqual(trial.revocation_deadline - clock[0], 90)
+                self.assertEqual(trial.revocation_deadline, trial.deadline)
+                cleanup_count = len(calls)
+                self.assertGreater(cleanup_count, 1)
+                self.assertTrue(all(at < trial.cleanup_deadline for _, at in calls))
+                self.assertEqual(len(trial.ev["residual_resources"]), 3)
+                trial.revoke()
+                self.assertEqual([path.rsplit("/", 1)[-1] for path, _ in calls[cleanup_count:]],
+                                 ["revoke", "revoke", "scripts", "token"])
+                self.assertEqual(trial.ev["findings"]["U9"]["revocation_and_denial"], "pass")
+                clock[0] = trial.revocation_deadline
+                with self.assertRaisesRegex(Refusal, "deadline"):
+                    trial.revoke_one(access, "access_token")
+
+        def test_unlink_failure_retains_tokens_and_canary(self):
+            import tempfile
+            from unittest.mock import patch
+            access, refresh = secrets.token_urlsafe(32), secrets.token_urlsafe(32)
+            revoked = []
+            def handler(req):
+                form = parse_qs(req.content.decode()) if req.content else {}
+                if req.url.path.endswith("/revoke"):
+                    revoked.append(form["token"][0])
+                    return httpx.Response(200)
+                if req.url.path.endswith("/workers/scripts"):
+                    return httpx.Response(403)
+                if form.get("grant_type") == ["refresh_token"]:
+                    return httpx.Response(400, json={"error": "invalid_grant"})
+                return httpx.Response(200, json={"access_token": access, "refresh_token": refresh,
+                    "token_type": "bearer", "expires_in": 3600, "scope": SCOPES})
+            with tempfile.TemporaryDirectory() as tmp:
+                a = self.args(command="finish")
+                directory = Path(tmp) / a.run_id
+                directory.mkdir(mode=0o700)
+                state, verifier = secrets.token_urlsafe(32), secrets.token_urlsafe(64)
+                private_write(directory, "pkce.json", json.dumps({"run_id": a.run_id,
+                    "state": state, "verifier": verifier}).encode())
+                trial = Trial(a, httpx.Client(transport=httpx.MockTransport(handler)))
+                def install(_):
+                    trial.account_read_baseline = True
+                with patch.dict(os.environ, {}, clear=True), patch(__name__ + ".ROOT", Path(tmp)), \
+                     patch(__name__ + ".Trial", return_value=trial), \
+                     patch.object(trial, "fetch_bundle", return_value=b"synthetic bundle"), \
+                     patch.object(sys, "stdin", io.StringIO(REDIRECT + "?" +
+                         urlencode({"state": state, "code": "fake-code"}) + "\n")), \
+                     patch.object(trial, "install", side_effect=install), \
+                     patch.object(Path, "unlink", side_effect=OSError(access + refresh)) as unlink, \
+                     contextlib.redirect_stdout(io.StringIO()) as output:
+                    self.assertEqual(run(a), 0)
+                    self.assertEqual(unlink.call_count, 4)
+                self.assertEqual(revoked, [access, refresh])
+                directory = Path(tmp) / "synthetic-test"
+                evidence = (directory / "evidence.json").read_bytes()
+                combined = evidence + (directory / "stdout.txt").read_bytes() + output.getvalue().encode()
+                self.assertFalse(leaks(combined, [access, refresh]))
+                self.assertEqual(json.loads(evidence)["token_canary"]["issued_tokens_checked"], 2)
+                self.assertTrue(json.loads(evidence)["pkce_delete_failed"])
+                self.assertTrue(json.loads(evidence)["token_canary"]["evidence_and_stdout_pass"])
 
         def test_refresh_revocation_and_unexpected_renewal(self):
             for renewal_succeeds in (False, True):
