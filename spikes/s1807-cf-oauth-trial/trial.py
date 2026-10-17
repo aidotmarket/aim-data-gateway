@@ -16,6 +16,7 @@ import secrets
 import signal
 import sys
 import time
+import termios
 from datetime import datetime, timezone
 from email import policy
 from email.parser import BytesParser
@@ -35,7 +36,32 @@ ARTIFACT = f"https://raw.githubusercontent.com/aidotmarket/cloudflare-verifier-v
 BUNDLE_SHA = "69e62e36aee28c96521ca6e06d93b82532d3314db50a4ec09f18786d220b54d4"
 BINARY_SHA = "45b5bf95b784bf6cc572fe84f8faba77bb09682a3d5cb1f25cae6eb4e6a1c8a6"
 ROOT = Path("/Users/max/koskadeux-state/s1807/cf-oauth-trial")
-IMAGE_RE = r"docker\.io/[a-z0-9_-]+/[a-z0-9_.-]+@sha256:[a-f0-9]{64}"
+IMAGE_RE = r"(?:[A-Za-z0-9][A-Za-z0-9.-]*(?::[0-9]+)?/)?[a-z0-9][a-z0-9._/-]*@sha256:[a-fA-F0-9]{64}"
+REUSE_APP = "a030d580-f639-48c8-9627-f10c1f3ce6e4"
+DENIED_NAMES = ("aim-cloudflare-verifier", "allai-dead-man-switch", "get-ai-market", "vectoraiz-installer")
+
+
+def authorize_url(client_id, state, verifier):
+    return OAUTH + "/auth?" + urlencode({
+        "response_type": "code", "client_id": client_id, "redirect_uri": REDIRECT,
+        "scope": SCOPES, "state": state,
+        "code_challenge": b64(hashlib.sha256(verifier.encode()).digest()),
+        "code_challenge_method": "S256"})
+
+
+def manual_code(value, state):
+    try:
+        parsed = urlsplit(value)
+        require(value.startswith(REDIRECT + "?") and
+                (parsed.scheme, parsed.netloc, parsed.hostname, parsed.port, parsed.path) ==
+                ("http", "127.0.0.1:8976", "127.0.0.1", 8976, "/callback") and
+                not parsed.fragment and not any(c.isspace() for c in value), "callback_url_refused")
+        code = callback_code(value, parsed.netloc, state)
+        require(code is not None, "callback_state_or_code_refused")
+        return code
+    except ValueError:
+        raise Refusal("callback_url_refused") from None
+
 
 
 class Refusal(Exception):
@@ -112,6 +138,22 @@ def callback_code(path, host, expected_state):
     return query["code"][0] if valid else None
 
 
+@contextlib.contextmanager
+def callback_stdin():
+    # Read stdin itself, with terminal echo disabled so the code cannot enter a transcript.
+    previous = None
+    if sys.stdin.isatty():
+        previous = termios.tcgetattr(sys.stdin.fileno())
+        hidden = previous.copy()
+        hidden[3] &= ~(termios.ECHO | termios.ECHONL)
+        termios.tcsetattr(sys.stdin.fileno(), termios.TCSAFLUSH, hidden)
+    try:
+        yield
+    finally:
+        if previous is not None:
+            termios.tcsetattr(sys.stdin.fileno(), termios.TCSAFLUSH, previous)
+
+
 class Capture(io.TextIOBase):
     def __init__(self, target):
         self.target, self.buffered = target, io.StringIO()
@@ -134,7 +176,7 @@ class Trial:
         self.work_deadline = self.started + 420
         self.finishing = False
         self.client = client or httpx.Client(follow_redirects=False, trust_env=False, timeout=8)
-        self.access = self.refresh = self.secret = None
+        self.access = self.refresh = None
         self.sensitive = []
         self.tokens = []
         self.worker_attempted = self.app_attempted = False
@@ -142,6 +184,11 @@ class Trial:
         self.app_ids = set()
         self.namespace_ids = set()
         self.account_read_baseline = False
+        self.scopes_verified = False
+        self.collisions_cleared = False
+        self.existing_ids = {REUSE_APP}
+        if args.reuse_existing_container_image:
+            self.existing_ids.add(args.reuse_existing_container_image)
         self.path = f"/accounts/{args.account_id}/workers/scripts/aim-oauth-trial-{args.run_id}"
         self.apps = f"/accounts/{args.account_id}/containers/applications"
         self.namespaces = f"/accounts/{args.account_id}/workers/durable_objects/namespaces"
@@ -149,9 +196,11 @@ class Trial:
         self.ev = {"run_id": args.run_id, "account_id": args.account_id,
                    "dry_run": args.dry_run, "started_at": utc(), "steps": [],
                    "findings": {
-                       "U1": {"status": "unproven", "public_image": args.image or None,
+                       "U1": {"status": "unproven", "image_ref": args.image or None,
                               "image_provenance": "operator_review_required" if args.image else
-                              "not_in_pinned_catalog_build_or_template; template_uses_local_Dockerfile"},
+                              "existing_app_read_pending" if args.reuse_existing_container_image else
+                              "not_in_pinned_catalog_build_or_template; template_uses_local_Dockerfile",
+                              "public_image_distribution": "unproven_U1_open_for_sellers"},
                        "U2": {"status": "unproven", "requested_scopes": args.scopes,
                               "r2_binding_requested": bool(args.r2_bucket)},
                        "U4": {"status": "unproven"}, "U9": {"status": "unproven",
@@ -172,8 +221,9 @@ class Trial:
             require(path in ("/token", "/revoke"), "oauth_endpoint_refused")
             url = OAUTH + path
         else:
-            require(path == "/accounts" or path.startswith(f"/accounts/{self.args.account_id}/"),
-                    "account_endpoint_refused")
+            require(path.startswith(f"/accounts/{self.args.account_id}/"), "account_endpoint_refused")
+            if method != "GET":
+                self.guard_write(method, path, kwargs)
             url = API + path
             kwargs["headers"] = {**kwargs.get("headers", {}), "Authorization": "Bearer " + self.access}
         remaining = (self.deadline if self.finishing else self.work_deadline) - time.monotonic()
@@ -199,6 +249,25 @@ class Trial:
             raise
         finally:
             record["elapsed_ms"] = round((time.monotonic() - start) * 1000)
+
+    def guard_write(self, method, path, kwargs):
+        require(self.scopes_verified and self.account_read_baseline and self.collisions_cleared,
+                "write_preflight_incomplete")
+        target = path + kwargs.get("json", {}).get("name", "")
+        require(not any(name in target for name in DENIED_NAMES), "protected_resource")
+        require(not any(identifier in path for identifier in self.existing_ids), "existing_resource_mutation")
+        allowed = ((method == "PUT" and path == self.path and self.worker_attempted and not self.worker_owned) or
+                   (method == "DELETE" and path == self.path and self.worker_attempted) or
+                   (method == "POST" and path == self.apps and self.app_attempted and
+                    kwargs.get("json", {}).get("name") == self.name) or
+                   (method == "DELETE" and any(path == self.apps + "/" + i for i in self.app_ids)))
+        require(allowed, "unowned_resource_mutation")
+
+    def own_app(self, value):
+        app_id = self.safe_id(value)
+        require(app_id not in self.existing_ids, "existing_app_id_returned")
+        self.app_ids.add(app_id)
+        return app_id
 
     @staticmethod
     def ok(response):
@@ -232,6 +301,7 @@ class Trial:
             bundle = Path(self.args.artifact_file).read_bytes()
             source = "local_copy_hash_verified"
         else:
+            require(not self.args.dry_run, "offline_dry_run_requires_artifact_file")
             # Separate unauthenticated, fixed GitHub artifact host. Never reuse CF headers.
             response = self.client.get(ARTIFACT, follow_redirects=False, timeout=20)
             self.ev["steps"].append({"step": "artifact_fetch", "at": utc(),
@@ -277,50 +347,102 @@ class Trial:
         with OneShotServer(("127.0.0.1", 8976), Callback) as server:
             server.timeout = min(360, max(0.1, self.work_deadline - time.monotonic() - 20))
             server.code = None
-            params = {"response_type": "code", "client_id": self.args.client_id,
-                      "redirect_uri": REDIRECT, "scope": SCOPES, "state": state,
-                      "code_challenge": b64(hashlib.sha256(verifier.encode()).digest()),
-                      "code_challenge_method": "S256"}
-            print(OAUTH + "/auth?" + urlencode(params), flush=True)
+            print(authorize_url(self.args.client_id, state, verifier), flush=True)
             server.handle_request()
             require(server.code is not None, "callback_refused_or_timeout")
-            form = {"grant_type": "authorization_code", "client_id": self.args.client_id,
-                    "redirect_uri": REDIRECT, "code": server.code, "code_verifier": verifier}
-            if self.secret:
-                form["client_secret"] = self.secret
+            self.ev["code_received"] = True
+            self.exchange(server.code, verifier)
+
+    def manual_authorize(self, directory):
+        pkce = directory / "pkce.json"
+        try:
+            fd = os.open(pkce, os.O_RDONLY | os.O_NOFOLLOW)
+            with os.fdopen(fd) as stream:
+                stat = os.fstat(stream.fileno())
+                require(stat.st_uid == os.getuid() and stat.st_mode & 0o777 == 0o600,
+                        "unsafe_pkce_file")
+                require(0 <= time.time() - stat.st_mtime < 600, "pkce_expired")
+                # Begin + finish together have at most ten minutes.
+                remaining = 600 - (time.time() - stat.st_mtime)
+                self.deadline = min(self.deadline, time.monotonic() + remaining)
+                self.work_deadline = min(self.work_deadline, self.deadline - 180)
+                signal.setitimer(signal.ITIMER_REAL, max(0.01, self.work_deadline - time.monotonic()))
+                require(self.work_deadline > time.monotonic(), "pkce_work_window_expired")
+                saved = json.load(stream)
+            require(set(saved) == {"state", "verifier", "run_id"} and
+                    saved["run_id"] == self.args.run_id and
+                    all(isinstance(saved[k], str) and re.fullmatch(r"[A-Za-z0-9_-]{43,128}", saved[k])
+                        for k in ("state", "verifier")), "pkce_schema")
+            verifier = self.remember(saved["verifier"])
+            # The callback is supplied only over stdin; never echo it or persist it.
+            with callback_stdin():
+                value = sys.stdin.readline(16385).rstrip("\r\n")
+            require(len(value) <= 16384, "callback_too_long")
+            code = self.remember(manual_code(value, saved["state"]))
+            self.ev["code_received"] = True
+            if self.args.dry_run:
+                print('{"callback_validation": "PASS", "cloudflare_calls": 0, "exchange": "skipped"}')
+            else:
+                self.exchange(code, verifier, pkce)
+        finally:
+            pkce.unlink(missing_ok=True)
+
+    def exchange(self, code, verifier, pkce=None):
+        form = {"grant_type": "authorization_code", "client_id": self.args.client_id,
+                "redirect_uri": REDIRECT, "code": code, "code_verifier": verifier}
+        try:
             response = self.request("code_exchange", "POST", "/token", oauth=True, data=form)
-            # Retain any issued tokens BEFORE scope/type/status validation, for finally revocation.
-            data = response.json()
-            self.access = self.remember(data.get("access_token"), token=True)
-            self.refresh = self.remember(data.get("refresh_token"), token=True)
-            self.ev["token"] = {"token_type": data.get("token_type"),
-                                "expires_in": data.get("expires_in"),
-                                "refresh_token_issued": bool(self.refresh),
-                                "granted_scope": data.get("scope"), "received_at": utc()}
-            self.ok(response)
-            require(isinstance(self.access, str) and self.access, "access_token_missing")
-            require(str(data.get("token_type", "")).lower() == "bearer", "token_type_refused")
-            require(isinstance(data.get("scope"), str) and
-                    set(data["scope"].split()) == set(SCOPES.split()), "granted_scope_mismatch")
-            require(isinstance(data.get("expires_in"), (int, float)) and data["expires_in"] > 0,
-                    "token_lifetime_missing")
+        finally:
+            # Remove single-use verifier before parsing/validating any response.
+            if pkce is not None:
+                pkce.unlink(missing_ok=True)
+        data = response.json()
+        self.access = self.remember(data.get("access_token"), token=True)
+        self.refresh = self.remember(data.get("refresh_token"), token=True)
+        self.ev["token"] = {"token_type": data.get("token_type"),
+                            "expires_in": data.get("expires_in"),
+                            "refresh_token_issued": bool(self.refresh),
+                            "scope_field_present": "scope" in data,
+                            "granted_scope": data.get("scope"), "received_at": utc()}
+        self.ok(response)
+        require(isinstance(self.access, str) and self.access, "access_token_missing")
+        require(str(data.get("token_type", "")).lower() == "bearer", "token_type_refused")
+        if "scope" not in data:
+            self.ev["token"]["missing_scope_accepted"] = self.args.accept_missing_scope_field
+            require(self.args.accept_missing_scope_field, "granted_scope_missing")
+        else:
+            require(isinstance(data["scope"], str) and set(data["scope"].split()) == set(SCOPES.split()),
+                    "granted_scope_mismatch")
+        require(isinstance(data.get("expires_in"), (int, float)) and data["expires_in"] > 0,
+                "token_lifetime_missing")
+        self.scopes_verified = True
 
     def install(self, bundle):
-        accounts = self.collection("accounts_visible", "/accounts")
+        scripts = self.collection("account_scoped_read", f"/accounts/{self.args.account_id}/workers/scripts")
         self.account_read_baseline = True
-        ids = sorted(a["id"] for a in accounts)
-        self.ev["accounts_visible"] = ids  # no names, emails, members, account bodies
-        require(ids == [self.args.account_id], "account_mismatch")
-        self.ev["findings"]["U2"]["account_visibility_check"] = "pass"
+        self.ev["findings"]["U2"]["account_path_read"] = "pass"
         self.ev["findings"]["U2"]["foreign_account_negative_tests"] = "not_authorized_not_run"
-        # A readable account list alone is not proof of all possible effective permissions.
+        require(not any(w.get("id", w.get("name", "")).startswith(self.name) for w in scripts),
+                "worker_name_collision")
         existing = self.request("worker_collision_check", "GET", self.path + "/settings")
         require(existing.status_code == 404 and 10007 in self.ev["steps"][-1]["cf_error_codes"],
                 "worker_exists_or_absence_unproven")
-        require(not any(a.get("name") == self.name for a in self.collection("apps_before", self.apps)),
-                "app_name_collision")
+        apps = self.collection("apps_before", self.apps)
+        self.existing_ids.update(a["id"] for a in apps if isinstance(a.get("id"), str))
+        require(not any(a.get("name", "").startswith(self.name) for a in apps), "app_name_collision")
         require(not any(n.get("script") == self.name for n in
                         self.collection("namespaces_before", self.namespaces)), "namespace_collision")
+        self.collisions_cleared = True
+        if self.args.reuse_existing_container_image:
+            source_id = self.args.reuse_existing_container_image
+            source = self.ok(self.request("existing_image_read", "GET", self.apps + "/" + source_id))
+            image = source.get("configuration", {}).get("image")
+            require(isinstance(image, str) and re.fullmatch(IMAGE_RE, image), "existing_image_not_digest_pinned")
+            self.args.image = image
+            self.ev["findings"]["U1"].update({"image_ref": image, "source_application_id": source_id,
+                "image_provenance": "account_local_registry_path_only",
+                "public_image_distribution": "unproven_U1_open_for_sellers"})
+        require(bool(self.args.image), "missing_digest_image_U1")
         body, content_type = multipart(bundle, metadata(self.args.r2_bucket))
         # No write retries: PUT is an upsert API; preflight + unique run ID guard creation.
         self.worker_attempted = True
@@ -336,16 +458,12 @@ class Trial:
         self.ok(response)
         self.worker_owned = True
         self.readback(bundle)
-        if not self.args.image:
-            self.ev["findings"]["U1"]["container_create"] = "blocked_missing_reviewed_public_digest"
-            raise Refusal("missing_public_image_U1")
         self.app_attempted = True
         self.ev["container_create_attempted_at"] = utc()
         app = self.ok(self.request("container_create", "POST", self.apps,
                                   json=self.app_body()))
-        app_id = self.safe_id(app["id"])
-        self.app_ids.add(app_id)
-        self.ev["findings"]["U1"]["public_digest_accepted"] = True
+        app_id = self.own_app(app["id"])
+        self.ev["findings"]["U1"]["digest_accepted"] = True
         result = self.ok(self.request("container_readback", "GET", self.apps + "/" + app_id))
         require(result.get("configuration", {}).get("image") == self.args.image and
                 result.get("scheduling_policy") == "default" and
@@ -409,7 +527,7 @@ class Trial:
             def reconcile_apps():
                 for app in self.collection("cleanup_apps_reconcile", self.apps):
                     if app.get("name") == self.name:
-                        self.app_ids.add(self.safe_id(app["id"]))
+                        self.own_app(app["id"])
             self.attempt("app_reconcile", reconcile_apps)
         for app_id in sorted(self.app_ids):
             def delete_app(app_id=app_id):
@@ -443,8 +561,6 @@ class Trial:
 
     def revoke_one(self, token, hint):
         form = {"client_id": self.args.client_id, "token": token, "token_type_hint": hint}
-        if self.secret:
-            form["client_secret"] = self.secret
         self.ok(self.request("revoke_" + hint, "POST", "/revoke", oauth=True, data=form))
 
     def revoke(self):
@@ -455,7 +571,7 @@ class Trial:
         if self.access:
             def denial():
                 # Same GET successfully used before installation: no deleted-resource 404 shortcut.
-                response = self.request("revoked_access_denial", "GET", "/accounts",
+                response = self.request("revoked_access_denial", "GET", f"/accounts/{self.args.account_id}/workers/scripts",
                                         params={"page": 1, "per_page": 100})
                 require(response.status_code in (401, 403), "access_revocation_unproven")
                 require(self.account_read_baseline, "revocation_read_baseline_missing")
@@ -464,8 +580,6 @@ class Trial:
             def renewal_denial():
                 form = {"client_id": self.args.client_id, "grant_type": "refresh_token",
                         "refresh_token": self.refresh}
-                if self.secret:
-                    form["client_secret"] = self.secret
                 response = self.request("revoked_refresh_denial", "POST", "/token", oauth=True, data=form)
                 data = response.json()
                 unexpected = []
@@ -487,17 +601,27 @@ class Trial:
 
 def arguments():
     p = argparse.ArgumentParser(description=__doc__)
+    if sys.argv[1:2] == ["find-image"]:
+        p.add_argument("command", choices=("find-image",))
+        return p.parse_args()
+    p.add_argument("command", nargs="?", choices=("run", "begin", "finish", "find-image"), default="run")
+    p.add_argument("--manual-callback", action="store_true", help="Two-phase mode; run defaults to begin")
+    p.add_argument("--accept-missing-scope-field", action="store_true", help="Explicitly accept omitted scope only")
+    p.add_argument("--reuse-existing-container-image", nargs="?", const=REUSE_APP,
+                   help="Read this existing app's pinned image; default ID when flag has no value")
     p.add_argument("--client-id", default=os.getenv("CF_OAUTH_CLIENT_ID"))
     p.add_argument("--account-id", default=os.getenv("CF_ACCOUNT_ID"))
     p.add_argument("--redirect-uri", default=os.getenv("CF_OAUTH_REDIRECT_URI", REDIRECT))
     p.add_argument("--scopes", default=os.getenv("CF_OAUTH_SCOPES", SCOPES))
     p.add_argument("--run-id", default=os.getenv("CF_OAUTH_RUN_ID"))
     p.add_argument("--r2-bucket", help="An EXISTING test bucket in the approved account; never created/read")
-    p.add_argument("--image", help="Reviewed public Docker Hub digest containing the pinned binary")
+    p.add_argument("--image-ref", "--image", dest="image", help="Reviewed digest-pinned image reference")
     p.add_argument("--artifact-file", help="Hash-verified local worker.mjs; permits fully offline dry-run")
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--self-test", action="store_true", help="Synthetic checks only; zero network")
-    return p.parse_args()
+    parsed = p.parse_args()
+    require(parsed.command != "find-image", "find_image_accepts_no_options")
+    return parsed
 
 
 def validate(a):
@@ -507,7 +631,10 @@ def validate(a):
     require(a.scopes == SCOPES, "scopes_mismatch")
     require(bool(a.run_id) and bool(re.fullmatch(r"[a-z0-9][a-z0-9-]{0,31}", a.run_id)), "invalid_run_id")
     require(not a.r2_bucket or bool(re.fullmatch(r"[a-z0-9][a-z0-9-]{1,61}[a-z0-9]", a.r2_bucket)), "invalid_bucket")
-    require(not a.image or bool(re.fullmatch(IMAGE_RE, a.image)), "immutable_public_dockerhub_image_required")
+    require(not a.image or bool(re.fullmatch(IMAGE_RE, a.image)), "digest_pinned_image_required")
+    require(not (a.image and a.reuse_existing_container_image), "choose_one_image_source")
+    if a.reuse_existing_container_image:
+        Trial.safe_id(a.reuse_existing_container_image)
 
 
 def private_write(directory, name, content):
@@ -526,9 +653,43 @@ def prepare_directory(run_id):
     return directory
 
 
-def run(a):
+def begin(a):
     validate(a)
     directory = prepare_directory(a.run_id)
+    state, verifier = secrets.token_urlsafe(32), secrets.token_urlsafe(64)
+    try:
+        private_write(directory, "pkce.json", json.dumps({"state": state, "verifier": verifier,
+                                                       "run_id": a.run_id}).encode())
+        print(authorize_url(a.client_id, state, verifier), flush=True)
+    except BaseException:
+        (directory / "pkce.json").unlink(missing_ok=True)
+        raise
+    return 0
+
+
+def finish_directory(run_id):
+    require(bool(run_id) and bool(re.fullmatch(r"[a-z0-9][a-z0-9-]{0,31}", run_id)), "invalid_run_id")
+    directory = ROOT / run_id
+    require(not ROOT.is_symlink() and ROOT.stat().st_uid == os.getuid() and
+            ROOT.stat().st_mode & 0o777 == 0o700 and
+            not directory.is_symlink() and directory.is_dir() and directory.stat().st_uid == os.getuid() and directory.stat().st_mode & 0o777 == 0o700,
+            "unsafe_run_directory")
+    private_write(directory, "finish.lock", b"")  # one finish process, including failures
+    return directory
+
+
+def run(a):
+    directory = finish_directory(a.run_id) if a.command == "finish" else None
+    try:
+        return run_prepared(a, directory)
+    finally:
+        if directory is not None:
+            (directory / "pkce.json").unlink(missing_ok=True)
+
+
+def run_prepared(a, directory):
+    validate(a)
+    directory = directory or prepare_directory(a.run_id)
     capture = Capture(sys.stdout)
     trial = Trial(a)
     # Suppress third-party request logging, core dumps and tracebacks containing locals.
@@ -550,7 +711,9 @@ def run(a):
     try:
         with contextlib.redirect_stdout(capture):
             try:
-                trial.secret = trial.remember(os.environ.pop("CF_OAUTH_CLIENT_SECRET", None))
+                require(not os.environ.pop("CF_OAUTH_CLIENT_SECRET", None), "token_auth_must_be_none")
+                if a.command == "finish":
+                    trial.manual_authorize(directory)
                 bundle = trial.fetch_bundle()
                 body, content_type = multipart(bundle, metadata(a.r2_bucket))
                 trial.ev["multipart"] = {"bytes": len(body), "metadata": metadata(a.r2_bucket),
@@ -561,13 +724,16 @@ def run(a):
                                       "cloudflare_calls": 0, "U1": "image_supplied_unproven" if a.image else
                                       "blocked_missing_public_image"}, sort_keys=True))
                 else:
-                    trial.authorize()
+                    if a.command != "finish":
+                        trial.authorize()
                     trial.install(bundle)
                 success = True
             except BaseException as exc:
                 trial.ev.setdefault("failures", []).append({"phase": "trial",
                     "reason": str(exc) if isinstance(exc, Refusal) else type(exc).__name__})
             finally:
+                if a.command == "finish":
+                    trial.attempt("pkce_delete", lambda: (directory / "pkce.json").unlink(missing_ok=True))
                 trial.finishing = True
                 signal.setitimer(signal.ITIMER_REAL, max(0.01, trial.deadline - time.monotonic() - 2))
                 if not a.dry_run:
@@ -607,7 +773,7 @@ def run(a):
     # Scan the actual on-disk bytes as well as the in-memory candidate.
     require(not leaks((directory / "evidence.json").read_bytes() +
                       (directory / "stdout.txt").read_bytes(), trial.sensitive), "durable_canary_failed")
-    trial.access = trial.refresh = trial.secret = None
+    trial.access = trial.refresh = None
     trial.sensitive.clear()
     trial.tokens.clear()
     return 0 if clean and success and not trial.ev.get("failures") else 1
@@ -621,11 +787,13 @@ def self_test():
         def args(self, **overrides):
             values = dict(client_id="synthetic-client", account_id=APPROVED_ACCOUNT,
                           redirect_uri=REDIRECT, scopes=SCOPES, run_id="synthetic-test",
-                          image=None, artifact_file=None, r2_bucket=None, dry_run=False)
+                          image=None, artifact_file=None, r2_bucket=None, dry_run=False, command="run",
+                          manual_callback=False, accept_missing_scope_field=False, reuse_existing_container_image=None)
             return argparse.Namespace(**(values | overrides))
 
         def fixture(self, *, foreign=False, collision=False, upload_timeout=False,
-                    revoke_failure=False, image=False, corrupt=False):
+                    revoke_failure=False, image=False, corrupt=False, account_status=200,
+                    app_collision=False, worker_prefix_collision=False, reuse_image=None):
             state = {"worker": False, "app": False, "revoked": False, "calls": []}
             bundle = b"export default {}\n"
             ns_id, app_id = "a" * 32, "b" * 32
@@ -638,17 +806,23 @@ def self_test():
                         return httpx.Response(503, json={"error": "temporarily_unavailable"})
                     state["revoked"] = True
                     return httpx.Response(200, content=b"")
-                if path.endswith("/accounts"):
+                if path.endswith("/workers/scripts"):
                     if state["revoked"]:
                         return httpx.Response(401, json={"errors": [{"code": 10000}]})
-                    result = [{"id": APPROVED_ACCOUNT}]
+                    if account_status != 200:
+                        return httpx.Response(account_status, json={"errors": [{"code": 10000}]})
+                    result = [{"id": "aim-oauth-trial-synthetic-test-stale"}] if worker_prefix_collision else []
                     if foreign:
-                        result.append({"id": "f" * 32})
+                        return httpx.Response(403, json={"errors": [{"code": 10000}]})
                 elif "/containers/applications" in path:
                     app = {"id": app_id, "name": "aim-oauth-trial-synthetic-test",
-                           "configuration": {"image": "docker.io/aim/verifier@sha256:" + "c" * 64},
+                           "configuration": {"image": reuse_image or "docker.io/aim/verifier@sha256:" + "c" * 64},
                            "scheduling_policy": "default", "durable_objects": {"namespace_id": ns_id}}
-                    if req.method == "POST":
+                    if path.endswith(REUSE_APP):
+                        self.assertEqual(req.method, "GET")
+                        result = {"id": REUSE_APP, "name": "aim-cloudflare-verifier-cloudflareverifier",
+                                  "configuration": {"image": reuse_image}}
+                    elif req.method == "POST":
                         state["app"] = True
                         result = app
                     elif req.method == "DELETE":
@@ -657,6 +831,8 @@ def self_test():
                         result, status = app, 200 if state["app"] else 404
                     else:
                         result = [app] if state["app"] else []
+                        if app_collision:
+                            result.append({"id": "d" * 32, "name": "aim-oauth-trial-synthetic-test-stale"})
                 elif path.endswith("/namespaces"):
                     result = [{"id": ns_id, "script": "aim-oauth-trial-synthetic-test",
                                "class": "CloudflareVerifier", "use_sqlite": True}] if state["worker"] else []
@@ -678,9 +854,11 @@ def self_test():
                 else:
                     raise AssertionError("unexpected mock endpoint")
                 return httpx.Response(status, json={"success": status == 200, "result": result})
-            a = self.args(image="docker.io/aim/verifier@sha256:" + "c" * 64 if image else None)
+            a = self.args(image="docker.io/aim/verifier@sha256:" + "c" * 64 if image else None,
+                          reuse_existing_container_image=REUSE_APP if reuse_image else None)
             trial = Trial(a, httpx.Client(transport=httpx.MockTransport(handler)))
             trial.access = trial.remember(secrets.token_urlsafe(32), token=True)
+            trial.scopes_verified = True
             return trial, state, bundle
 
         def test_pkce_callback_canary_and_mime(self):
@@ -695,6 +873,163 @@ def self_test():
             self.assertEqual(module_bytes(body, mime), b"exact\x00bytes\r\n")
             self.assertTrue(leaks(b"prefix synthetic_token_data suffix", ["synthetic_token_data"]))
             self.assertFalse(leaks(b"safe evidence", ["synthetic_token_data"]))
+
+        def test_manual_callback_exact_url(self):
+            good = REDIRECT + "?state=expected&code=synthetic-code"
+            self.assertEqual(manual_code(good, "expected"), "synthetic-code")
+            for bad in (good.replace("http:", "https:"), good.replace("127.0.0.1", "localhost"),
+                        good.replace(":8976", ":8977"), good.replace(":8976", ""),
+                        good.replace("/callback", "/callback/"), good + "#fragment",
+                        good + "&state=expected", good + "&code=other", good + "&error=denied",
+                        good.replace("127.0.0.1", "user@127.0.0.1"),
+                        good.replace("state=expected", "state=wrong"), good + "\n"):
+                with self.subTest(bad=bad), self.assertRaises(Refusal):
+                    manual_code(bad, "expected")
+
+        def test_scope_gate_and_retained_tokens(self):
+            for scope, override, accepted in ((SCOPES, False, True),
+                    ("containers.write workers-scripts.admin", False, True),
+                    (None, False, False), (None, True, True),
+                    ("containers.write", False, False), ("", True, False),
+                    (SCOPES + " account-settings.read", True, False), (42, True, False)):
+                with self.subTest(scope=scope, override=override):
+                    calls = []
+                    access = secrets.token_urlsafe(32)
+                    def handler(req):
+                        calls.append(req)
+                        self.assertNotIn("authorization", req.headers)
+                        self.assertNotIn("client_secret", parse_qs(req.content.decode()))
+                        data = {"access_token": access, "token_type": "bearer", "expires_in": 3600}
+                        if scope is not None:
+                            data["scope"] = scope
+                        return httpx.Response(200, json=data)
+                    trial = Trial(self.args(accept_missing_scope_field=override),
+                                  httpx.Client(transport=httpx.MockTransport(handler)))
+                    if accepted:
+                        trial.exchange("fake-code", "fake-verifier")
+                        self.assertTrue(trial.scopes_verified)
+                    else:
+                        with self.assertRaises(Refusal):
+                            trial.exchange("fake-code", "fake-verifier")
+                        self.assertFalse(trial.scopes_verified)
+                    self.assertEqual(trial.access, access)  # retained for finally revoke even on refusal
+                    self.assertEqual(trial.ev["token"]["granted_scope"], scope)
+                    self.assertEqual(trial.ev["token"]["scope_field_present"], scope is not None)
+                    with self.assertRaises(Refusal):  # account/collision preflight still missing
+                        trial.request("early_write", "PUT", trial.path)
+                    self.assertEqual(len(calls), 1)
+
+        def test_two_phase_single_use_and_failure_erasure(self):
+            import tempfile
+            from unittest.mock import patch
+            for failure in (None, "state", "url", "expired", "exchange", "scope", "input"):
+                with self.subTest(failure=failure), tempfile.TemporaryDirectory() as tmp:
+                    events, calls = [], []
+                    access, code = secrets.token_urlsafe(32), secrets.token_urlsafe(32)
+                    a = self.args(command="finish")
+                    directory = Path(tmp) / a.run_id
+                    def handler(req):
+                        calls.append(req.url.path)
+                        self.assertTrue((directory / "pkce.json").exists())
+                        form = parse_qs(req.content.decode())
+                        self.assertEqual(form["code"], [code])
+                        self.assertEqual(form["code_verifier"], [saved["verifier"]])
+                        if failure == "exchange":
+                            raise httpx.ReadTimeout("private data must not be logged")
+                        return httpx.Response(200, json={"access_token": access, "token_type": "bearer",
+                            "expires_in": 3600, "scope": "containers.write" if failure == "scope" else SCOPES})
+                    def install(trial, bundle):
+                        self.assertFalse((directory / "pkce.json").exists())
+                        self.assertTrue(trial.scopes_verified)
+                        events.append("install")
+                    with patch(__name__ + ".ROOT", Path(tmp)), patch.dict(os.environ, {}, clear=True):
+                        with contextlib.redirect_stdout(io.StringIO()) as output:
+                            self.assertEqual(begin(a), 0)
+                        self.assertEqual([x.name for x in directory.iterdir()], ["pkce.json"])
+                        saved = json.loads((directory / "pkce.json").read_text())
+                        self.assertEqual(set(saved), {"run_id", "state", "verifier"})
+                        self.assertEqual(directory.stat().st_mode & 0o777, 0o700)
+                        self.assertEqual((directory / "pkce.json").stat().st_mode & 0o777, 0o600)
+                        self.assertNotIn(saved["verifier"], output.getvalue())
+                        callback = REDIRECT + "?" + urlencode({"state": "wrong" if failure == "state" else saved["state"],
+                                                              "code": code})
+                        if failure == "url":
+                            callback = callback.replace("http:", "https:")
+                        if failure == "expired":
+                            os.utime(directory / "pkce.json", (time.time() - 601, time.time() - 601))
+                        if failure == "input":
+                            a.account_id = "f" * 32
+                        trial = Trial(a, httpx.Client(transport=httpx.MockTransport(handler)))
+                        with patch.object(sys, "stdin", io.StringIO(callback + "\n")), \
+                             patch(__name__ + ".Trial", return_value=trial), \
+                             patch.object(trial, "fetch_bundle", return_value=b"synthetic bundle"), \
+                             patch.object(trial, "install", lambda bundle: install(trial, bundle)), \
+                             patch.object(trial, "cleanup", lambda: events.append("cleanup")), \
+                             patch.object(trial, "revoke", lambda: events.append("revoke")):
+                            if failure == "input":
+                                with self.assertRaises(Refusal):
+                                    run(a)
+                            else:
+                                self.assertEqual(run(a), 0 if failure is None else 1)
+                        self.assertFalse((directory / "pkce.json").exists())
+                        self.assertEqual(events, [] if failure == "input" else
+                                         ["install", "cleanup", "revoke"] if failure is None else ["cleanup", "revoke"])
+                        if failure in ("state", "url", "expired", "input"):
+                            self.assertEqual(calls, [])
+                        if failure != "input":
+                            evidence = (directory / "evidence.json").read_bytes() + (directory / "stdout.txt").read_bytes()
+                            for secret in (code, access, saved["verifier"]):
+                                self.assertNotIn(secret.encode(), evidence)
+                        with self.assertRaises(FileExistsError):
+                            finish_directory(a.run_id)
+
+        def test_image_reuse_and_write_ownership(self):
+            from unittest.mock import patch
+            pinned = "registry.cloudflare.com/aim/aim-cloudflare-verifier@sha256:" + "c" * 64
+            for image in (pinned, "registry.cloudflare.com/aim/verifier:latest"):
+                trial, state, bundle = self.fixture(reuse_image=image)
+                with patch(__name__ + ".BUNDLE_SHA", sha(bundle)):
+                    if image == pinned:
+                        trial.install(bundle)
+                        self.assertEqual(trial.args.image, pinned)
+                        self.assertEqual(trial.ev["findings"]["U1"]["image_provenance"], "account_local_registry_path_only")
+                        trial.finishing = True
+                        trial.cleanup()
+                        trial.revoke()
+                    else:
+                        with self.assertRaises(Refusal):
+                            trial.install(bundle)
+                        self.assertFalse(any(method != "GET" for method, _, _ in state["calls"]))
+                self.assertEqual([method for method, _, path in state["calls"] if REUSE_APP in path], ["GET"])
+                self.assertFalse(state["worker"])
+                self.assertFalse(state["app"])
+            trial, state, _ = self.fixture(image=True)
+            trial.account_read_baseline = trial.collisions_cleared = True
+            for name in DENIED_NAMES:
+                with self.assertRaisesRegex(Refusal, "protected_resource"):
+                    trial.request("protected", "DELETE", trial.path.rsplit("/", 1)[0] + "/" + name)
+            for method in ("POST", "PUT", "PATCH", "DELETE"):
+                with self.assertRaises(Refusal):
+                    trial.request("existing", method, trial.apps + "/" + REUSE_APP)
+                with self.assertRaises(Refusal):
+                    trial.request("unknown", method, trial.apps + "/" + "e" * 32)
+            with self.assertRaises(Refusal):
+                trial.own_app(REUSE_APP)
+            self.assertEqual(state["calls"], [])
+            for image in ("docker.io/aim/verifier:latest", "docker.io/aim/verifier:tag@sha256:" + "c" * 64,
+                          "docker.io/aim/verifier@sha256:1234"):
+                with self.assertRaises(Refusal):
+                    validate(self.args(image=image))
+
+        def test_account_denial_and_prefix_collisions(self):
+            for options in ({"account_status": 403}, {"account_status": 404},
+                            {"app_collision": True}, {"worker_prefix_collision": True}):
+                trial, state, bundle = self.fixture(image=True, **options)
+                with self.assertRaises(Refusal):
+                    trial.install(bundle)
+                self.assertTrue(state["calls"])
+                self.assertTrue(all(method == "GET" for method, _, _ in state["calls"]))
+                self.assertFalse(any(path.endswith("/accounts") for _, _, path in state["calls"]))
 
         def test_input_and_dry_network_guards(self):
             for overrides in ({"account_id": "f" * 32}, {"run_id": "../escape"},
@@ -717,7 +1052,7 @@ def self_test():
                     seen.append(req.url)
                     self.assertNotIn("authorization", req.headers)
                     return httpx.Response(status, content=content, headers={"Location": API})
-                trial = Trial(self.args(dry_run=True), httpx.Client(transport=httpx.MockTransport(handler)))
+                trial = Trial(self.args(), httpx.Client(transport=httpx.MockTransport(handler)))
                 with self.assertRaises(Refusal):
                     trial.fetch_bundle()
                 self.assertEqual([str(u) for u in seen], [ARTIFACT])
@@ -731,7 +1066,7 @@ def self_test():
                     calls.append((req.url.path, parse_qs(req.content.decode()) if req.content else {}))
                     if req.url.path.endswith("/revoke"):
                         return httpx.Response(200)
-                    if req.url.path.endswith("/accounts"):
+                    if req.url.path.endswith("/workers/scripts"):
                         return httpx.Response(403, json={"errors": [{"code": 10000}]})
                     if renewal_succeeds:
                         return httpx.Response(200, json={"access_token": fake_access,
@@ -818,7 +1153,17 @@ def self_test():
 if __name__ == "__main__":
     try:
         options = arguments()
-        sys.exit(self_test() if options.self_test else run(options))
+        if getattr(options, "self_test", False):
+            sys.exit(self_test())
+        if options.command == "find-image":
+            print("No credentials or network used. In finish, supply --reuse-existing-container-image " + REUSE_APP +
+                  " to GET that existing app with the trial token and reuse its digest-pinned image. "
+                  "This tests the account-local registry path only; public distribution U1 remains open. "
+                  "Alternatively supply --image-ref REGISTRY/IMAGE@sha256:<64hex> after provenance review.")
+            sys.exit(0)
+        if options.command == "begin" or (options.command == "run" and options.manual_callback):
+            sys.exit(begin(options))
+        sys.exit(run(options))
     except Exception as exc:
         # All detailed API diagnostics are allowlisted in evidence; never show raw exceptions.
         print("trial refused: " + (str(exc) if isinstance(exc, Refusal) else type(exc).__name__), file=sys.stderr)
