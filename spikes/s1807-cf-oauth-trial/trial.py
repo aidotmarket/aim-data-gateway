@@ -277,7 +277,7 @@ class Trial:
             except ValueError:
                 data = {}
             if isinstance(data, dict):
-                record["cf_error_codes"] = [e["code"] for e in data.get("errors", [])
+                record["cf_error_codes"] = [e["code"] for e in (data.get("errors") or [])
                                              if isinstance(e, dict) and isinstance(e.get("code"), int)]
             return response
         except BaseException as exc:
@@ -323,7 +323,7 @@ class Trial:
             rows = self.ok(response)
             require(isinstance(rows, list), "collection_schema")
             found.extend(rows)
-            info = response.json().get("result_info", {})
+            info = response.json().get("result_info") or {}
             if "total_pages" in info:
                 if page >= info["total_pages"]:
                     return found
@@ -496,7 +496,7 @@ class Trial:
                                 headers={"Content-Type": content_type})
         if self.args.r2_bucket and not 200 <= response.status_code < 300:
             # Preserve the API errors verbatim, except never persist a secret-bearing response.
-            errors = response.json().get("errors", [])
+            errors = response.json().get("errors") or []
             raw = json.dumps(errors).encode()
             require(not leaks(raw, self.sensitive), "secret_in_provider_error")
             self.ev["findings"]["U2"]["r2_errors_verbatim"] = errors
@@ -989,6 +989,21 @@ def self_test():
                     with self.assertRaises(Refusal):  # account/collision preflight still missing
                         trial.request("early_write", "PUT", trial.path)
                     self.assertEqual(len(calls), 1)
+
+        def test_null_errors_and_result_info_from_live_api(self):
+            # S1807 live run: Cloudflare list endpoints may return "errors": null and
+            # "result_info": null; both must parse as empty, not raise TypeError.
+            def handler(req):
+                return httpx.Response(200, json={"success": True, "errors": None,
+                                                 "messages": None, "result": [{"id": "n1"}],
+                                                 "result_info": None})
+            trial = Trial(self.args(), httpx.Client(transport=httpx.MockTransport(handler)))
+            trial.access = "synthetic-access"
+            rows = trial.collection("namespaces_before",
+                                    f"/accounts/{APPROVED_ACCOUNT}/workers/durable_objects/namespaces")
+            self.assertEqual(rows, [{"id": "n1"}])
+            self.assertEqual(trial.ev["steps"][-1]["cf_error_codes"], [])
+            self.assertNotIn("failure", trial.ev["steps"][-1])
 
         def test_two_phase_single_use_and_failure_erasure(self):
             import tempfile
