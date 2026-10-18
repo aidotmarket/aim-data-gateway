@@ -1839,7 +1839,6 @@ async function marketplace(c, s, path, body, limit) {
   const jws = token + "." + b64(new Uint8Array(await crypto.subtle.sign("Ed25519", await signingKey(s), utf8.encode(token))));
   if (jws.length > 4096) refuse();
   const response = await fetch("https://api.ai.market" + path, { method: "POST", headers: { "Content-Type": "application/json", Authorization: "Bearer " + jws }, body, redirect: "manual", signal: AbortSignal.timeout(3e4) });
-  if ([401, 403, 404, 409, 410].includes(response.status)) throw new Error("poll_stopped");
   if (response.status !== 200) refuse();
   return bounded(response, limit);
 }
@@ -1911,8 +1910,11 @@ var CloudflareVerifier = class extends Container {
     return new Response(object.body, { status: range ? 206 : 200, headers });
   }
   async bootstrapInstall() {
+    identity(this.env.DEPLOYMENT_CONFIG);
     const binding = installBinding(this.env), fingerprint = await sha(canonical([binding, this.env.BOOTSTRAP_WAKE_SECRET]));
-    if (this.ledger.consumeInstall(fingerprint, now(), binding.expires_at)) await this.enqueue();
+    const consumed = this.ledger.consumeInstall(fingerprint, now(), binding.expires_at);
+    if (!consumed && (Number(this.ledger.get("wake")) > 0 || this.ledger.get("next_poll") || this.ctx.storage.sql.exec("SELECT id FROM container_schedules WHERE callback='pollTask' LIMIT 1").toArray().length)) return;
+    await this.enqueue();
   }
   async nextPoll(delay) {
     this.deleteSchedules("pollTask");
@@ -2137,7 +2139,13 @@ var CloudflareVerifier = class extends Container {
       if (this.env.BOOTSTRAP_INSTALL && !this.ledger.get("poll_stopped")) {
         const failures = failed ? Math.min(5, Number(this.ledger.get("poll_failures") ?? 0) + 1) : 0;
         let delay = failed ? [60, 120, 240, 480, 900][failures - 1] : 60;
-        if (!this.ledger.get("registered")) delay = Math.min(delay, installBinding(this.env).registration_expires_at - now());
+        try {
+          if (!this.ledger.get("registered")) delay = Math.min(delay, installBinding(this.env).registration_expires_at - now());
+        } catch {
+          this.ledger.put("poll_stopped", "1");
+          this.deleteSchedules("pollTask");
+          return;
+        }
         if (delay <= 0) {
           this.ledger.put("poll_stopped", "1");
           this.deleteSchedules("pollTask");

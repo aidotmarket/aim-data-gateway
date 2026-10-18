@@ -514,16 +514,82 @@ it("compute carries the saved hash and preserves the Go base64 registration repr
   expect(containerFetch).toHaveBeenCalledTimes(1);
 }));
 
-it("durably consumes the intent before wake, recovers lost ack across restart, refuses foreign/expired",async()=>fresh("install-once",async(l,state)=>{
-  const e=install(),enqueue=vi.fn(async()=>{expect(l.get("install")).toBeDefined();}),fake={ledger:l,env:e,enqueue};
-  await Promise.all(Array.from({length:10},()=>CloudflareVerifier.prototype.bootstrapInstall.call(fake)));expect(enqueue).toHaveBeenCalledTimes(1);
-  fake.ledger=new Ledger(state.storage);await CloudflareVerifier.prototype.bootstrapInstall.call(fake);expect(enqueue).toHaveBeenCalledTimes(1);
-  fake.env={...e,BOOTSTRAP_WAKE_SECRET:"f".repeat(43)};await expect(CloudflareVerifier.prototype.bootstrapInstall.call(fake)).rejects.toThrow();
-  fake.env={...e,BOOTSTRAP_INSTALL:e.BOOTSTRAP_INSTALL.replace("11111111-","22222222-")};await expect(CloudflareVerifier.prototype.bootstrapInstall.call(fake)).rejects.toThrow();
-  expect(()=>l.consumeInstall("different",now(),now()+600)).toThrow();
-  const clock=vi.spyOn(Date,"now").mockReturnValue((now()+601)*1000);
-  try{fake.env=e;await CloudflareVerifier.prototype.bootstrapInstall.call(fake);expect(enqueue).toHaveBeenCalledTimes(1);}finally{clock.mockRestore();}
-  await fresh("expired-wake",async ledger=>{expect(()=>ledger.consumeInstall("expired",now(),now())).toThrow();expect(ledger.get("install")).toBeUndefined();});
+function sdkScheduler(state:DurableObjectState){
+  state.storage.sql.exec("CREATE TABLE container_schedules(id TEXT PRIMARY KEY,callback TEXT NOT NULL,payload TEXT,type TEXT NOT NULL,time INTEGER,delayInSeconds INTEGER)");
+  return {bootstrapInstall:CloudflareVerifier.prototype.bootstrapInstall,enqueue:CloudflareVerifier.prototype.enqueue,nextPoll:CloudflareVerifier.prototype.nextPoll,pollTask:CloudflareVerifier.prototype.pollTask,
+    deleteSchedules:Container.prototype.deleteSchedules,schedule:Container.prototype.schedule,scheduleNextAlarm:Container.prototype.scheduleNextAlarm,getSchedule:Container.prototype.getSchedule,toSchedule:Container.prototype.toSchedule,
+    sql:(strings:TemplateStringsArray,...values:unknown[])=>state.storage.sql.exec(strings.join("?"),...values.map(v=>v===undefined?null:v)).toArray(),container:{running:false},syncPendingStoppedEvents:vi.fn()};
+}
+const schedules=(state:DurableObjectState)=>state.storage.sql.exec<{time:number}>("SELECT time FROM container_schedules").toArray();
+it("durably consumes before real enqueue/binding validation, recovers lost ack, refuses foreign/expired",async()=>fresh("install-once",async(l,state)=>{
+  const e={...install(),DEPLOYMENT_CONFIG:canonical(shipped)},fake={ledger:l,ctx:state,env:e,...sdkScheduler(state)};
+  const schedule=vi.spyOn(fake,"schedule");
+  const wake=vi.spyOn(l,"wake").mockImplementation(t=>{expect(l.get("install")).toBeDefined();return Ledger.prototype.wake.call(l,t);});
+  try{
+    await Promise.all(Array.from({length:10},()=>fake.bootstrapInstall()));expect(l.get("task")).toBe("queued");expect(schedules(state)).toHaveLength(1);expect(schedule).toHaveBeenCalledTimes(1);expect(wake).toHaveBeenCalledTimes(1);
+    fake.ledger=new Ledger(state.storage);await fake.bootstrapInstall();expect(schedule).toHaveBeenCalledTimes(1);
+    fake.env={...e,BOOTSTRAP_WAKE_SECRET:"f".repeat(43)};await expect(CloudflareVerifier.prototype.bootstrapInstall.call(fake)).rejects.toThrow();
+    fake.env={...e,BOOTSTRAP_INSTALL:e.BOOTSTRAP_INSTALL.replace("11111111-","22222222-")};await expect(CloudflareVerifier.prototype.bootstrapInstall.call(fake)).rejects.toThrow();
+    expect(()=>l.consumeInstall("different",now(),now()+600)).toThrow();
+    const clock=vi.spyOn(Date,"now").mockReturnValue((now()+601)*1000);
+    try{fake.env=e;await fake.bootstrapInstall();expect(schedule).toHaveBeenCalledTimes(1);}finally{clock.mockRestore();}
+    await fresh("expired-wake",async ledger=>{expect(()=>ledger.consumeInstall("expired",now(),now())).toThrow();expect(ledger.get("install")).toBeUndefined();});
+  }finally{await state.storage.deleteAlarm();}
+}));
+it.each(["DEPLOYMENT_CONFIG","BOOTSTRAP_INSTALL"])("validates %s before consuming install",async key=>fresh("invalid-install-"+key,async(l,state)=>{
+  const fake={ledger:l,ctx:state,env:{...install(),DEPLOYMENT_CONFIG:canonical(shipped),[key]:"{}"},...sdkScheduler(state)},consume=vi.spyOn(l,"consumeInstall");
+  await expect(fake.bootstrapInstall()).rejects.toThrow();expect(consume).not.toHaveBeenCalled();expect(l.get("install")).toBeUndefined();expect(schedules(state)).toHaveLength(0);expect(l.get("wake")).toBe("0");
+}));
+it("cron before consumption cannot start an install or schedule",async()=>fresh("cron-no-install",async(l,state)=>{
+  const {fake:base}=await bootstrapFake(l,state),fake=Object.assign(base,{...sdkScheduler(state)});Object.assign(fake.env,install());
+  await worker.scheduled({}, {...fake.env,VERIFIER:routing(fake)});expect(l.get("install")).toBeUndefined();expect(l.get("bootstrap")).toBeUndefined();expect(l.get("wake")).toBe("0");expect(schedules(state)).toHaveLength(0);expect(fake.compute).not.toHaveBeenCalled();
+}));
+it.each(["cron","replay"])("%s recovers interruption after consumption before initial scheduling once",async trigger=>fresh("install-gap-"+trigger,async(l,state)=>{
+  const {fake:base}=await bootstrapFake(l,state),fake=Object.assign(base,sdkScheduler(state));Object.assign(fake.env,install());
+  const wake=vi.spyOn(l,"wake").mockImplementationOnce(()=>{throw new Error("interrupted after consume");});
+  try{
+    await expect(fake.bootstrapInstall()).rejects.toThrow("interrupted after consume");expect(l.get("install")).toBeDefined();expect(l.get("wake")).toBe("0");expect(schedules(state)).toHaveLength(0);
+    wake.mockRestore();fake.ledger=new Ledger(state.storage);
+    if(trigger==="cron")await worker.scheduled({}, {...fake.env,VERIFIER:routing(fake)});else await fake.bootstrapInstall();
+    const first=schedules(state);expect(first).toHaveLength(1);
+    for(let n=0;n<10;n++){await fake.bootstrapInstall();await fake.enqueue();}expect(schedules(state)).toEqual(first);
+    expect(fake.compute).not.toHaveBeenCalled();expect(fake.env.SOURCE.head).not.toHaveBeenCalled();expect(fake.env.SOURCE.get).not.toHaveBeenCalled();
+  }finally{wake.mockRestore();await state.storage.deleteAlarm();}
+}));
+it.each(["wake","next_poll","schedule"])("install replay with a %s marker adds no wake",async marker=>fresh("install-marker-"+marker,async(l,state)=>{
+  const fake={ledger:l,ctx:state,env:{...install(),DEPLOYMENT_CONFIG:canonical(shipped)},...sdkScheduler(state)};
+  try{
+    await fake.bootstrapInstall();fake.deleteSchedules("pollTask");l.put("wake","0");
+    if(marker==="schedule")await fake.nextPoll(60);else l.put(marker,String(now()+60));
+    const first=schedules(state),wake=vi.spyOn(l,"wake");await fake.bootstrapInstall();expect(wake).not.toHaveBeenCalled();expect(schedules(state)).toEqual(first);
+  }finally{await state.storage.deleteAlarm();}
+}));
+it.each(["work","report"])("signed /%s 409 preserves polling and outbox until the next poll recovers",async path=>storage("signed-409-"+path,async(l,state)=>{
+  const {fake:base}=await bootstrapFake(l,state),fake=Object.assign(base,sdkScheduler(state)),sec=await testSecret(),t=now(),clock=vi.spyOn(Date,"now").mockReturnValue(t*1000);
+  Object.assign(fake.env,install());l.put("install","consumed");l.firstStart(random(),t);await fake.save(sec,config);
+  const j=job(92);j.Payload.accepted_at_utc=new Date(t*1000).toISOString();j.Payload.expires_at_utc=new Date((t+3600)*1000).toISOString();
+  const r=path==="report"?l.admit(j,"saved",[],t,t,t):undefined,body=canonical({control:"saved report"});if(r)l.commit(r,body,await sha(body),t);
+  const paths:string[]=[],bodies:string[]=[];let refused=false;
+  vi.stubGlobal("fetch",async(url:string,init:RequestInit)=>{
+    const request=new Request(url,init);await authClaims(request,sec.pub);const target=new URL(url).pathname.split("/").at(-1)!;paths.push(target);
+    if(target==="report")bodies.push(await request.text());
+    if(target===path && !refused){refused=true;return new Response(null,{status:409});}
+    return new Response(target==="report"?canonical({iid:r!.iid,status:"stored"}):canonical({work_jws:null}));
+  });
+  try{
+    await fake.pollTask();expect(l.get("poll_stopped")).toBeUndefined();expect(l.get("poll_failures")).toBe("1");expect(schedules(state)).toEqual([{time:t+60}]);
+    expect(l.storage.sql.exec("SELECT COUNT(*) n FROM outbox").one().n).toBe(r?1:0);if(r){expect(l.active()?.state).toBe("committed");expect(l.body(r).body).toBe(body);}
+    fake.ledger=new Ledger(state.storage);clock.mockReturnValue((t+60)*1000);await Container.prototype.alarm.call(fake);
+    expect(paths).toEqual(r?["report","report","work"]:["work","work"]);if(r){expect(bodies).toEqual([body,body]);expect(l.record(r.id)?.state).toBe("reported");}
+    expect(l.get("poll_stopped")).toBeUndefined();expect(l.get("poll_failures")).toBe("0");expect(l.get("last_poll")).toBe(String(t+60));expect(schedules(state)).toEqual([{time:t+120}]);
+    expect(l.active()).toBeUndefined();expect(fake.compute).not.toHaveBeenCalled();expect(fake.env.SOURCE.head).not.toHaveBeenCalled();expect(fake.env.SOURCE.get).not.toHaveBeenCalled();
+  }finally{clock.mockRestore();await state.storage.deleteAlarm();vi.stubGlobal("fetch",()=>{throw new Error("network disabled");});}
+}));
+it("malformed install binding during finally stops without throwing or growing schedules",async()=>fresh("finally-binding",async(l,state)=>{
+  const {fake:base}=await bootstrapFake(l,state),fake=Object.assign(base,sdkScheduler(state));Object.assign(fake.env,install());
+  fake.stop.mockImplementation(async()=>{fake.env.BOOTSTRAP_INSTALL="malformed";});
+  try{await fake.nextPoll(60);await expect(fake.pollTask()).resolves.toBeUndefined();expect(l.get("poll_stopped")).toBe("1");expect(schedules(state)).toHaveLength(0);expect(l.get("next_poll")).toBeUndefined();expect(fake.env.SOURCE.head).not.toHaveBeenCalled();expect(fake.env.SOURCE.get).not.toHaveBeenCalled();}
+  finally{await state.storage.deleteAlarm();}
 }));
 it("OAuth backoff, cron and restart keep one SDK row; refusal/expiry stop all polls (v0.1.0 cost regression)",async()=>fresh("bounded",async(l,state)=>{
   const t=now(),clock=vi.spyOn(Date,"now").mockReturnValue(t*1000),{fake,sec}=await bootstrapFake(l,state);
@@ -533,21 +599,20 @@ it("OAuth backoff, cron and restart keep one SDK row; refusal/expiry stop all po
   state.storage.sql.exec("CREATE TABLE container_schedules(id TEXT PRIMARY KEY,callback TEXT NOT NULL,payload TEXT,type TEXT NOT NULL,time INTEGER,delayInSeconds INTEGER)");
   fake.pollTask=CloudflareVerifier.prototype.pollTask;
   const row=()=>state.storage.sql.exec<{time:number}>("SELECT time FROM container_schedules").toArray();
-  let outage=true;vi.stubGlobal("fetch",async(url:string)=>{if(outage)throw new Error("offline");return url.endsWith("/deployment-config")?configResponse(config,await sha(canonical(config))):new Response(canonical({work_jws:null}));});
+  vi.stubGlobal("fetch",async()=>{throw new Error("offline");});
   try{
     for(const delay of [60,120,240,480,900,900]){
       const start=now();await fake.pollTask();expect(row()).toEqual([{time:Math.min(start+delay,t+1800)}]);
       fake.ledger=new Ledger(state.storage);for(let n=0;n<50;n++)await fake.enqueue();expect(row()).toHaveLength(1);
       clock.mockReturnValue(Math.min(start+delay,t+1799)*1000);
     }
-    // Late image availability before token expiry still registers and empty-polls without reads.
-    outage=false;await fake.pollTask();expect(l.get("registered")).toBe("1");expect(l.get("last_poll")).toBeDefined();expect(row()).toHaveLength(1);
+    // A terminal deployment-config refusal while unregistered stops all growth.
+    vi.stubGlobal("fetch",async()=>new Response(null,{status:403}));await fake.pollTask();expect(l.get("registered")).toBeUndefined();
     expect(fake.env.SOURCE.head).not.toHaveBeenCalled();expect(fake.env.SOURCE.get).not.toHaveBeenCalled();
-    clock.mockReturnValue((t+1900)*1000);vi.stubGlobal("fetch",async()=>new Response(null,{status:403}));await fake.pollTask();
     expect(l.get("poll_stopped")).toBe("1");const events=l.storage.sql.exec("SELECT COUNT(*) n FROM events").one().n;
     for(let n=0;n<100;n++){fake.ledger=new Ledger(state.storage);await fake.enqueue();await fake.pollTask();}
     expect(row()).toHaveLength(0);expect(l.storage.sql.exec("SELECT COUNT(*) n FROM events").one().n).toBe(events);
-    expect(fake.compute.mock.calls.map(c=>c[0])).toEqual(["/create","/register"]);
+    expect(fake.compute).not.toHaveBeenCalled();
   }finally{clock.mockRestore();await state.storage.deleteAlarm();vi.stubGlobal("fetch",()=>{throw new Error("network disabled");});}
 }));
 it("OAuth registration refusal and registration expiry cannot schedule or read",async()=>storage("terminal",async(l,state)=>{

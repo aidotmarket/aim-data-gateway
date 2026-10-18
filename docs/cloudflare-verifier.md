@@ -19,6 +19,7 @@ The gateway dependency graph and shared scanner are unchanged.
 
 This separately cataloged distribution adds one-use bootstrap and bounded polling.
 Existing button installations remain on their frozen source and retain manual controls.
+The OAuth distribution has no `/operator` page; the frozen button instructions below do not apply to it.
 The binary stays `cloudflare-verifier-v0.1.1`, scanner `0.1.1`, SHA-256
 `45b5bf95b784bf6cc572fe84f8faba77bb09682a3d5cb1f25cae6eb4e6a1c8a6`.
 The Container image is pinned to
@@ -38,12 +39,13 @@ page is exported. Upload with no cron; after exact module/config/image/DO readba
 enable minute cron and POST exact `{}` to `/bootstrap/install` with
 `Authorization: Bearer <BOOTSTRAP_WAKE_SECRET>`. Only empty 202 is an acknowledgment.
 The DO stores a fingerprint of the intent, deadlines and secret before scheduling.
-Identical lost-ack retries return empty 202 even after wake expiry, with no second
-wake; changed or expired unused bindings refuse. Cron cannot start an unconsumed install.
+Identical lost-ack retries return empty 202 even after wake expiry, recovering a missing
+initial task without a second wake; changed or expired unused bindings refuse. Cron cannot start an unconsumed install.
 
 One SDK next-poll row replaces the previous row; cron respects the next deadline.
 Failures back off 1/2/4/8/15 minutes, capped at 15; success returns to minute polling.
-Terminal control refusal or unused registration-token expiry stops scheduling.
+Terminal bootstrap refusal or unused registration-token expiry stops scheduling;
+signed work/report refusals after registration retain the outbox and retry with backoff.
 Lease recovery resends committed outbox or produces a terminal failure; it never
 repeats an admitted traversal. Pending `/create` may retry while no signing state
 has been saved or registered (e.g. unavailable image); saved keys are never replaced.
@@ -181,6 +183,8 @@ and backend recovery. Tasks stop compute at the end; `sleepAfter=20m` is a
 backstop. Empty polls use Worker/DO only, after first-start bootstrap.
 
 ## Build and release
+
+The generic non-distribution binary release path is retired for now; a future binary release needs a script/workflow change.
 
 Install exact lockfile dependencies in `deploy/cloudflare-verifier` with
 `npm ci`, then run `npm run types`, `npm test` and `npm run build`.
