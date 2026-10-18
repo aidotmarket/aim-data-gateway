@@ -21,7 +21,7 @@ from datetime import datetime, timezone
 from email import policy
 from email.parser import BytesParser
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from urllib.parse import parse_qs, urlencode, urlsplit
+from urllib.parse import parse_qs, quote_plus, urlencode, urlsplit
 
 import httpx
 
@@ -184,6 +184,8 @@ class Trial:
         self.client = client or httpx.Client(follow_redirects=False, trust_env=False,
                                             timeout=REQUEST_TIMEOUT)
         self.access = self.refresh = None
+        self.client_secret = None
+        self.token_auth_loaded = False
         self.sensitive = []
         self.tokens = []
         self.worker_attempted = self.app_attempted = False
@@ -201,6 +203,9 @@ class Trial:
         self.namespaces = f"/accounts/{args.account_id}/workers/durable_objects/namespaces"
         self.name = "aim-oauth-trial-" + args.run_id
         self.ev = {"run_id": args.run_id, "account_id": args.account_id,
+                   "token_auth": args.token_auth, "exchange_only": args.exchange_only,
+                   "secret_accepted": None, "exchange_without_secret_refused": None,
+                   "refresh_invalid_grant": None,
                    "dry_run": args.dry_run, "started_at": utc(), "steps": [],
                    "findings": {
                        "U1": {"status": "unproven", "image_ref": args.image or None,
@@ -213,6 +218,45 @@ class Trial:
                        "U4": {"status": "unproven"}, "U9": {"status": "unproven",
                               "public_visibility_domain_multiaccount_UX": "out_of_scope"}},
                    "residual_resources": []}
+
+    def load_token_auth(self):
+        require(not self.token_auth_loaded, "token_auth_already_loaded")
+        self.token_auth_loaded = True
+        inherited = os.environ.pop("CF_OAUTH_CLIENT_SECRET", None)
+        if self.args.token_auth == "none":
+            require(not inherited, "token_auth_must_be_none")
+            return
+        del inherited  # never use an environment secret, even for confidential clients
+        try:
+            # One bounded read, through EOF. The operator's pipe must close after writing.
+            with os.fdopen(self.args.client_secret_fd, "rb") as stream:
+                raw = stream.read(65537)
+            secret = raw.decode("utf-8").removesuffix("\n").removesuffix("\r")
+            require(0 < len(raw) <= 65536 and secret and not secret.isspace() and
+                    not any(c in secret for c in "\r\n\x00"), "client_secret_fd_refused")
+            self.client_secret = self.remember(secret)
+            # Also detect reversible wire encodings in controlled evidence sinks.
+            self.remember(quote_plus(secret))
+            self.remember(base64.b64encode((quote_plus(self.args.client_id) + ":" +
+                                           quote_plus(secret)).encode()).decode())
+        except Exception:
+            raise Refusal("client_secret_fd_refused") from None
+
+    def oauth_auth(self, kwargs):
+        if self.args.token_auth == "none":
+            return
+        require(self.client_secret is not None, "client_secret_not_loaded")
+        form = dict(kwargs["data"])
+        if self.args.token_auth == "client_secret_basic":
+            form.pop("client_id", None)
+            credentials = quote_plus(self.args.client_id) + ":" + quote_plus(self.client_secret)
+            kwargs["headers"] = {**kwargs.get("headers", {}), "Authorization": "Basic " +
+                                 base64.b64encode(credentials.encode()).decode()}
+        else:
+            require(self.args.token_auth == "client_secret_post", "token_auth_refused")
+            form["client_id"] = self.args.client_id
+            form["client_secret"] = self.client_secret
+        kwargs["data"] = form
 
     def remember(self, value, token=False):
         if isinstance(value, str) and value:
@@ -256,6 +300,7 @@ class Trial:
         if oauth:
             require(path in ("/token", "/revoke"), "oauth_endpoint_refused")
             url = OAUTH + path
+            self.oauth_auth(kwargs)
         else:
             require(path.startswith(f"/accounts/{self.args.account_id}/"), "account_endpoint_refused")
             if method != "GET":
@@ -279,9 +324,14 @@ class Trial:
             if isinstance(data, dict):
                 record["cf_error_codes"] = [e["code"] for e in (data.get("errors") or [])
                                              if isinstance(e, dict) and isinstance(e.get("code"), int)]
+                if oauth and data.get("error") in ("invalid_client", "unauthorized_client", "invalid_grant",
+                                                   "invalid_request", "unsupported_grant_type", "invalid_scope"):
+                    record["oauth_error"] = data["error"]
             return response
         except BaseException as exc:
             record["failure"] = type(exc).__name__  # never str(exc), request/body/headers
+            if self.client_secret is not None and isinstance(exc, Exception) and not isinstance(exc, Refusal):
+                raise Refusal("confidential_request_failed") from None
             raise
         finally:
             record["elapsed_ms"] = round((time.monotonic() - start) * 1000)
@@ -447,14 +497,23 @@ class Trial:
         self.ev["token"] = {"token_type": data.get("token_type"),
                             "expires_in": data.get("expires_in"),
                             "refresh_token_issued": bool(self.refresh),
+                            "refresh_issued": bool(self.refresh),
                             "scope_field_present": "scope" in data,
+                            "scope_set_equal": isinstance(data.get("scope"), str) and
+                                set(data["scope"].split()) == set(SCOPES.split()),
                             "granted_scope": data.get("scope"), "received_at": utc()}
+        accepted = 200 <= response.status_code < 300 and bool(self.access) and data.get("success") is not False
+        if self.args.token_auth != "none":
+            self.ev["secret_accepted"] = accepted
+        else:
+            self.ev["exchange_without_secret_refused"] = response.status_code in (400, 401, 403)
         self.ok(response)
         require(isinstance(self.access, str) and self.access, "access_token_missing")
         require(str(data.get("token_type", "")).lower() == "bearer", "token_type_refused")
         if "scope" not in data:
             self.ev["token"]["missing_scope_accepted"] = self.args.accept_missing_scope_field
-            require(self.args.accept_missing_scope_field, "granted_scope_missing")
+            require(self.args.accept_missing_scope_field and not self.args.exchange_only and
+                    self.args.token_auth == "none", "granted_scope_missing")
         else:
             require(isinstance(data["scope"], str) and set(data["scope"].split()) == set(SCOPES.split()),
                     "granted_scope_mismatch")
@@ -462,11 +521,15 @@ class Trial:
                 "token_lifetime_missing")
         self.scopes_verified = True
 
-    def install(self, bundle):
+    def account_baseline(self):
         scripts = self.collection("account_scoped_read", f"/accounts/{self.args.account_id}/workers/scripts")
         self.account_read_baseline = True
         self.ev["findings"]["U2"]["account_path_read"] = "pass"
         self.ev["findings"]["U2"]["foreign_account_negative_tests"] = "not_authorized_not_run"
+        return scripts
+
+    def install(self, bundle):
+        scripts = self.account_baseline()
         require(not any(w.get("id", w.get("name", "")).startswith(self.name) for w in scripts),
                 "worker_name_collision")
         existing = self.request("worker_collision_check", "GET", self.path + "/settings")
@@ -625,7 +688,11 @@ class Trial:
                 # Same GET successfully used before installation: no deleted-resource 404 shortcut.
                 response = self.request("revoked_access_denial", "GET", f"/accounts/{self.args.account_id}/workers/scripts",
                                         revocation=True, params={"page": 1, "per_page": 100})
-                require(response.status_code in (401, 403), "access_revocation_unproven")
+                if self.args.exchange_only:
+                    require(response.status_code == 401 and 10000 in self.ev["steps"][-1]["cf_error_codes"],
+                            "access_revocation_unproven")
+                else:
+                    require(response.status_code in (401, 403), "access_revocation_unproven")
                 require(self.account_read_baseline, "revocation_read_baseline_missing")
             outcomes.append(self.attempt("revoked_access_denial", denial))
         if self.refresh:
@@ -641,8 +708,10 @@ class Trial:
                         unexpected.append((value, key))
                 for value, hint in unexpected:
                     self.attempt("unexpected_renewal_revoke", lambda v=value, h=hint: self.revoke_one(v, h))
-                require(not unexpected and response.status_code in (400, 401, 403) and
-                        data.get("error") == "invalid_grant", "refresh_revocation_unproven")
+                proven = (not unexpected and response.status_code in (400, 401, 403) and
+                          data.get("error") == "invalid_grant")
+                self.ev["refresh_invalid_grant"] = proven
+                require(proven, "refresh_revocation_unproven")
             outcomes.append(self.attempt("revoked_refresh_denial", renewal_denial))
         status = "pass" if outcomes and all(outcomes) else "unproven_or_failed"
         self.ev["findings"]["U4"]["revocation_and_denial"] = status
@@ -662,6 +731,9 @@ def arguments():
     p.add_argument("--reuse-existing-container-image", nargs="?", const=REUSE_APP,
                    help="Read this existing app's pinned image; default ID when flag has no value")
     p.add_argument("--client-id", default=os.getenv("CF_OAUTH_CLIENT_ID"))
+    p.add_argument("--token-auth", choices=("none", "client_secret_basic", "client_secret_post"), default="none")
+    p.add_argument("--client-secret-fd", type=int, help="Read secret once from this FD in run/finish; never in begin")
+    p.add_argument("--exchange-only", action="store_true", help="T0: exchange, scripts baseline, revoke and denial only")
     p.add_argument("--account-id", default=os.getenv("CF_ACCOUNT_ID"))
     p.add_argument("--redirect-uri", default=os.getenv("CF_OAUTH_REDIRECT_URI", REDIRECT))
     p.add_argument("--scopes", default=os.getenv("CF_OAUTH_SCOPES", SCOPES))
@@ -677,6 +749,14 @@ def arguments():
 
 
 def validate(a):
+    require(a.token_auth in ("none", "client_secret_basic", "client_secret_post"), "token_auth_refused")
+    if a.token_auth == "none":
+        require(a.client_secret_fd is None, "client_secret_fd_with_none")
+    elif a.command != "begin" and not (a.command == "run" and a.manual_callback):
+        require(isinstance(a.client_secret_fd, int) and a.client_secret_fd >= 0, "client_secret_fd_required")
+        require(a.command != "finish" or a.client_secret_fd != 0, "client_secret_fd_conflicts_with_callback")
+    require(not ((a.exchange_only or a.token_auth != "none") and a.accept_missing_scope_field),
+            "confidential_or_t0_requires_exact_scope_field")
     require(bool(a.client_id) and bool(re.fullmatch(r"[A-Za-z0-9._-]{1,200}", a.client_id)), "client_id_required")
     require(a.account_id == APPROVED_ACCOUNT, "account_not_approved")
     require(a.redirect_uri == REDIRECT, "redirect_mismatch")
@@ -772,19 +852,25 @@ def run_prepared(a, directory):
     try:
         with contextlib.redirect_stdout(capture):
             try:
-                require(not os.environ.pop("CF_OAUTH_CLIENT_SECRET", None), "token_auth_must_be_none")
+                trial.load_token_auth()
                 if a.command == "finish":
                     trial.manual_authorize(directory)
-                bundle = trial.fetch_bundle()
-                body, content_type = multipart(bundle, metadata(a.r2_bucket))
-                trial.ev["multipart"] = {"bytes": len(body), "metadata": metadata(a.r2_bucket),
-                                          "module_roundtrip_pass": module_bytes(body, content_type) == bundle}
-                if a.dry_run:
+                if a.exchange_only:
+                    if not a.dry_run:
+                        if a.command != "finish":
+                            trial.authorize()
+                        trial.account_baseline()
+                else:
+                    bundle = trial.fetch_bundle()
+                    body, content_type = multipart(bundle, metadata(a.r2_bucket))
+                    trial.ev["multipart"] = {"bytes": len(body), "metadata": metadata(a.r2_bucket),
+                                              "module_roundtrip_pass": module_bytes(body, content_type) == bundle}
+                if a.dry_run and not a.exchange_only:
                     print(json.dumps({"dry_run": "PASS", "bundle_sha256": sha(bundle),
                                       "bundle_bytes": len(bundle), "multipart_bytes": len(body),
                                       "cloudflare_calls": 0, "U1": "image_supplied_unproven" if a.image else
                                       "blocked_missing_public_image"}, sort_keys=True))
-                else:
+                elif not a.dry_run and not a.exchange_only:
                     if a.command != "finish":
                         trial.authorize()
                     trial.install(bundle)
@@ -845,6 +931,7 @@ def run_prepared(a, directory):
     require(not leaks((directory / "evidence.json").read_bytes() +
                       (directory / "stdout.txt").read_bytes(), trial.sensitive), "durable_canary_failed")
     trial.access = trial.refresh = None
+    trial.client_secret = None
     trial.sensitive.clear()
     trial.tokens.clear()
     return 0 if clean and success and not trial.ev.get("failures") else 1
@@ -860,6 +947,7 @@ def self_test():
                           redirect_uri=REDIRECT, scopes=SCOPES, run_id="synthetic-test",
                           image=None, artifact_file=None, r2_bucket=None, dry_run=False, command="run",
                           manual_callback=False, accept_missing_scope_field=False, reuse_existing_container_image=None)
+            values.update(token_auth="none", client_secret_fd=None, exchange_only=False)
             return argparse.Namespace(**(values | overrides))
 
         def fixture(self, *, foreign=False, collision=False, upload_timeout=False,
@@ -989,6 +1077,247 @@ def self_test():
                     with self.assertRaises(Refusal):  # account/collision preflight still missing
                         trial.request("early_write", "PUT", trial.path)
                     self.assertEqual(len(calls), 1)
+
+        def test_confidential_shapes_and_fd_read_once(self):
+            from unittest.mock import MagicMock, patch
+            secret = b64(os.urandom(32)) + ":/+ with spaces"
+            for method in ("client_secret_basic", "client_secret_post"):
+                with self.subTest(method=method):
+                    calls = []
+                    def handler(req):
+                        form = parse_qs(req.content.decode())
+                        calls.append((req.url.path, form))
+                        if method == "client_secret_basic":
+                            expected = base64.b64encode(("synthetic-client:" + quote_plus(secret)).encode()).decode()
+                            self.assertEqual(req.headers["Authorization"], "Basic " + expected)
+                            self.assertNotIn("client_secret", form)
+                            self.assertNotIn("client_id", form)
+                        else:
+                            self.assertNotIn("authorization", req.headers)
+                            self.assertEqual(form["client_secret"], [secret])
+                            self.assertEqual(form["client_id"], ["synthetic-client"])
+                        if req.url.path.endswith("/revoke"):
+                            return httpx.Response(200)
+                        if form.get("grant_type") == ["refresh_token"]:
+                            return httpx.Response(400, json={"error": "invalid_grant"})
+                        self.assertEqual(form["code_verifier"], ["synthetic-verifier"])
+                        return httpx.Response(200, json={"access_token": "synthetic-access",
+                            "refresh_token": "synthetic-refresh", "scope": SCOPES,
+                            "token_type": "bearer", "expires_in": 3600})
+                    trial = Trial(self.args(token_auth=method, client_secret_fd=9),
+                                  httpx.Client(transport=httpx.MockTransport(handler)))
+                    stream = MagicMock()
+                    stream.__enter__.return_value = stream
+                    stream.read.return_value = (secret + "\n").encode()
+                    with patch("os.fdopen", return_value=stream) as opened, \
+                         patch.dict(os.environ, {"CF_OAUTH_CLIENT_SECRET": "unused-environment-secret"}):
+                        trial.load_token_auth()
+                        self.assertNotIn("CF_OAUTH_CLIENT_SECRET", os.environ)
+                        trial.exchange("synthetic-code", "synthetic-verifier")
+                        trial.revoke_one(trial.access, "access_token")
+                        trial.revoke_one(trial.refresh, "refresh_token")
+                        trial.access = None  # this unit check covers only OAuth request shapes
+                        trial.revoke()
+                        with self.assertRaisesRegex(Refusal, "token_auth_already_loaded"):
+                            trial.load_token_auth()
+                    opened.assert_called_once_with(9, "rb")
+                    stream.read.assert_called_once_with(65537)
+                    self.assertEqual([p.rsplit("/", 1)[-1] for p, _ in calls],
+                                     ["token", "revoke", "revoke", "revoke", "token"])
+                    self.assertTrue(trial.ev["secret_accepted"])
+                    self.assertTrue(trial.ev["refresh_invalid_grant"])
+                    self.assertFalse(leaks(json.dumps(trial.ev).encode(), trial.sensitive))
+
+        def test_token_auth_input_guards_and_secret_read_errors(self):
+            from unittest.mock import MagicMock, patch
+            with patch.dict(os.environ, {}, clear=True):
+                for method in (None, "none", "client_secret_basic", "client_secret_post"):
+                    argv = ["trial.py"] + (["--token-auth", method] if method else [])
+                    with patch.object(sys, "argv", argv):
+                        parsed = arguments()
+                    self.assertEqual(parsed.token_auth, method or "none")
+                    self.assertIsNone(parsed.client_secret_fd)
+                    self.assertFalse(parsed.exchange_only)
+            for overrides in ({"token_auth": "client_secret_basic"},
+                              {"token_auth": "client_secret_post", "client_secret_fd": -1},
+                              {"client_secret_fd": 9},
+                              {"token_auth": "client_secret_basic", "client_secret_fd": 0, "command": "finish"},
+                              {"token_auth": "client_secret_post", "client_secret_fd": 9,
+                               "accept_missing_scope_field": True},
+                              {"exchange_only": True, "accept_missing_scope_field": True}):
+                with self.subTest(overrides=overrides), self.assertRaises(Refusal):
+                    validate(self.args(**overrides))
+            validate(self.args(command="begin", token_auth="client_secret_basic", exchange_only=True))
+            with patch.dict(os.environ, {"CF_OAUTH_CLIENT_SECRET": "synthetic-environment-secret"}):
+                trial = Trial(self.args())
+                with self.assertRaisesRegex(Refusal, "token_auth_must_be_none"):
+                    trial.load_token_auth()
+                self.assertNotIn("CF_OAUTH_CLIENT_SECRET", os.environ)
+            for raw in (b"", b"\n", b"a\nb", b"a\x00b", b"\xff", b"x" * 65537, OSError("synthetic-secret")):
+                stream = MagicMock()
+                stream.__enter__.return_value = stream
+                if isinstance(raw, Exception):
+                    stream.read.side_effect = raw
+                else:
+                    stream.read.return_value = raw
+                trial = Trial(self.args(token_auth="client_secret_post", client_secret_fd=9))
+                with patch("os.fdopen", return_value=stream), self.assertRaises(Refusal) as caught:
+                    trial.load_token_auth()
+                self.assertEqual(str(caught.exception), "client_secret_fd_refused")
+                stream.read.assert_called_once_with(65537)
+
+        def test_exchange_only_manual_flow_and_canaries(self):
+            import tempfile
+            from unittest.mock import patch
+            # Every HTTP request in the real run orchestration goes through MockTransport.
+            # Include failures after issuance, so finally revocation and no-leak checks run.
+            for method, failure, refresh in (("client_secret_basic", None, True),
+                    ("client_secret_post", None, False), ("none", None, True), ("none", "no_secret", False),
+                    ("client_secret_basic", "auth_refused", False),
+                    ("client_secret_basic", "transport", False),
+                    ("client_secret_post", "scope", True),
+                    ("client_secret_post", "missing_scope", True),
+                    ("client_secret_basic", "echo", True),
+                    ("client_secret_basic", "lifetime", True),
+                    ("client_secret_basic", "baseline", True),
+                    ("client_secret_post", "revoke", True),
+                    ("client_secret_basic", "renewal", True)):
+                with self.subTest(method=method, failure=failure), tempfile.TemporaryDirectory() as tmp:
+                    secret = b64(os.urandom(32))
+                    access, renewal, code = [secrets.token_urlsafe(32) for _ in range(3)]
+                    calls, revoked = [], []
+                    def handler(req):
+                        calls.append((req.method, req.url.host, req.url.path))
+                        form = parse_qs(req.content.decode())
+                        if req.url.path.endswith("/revoke"):
+                            revoked.append(form["token"][0])
+                            return httpx.Response(503 if failure == "revoke" else 200)
+                        if req.url.path.endswith("/workers/scripts"):
+                            if revoked or failure == "baseline":
+                                return httpx.Response(401, json={"errors": [{"code": 10000}]})
+                            return httpx.Response(200, json={"result": [], "result_info": None})
+                        self.assertEqual(req.url.path, "/oauth2/token")
+                        if form.get("grant_type") == ["refresh_token"]:
+                            if failure == "renewal":
+                                return httpx.Response(200, json={"access_token": access, "refresh_token": renewal})
+                            return httpx.Response(400, json={"error": "invalid_grant"})
+                        if failure in ("no_secret", "auth_refused"):
+                            if failure == "no_secret":
+                                self.assertNotIn("authorization", req.headers)
+                                self.assertNotIn("client_secret", form)
+                            else:
+                                self.assertTrue(req.headers["authorization"].startswith("Basic "))
+                            return httpx.Response(401, json={"error": "invalid_client", "errors": [{"code": 1234}]})
+                        if failure == "transport":
+                            raise httpx.ReadTimeout(secret + quote_plus(secret))
+                        data = {"access_token": access, "token_type": "bearer", "scope": SCOPES,
+                                "expires_in": 0 if failure == "lifetime" else 3600}
+                        if failure == "scope":
+                            data["scope"] = "containers.write"
+                        if failure == "missing_scope":
+                            del data["scope"]
+                        if failure == "echo":
+                            data["token_type"] = secret
+                        if refresh:
+                            data["refresh_token"] = renewal
+                        return httpx.Response(200, json=data)
+                    fd = None
+                    if method != "none":
+                        fd, writer = os.pipe()
+                        os.write(writer, (secret + "\n").encode())
+                        os.close(writer)
+                    a = self.args(command="finish", exchange_only=True, token_auth=method, client_secret_fd=fd)
+                    trial = Trial(a, httpx.Client(transport=httpx.MockTransport(handler)))
+                    out, err = io.StringIO(), io.StringIO()
+                    with patch.dict(os.environ, {}, clear=True), patch(__name__ + ".ROOT", Path(tmp)), \
+                         contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                        begin(a)  # begin never consumes the secret FD
+                        directory = Path(tmp) / a.run_id
+                        saved = json.loads((directory / "pkce.json").read_text())
+                        self.assertEqual(parse_qs(urlsplit(out.getvalue().strip()).query)["code_challenge_method"], ["S256"])
+                        callback = REDIRECT + "?" + urlencode({"state": saved["state"], "code": code})
+                        with patch(__name__ + ".Trial", return_value=trial), \
+                             patch.object(sys, "stdin", io.StringIO(callback + "\n")), \
+                             patch.object(trial, "fetch_bundle", side_effect=AssertionError("bundle forbidden")) as bundle, \
+                             patch.object(trial, "install", side_effect=AssertionError("install forbidden")) as install:
+                            self.assertEqual(run(a), 0 if failure is None else 1)
+                        bundle.assert_not_called()
+                        install.assert_not_called()
+                    self.assertFalse((directory / "pkce.json").exists())
+                    evidence = json.loads((directory / "evidence.json").read_bytes())
+                    combined = out.getvalue().encode() + err.getvalue().encode()
+                    for path in directory.iterdir():
+                        combined += path.read_bytes()
+                    basic = base64.b64encode((quote_plus(a.client_id) + ":" + quote_plus(secret)).encode()).decode()
+                    self.assertFalse(leaks(combined, [secret, quote_plus(secret), basic, access, renewal, code, saved["verifier"]]))
+                    self.assertIsNone(trial.client_secret)
+                    if failure == "echo":
+                        self.assertEqual(evidence["outcome"], "secret_canary_failed")
+                        self.assertIn(access, revoked)
+                        self.assertIn(renewal, revoked)
+                        continue
+                    self.assertEqual(evidence["token_auth"], method)
+                    self.assertTrue(all(host == "dash.cloudflare.com" or
+                        (verb == "GET" and path == f"/client/v4/accounts/{APPROVED_ACCOUNT}/workers/scripts")
+                        for verb, host, path in calls))
+                    self.assertFalse(evidence["resource_manifest"]["worker_create_attempted"])
+                    self.assertFalse(evidence["resource_manifest"]["container_create_attempted"])
+                    if failure in ("no_secret", "auth_refused"):
+                        if failure == "no_secret":
+                            self.assertTrue(evidence["exchange_without_secret_refused"])
+                            self.assertIsNone(evidence["secret_accepted"])
+                        else:
+                            self.assertFalse(evidence["secret_accepted"])
+                        self.assertEqual(evidence["steps"][0]["oauth_error"], "invalid_client")
+                        self.assertEqual(evidence["steps"][0]["cf_error_codes"], [1234])
+                        self.assertEqual(len(calls), 1)
+                    elif failure != "transport":
+                        if method == "none":
+                            self.assertIsNone(evidence["secret_accepted"])
+                            self.assertFalse(evidence["exchange_without_secret_refused"])
+                        else:
+                            self.assertTrue(evidence["secret_accepted"])
+                        self.assertEqual(evidence["token"]["refresh_issued"], refresh)
+                        self.assertEqual(evidence["token"]["scope_set_equal"], failure not in ("scope", "missing_scope"))
+                        self.assertEqual(evidence["token"]["expires_in"], 0 if failure == "lifetime" else 3600)
+                        self.assertIn(access, revoked)
+                        if refresh:
+                            self.assertIn(renewal, revoked)
+                            self.assertEqual(evidence["refresh_invalid_grant"], failure != "renewal")
+                    if failure is None:
+                        self.assertEqual(evidence["findings"]["U4"]["revocation_and_denial"], "pass")
+                        self.assertEqual(len(calls), 6 if refresh else 4)
+
+        def test_t0_denial_requires_401_10000_and_baseline(self):
+            for status, codes, baseline in ((401, [10000], True), (403, [10000], True),
+                    (401, [], True), (404, [10000], True), (401, [10000], False), (200, [], True)):
+                with self.subTest(status=status, codes=codes, baseline=baseline):
+                    def handler(req):
+                        if req.url.path.endswith("/revoke"):
+                            return httpx.Response(200)
+                        return httpx.Response(status, json={"errors": [{"code": c} for c in codes]})
+                    trial = Trial(self.args(exchange_only=True), httpx.Client(transport=httpx.MockTransport(handler)))
+                    trial.access = trial.remember("synthetic-access", token=True)
+                    trial.account_read_baseline = baseline
+                    trial.revoke()
+                    self.assertEqual(trial.ev["findings"]["U4"]["revocation_and_denial"],
+                                     "pass" if status == 401 and codes == [10000] and baseline else "unproven_or_failed")
+
+        def test_confidential_exception_text_is_safe(self):
+            import traceback
+            secret = b64(os.urandom(32))
+            def handler(req):
+                raise httpx.ReadTimeout(secret)
+            trial = Trial(self.args(token_auth="client_secret_post"),
+                          httpx.Client(transport=httpx.MockTransport(handler)))
+            trial.client_secret = trial.remember(secret)
+            try:
+                trial.exchange("synthetic-code", "synthetic-verifier")
+                self.fail("request must fail")
+            except Refusal as exc:
+                text = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+                self.assertNotIn(secret, text)
+                self.assertEqual(str(exc), "confidential_request_failed")
 
         def test_null_errors_and_result_info_from_live_api(self):
             # S1807 live run: Cloudflare list endpoints may return "errors": null and

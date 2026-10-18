@@ -14,8 +14,93 @@ the program still requires `CF_OAUTH_CLIENT_ID` or `--client-id`.
 Only the compiled approved account is allowed. No seller account/data or
 production registration: no `REGISTRATION_TOKEN`, `RUN_NOW_SECRET`, cron, routes,
 Workers Builds, workers.dev activation, wake, probe, scan, or backend call.
-No bucket is created or inspected. `CF_OAUTH_CLIENT_SECRET` is refused: this
-client's token authentication is `none`.
+No bucket is created or inspected. The default token authentication remains
+`none`, with the existing `CF_OAUTH_CLIENT_SECRET` refusal guard. The S1810
+confidential rehearsal below requires a separately registered PRIVATE client.
+
+## S1810: private confidential T0 rehearsal (never production)
+
+Authority: runbooks Chunk 3c §§4.2, 8.1, 9 T0 and 11 step 1. Use the client's
+registered method explicitly; there is no retry with another auth method or
+without PKCE. [Cloudflare's client documentation](https://developers.cloudflare.com/fundamentals/oauth/create-an-oauth-client/)
+supports `client_secret_basic` and `client_secret_post` for server-side clients.
+S256 stays mandatory here in both modes. These commands are operator instructions;
+the build and all self-tests make zero live Cloudflare calls.
+
+`--exchange-only` does exchange → exact scope/lifetime checks → account scripts
+GET baseline → access/refresh revoke → same GET denial (strictly 401/10000) →
+refresh `invalid_grant` check if issued. It never fetches a bundle, installs a
+Worker/DO/Container, or reads their settings. Both T0 and confidential modes reject
+the old experimental missing-scope override. Issued tokens
+are retained for finally revocation on failed checks; refresh is never persisted
+or used to continue work. Cleanup/denial ambiguity exits nonzero.
+
+Use the **same private confidential client ID** for both runs below and fresh
+authorization codes/run IDs. Replace only the client ID placeholder. The existing
+Infisical identity must already have access restricted to `/cloudflare-installer`;
+this tool does not configure or prove vault isolation. With terminal/session/body
+capture disabled, in zsh or bash:
+
+```sh
+unset CF_OAUTH_CLIENT_SECRET
+T0_CLIENT_ID='REPLACE_WITH_PRIVATE_CONFIDENTIAL_CLIENT_ID'
+T0_RUN_ID="s1810-t0-basic-$(rtk proxy date -u +%Y%m%d%H%M%S)"
+
+rtk proxy python3 spikes/s1807-cf-oauth-trial/trial.py begin \
+  --manual-callback --client-id "$T0_CLIENT_ID" \
+  --account-id d5346d3e0f8f344c5f4915aaca689adf --run-id "$T0_RUN_ID" \
+  --token-auth client_secret_basic --exchange-only
+
+rtk proxy python3 spikes/s1807-cf-oauth-trial/trial.py finish \
+  --manual-callback --client-id "$T0_CLIENT_ID" \
+  --account-id d5346d3e0f8f344c5f4915aaca689adf --run-id "$T0_RUN_ID" \
+  --token-auth client_secret_basic --exchange-only --client-secret-fd 3 \
+  3< <(rtk proxy infisical secrets get CLOUDFLARE_INSTALLER_OAUTH_CLIENT_SECRET \
+    --projectId bd272d48-c5a1-4b52-9d24-12066ae4403c --env prod \
+    --path /cloudflare-installer --include-imports=false --expand=false --plain --silent)
+```
+
+After `begin`, open the printed URL and authorize only the approved account.
+At `finish`, paste the full callback URL to stdin and press Enter; echo is disabled.
+FD 3 carries only the secret, read once through EOF and closed, separately from
+callback stdin. A trailing newline from `--plain` is removed; empty, multiline,
+invalid UTF-8 or over-64-KiB input refuses. `begin` never reads the secret FD.
+The secret and its reversible wire encodings stay in memory, covered by the
+existing evidence canary; `CF_OAUTH_CLIENT_SECRET` is removed and never used.
+For a client registered with `client_secret_post`, replace the method in **both**
+commands; basic sends an Authorization header, post sends client_id/client_secret
+form fields to both OAuth endpoints. Never change methods to bypass a refusal.
+
+Optional negative, using the same client ID and fresh consent, **without** a secret:
+
+```sh
+T0_NEG_RUN_ID="s1810-t0-none-$(rtk proxy date -u +%Y%m%d%H%M%S)"
+rtk proxy python3 spikes/s1807-cf-oauth-trial/trial.py begin \
+  --manual-callback --client-id "$T0_CLIENT_ID" \
+  --account-id d5346d3e0f8f344c5f4915aaca689adf --run-id "$T0_NEG_RUN_ID" \
+  --token-auth none --exchange-only
+
+rtk proxy python3 spikes/s1807-cf-oauth-trial/trial.py finish \
+  --manual-callback --client-id "$T0_CLIENT_ID" \
+  --account-id d5346d3e0f8f344c5f4915aaca689adf --run-id "$T0_NEG_RUN_ID" \
+  --token-auth none --exchange-only
+```
+
+Paste this run's callback at finish. Expected refusal exits 1; do not treat a
+generic failure as proof of confidential auth enforcement. In private evidence,
+inspect `exchange_without_secret_refused` alongside `code_exchange.http_status`,
+numeric `cf_error_codes` and allowlisted `oauth_error` (e.g. `invalid_client`).
+`invalid_grant` could instead mean an invalid code/PKCE; repeat with fresh consent
+before concluding that the secret was required. A successful none exchange records
+false and still revokes any issued tokens; it never claims `secret_accepted`.
+
+Evidence remains under the existing private root/run ID. It records `token_auth`,
+`secret_accepted` (exchange succeeded with the supplied secret; not proof the server
+requires it), scope set equality, expires_in, refresh issuance, each exchange/revoke/
+denial HTTP status and numeric code, and `refresh_invalid_grant` (null when absent).
+No secret, code, access or refresh token is written. Vault isolation and whether
+the app authorization remains in connected-apps after revoke require separate
+operator observations; offline tooling does not close T0 or authorize production.
 
 ## Two-phase procedure: browser on Max's laptop, script on Koskadeux
 
