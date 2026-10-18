@@ -96,7 +96,7 @@ false and still revokes any issued tokens; it never claims `secret_accepted`.
 
 Evidence remains under the existing private root/run ID. It records `token_auth`,
 `secret_accepted` (exchange succeeded with the supplied secret; not proof the server
-requires it), scope set equality, expires_in, refresh issuance, each exchange/revoke/
+requires it), scope set equality, validated expires_in, refresh issuance, each exchange/revoke/
 denial HTTP status and numeric code, and `refresh_invalid_grant` (null when absent).
 No secret, code, access or refresh token is written. Vault isolation and whether
 the app authorization remains in connected-apps after revoke require separate
@@ -191,8 +191,11 @@ of a reference does not prove its executable contents or run a container.
 
 ## Scope, account and creation gates
 
-After exchange, evidence retains the granted scope string and whether the field
-was present. Before any management write, the scope set must be exactly
+After exchange, evidence records whether the scope field was present and whether
+its set equals the requested set. Only mismatches include a sorted scope token
+list: tokens must match `[a-z0-9_.:-]{1,64}`; other items (or a non-string field)
+become the fixed `[invalid_scope_token]` placeholder. Before any management write,
+the scope set must be exactly
 `{workers-scripts.admin, containers.write}`. Missing `scope` fails closed unless
 `--accept-missing-scope-field` is explicitly supplied (default off); that override
 and omission are recorded. It never accepts an explicit wrong/empty scope set.
@@ -257,10 +260,14 @@ Run IDs are single-use even for dry runs and failures. `--self-test` uses only
 Each completed/failed trial saves `evidence.json` and `stdout.txt` as 0600 files in
 the 0700 run directory. Evidence contains timestamps, statuses, integer API error
 codes, durations, hashes/booleans, created resource manifests, findings and
-cleanup/revocation results. Token metadata includes type, lifetime, refresh-issued
-boolean and scopes; codes, tokens and token responses are never saved. A token
-canary checks synthetic detection plus code/verifier/token prefixes against
-candidate evidence/stdout and the actual disk bytes. Secret-bearing evidence is
+cleanup/revocation results. Token metadata records only `token_type_is_bearer`,
+a numeric lifetime in `(0, 31622400]` seconds (at most 366 days) or the fixed
+`invalid_lifetime` code, refresh-issued booleans and the scope checks above.
+Booleans and non-finite numbers are invalid lifetimes. Validation happens before
+recording; codes, tokens and token responses are never saved. A token canary
+walks every evidence key/string before serialization, checking secret/code/verifier/
+token prefixes in raw, JSON-escaped, URL/form-encoded and base64 forms. It also
+checks captured stdout and the actual disk bytes. Secret-bearing evidence is
 withheld and the run fails. No issued tokens in dry-run means no live canary proof.
 Managed memory clearing is best effort; external recording is outside this check.
 

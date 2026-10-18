@@ -21,7 +21,7 @@ from datetime import datetime, timezone
 from email import policy
 from email.parser import BytesParser
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from urllib.parse import parse_qs, quote_plus, urlencode, urlsplit
+from urllib.parse import parse_qs, quote, quote_plus, urlencode, urlsplit
 
 import httpx
 
@@ -41,6 +41,8 @@ REUSE_APP = "a030d580-f639-48c8-9627-f10c1f3ce6e4"
 DENIED_NAMES = ("aim-cloudflare-verifier", "allai-dead-man-switch", "get-ai-market", "vectoraiz-installer")
 RESPONSE_BYTE_CAP = 2 * 1024 * 1024
 REQUEST_TIMEOUT = httpx.Timeout(connect=5, read=5, write=5, pool=5)
+MAX_TOKEN_LIFETIME = 366 * 24 * 60 * 60  # bounded seconds; refuse booleans, NaN and infinity
+SCOPE_TOKEN_RE = r"[a-z0-9_.:-]{1,64}"
 
 
 def authorize_url(client_id, state, verifier):
@@ -127,8 +129,35 @@ def module_bytes(content, content_type):
 
 
 def leaks(data, values):
-    """Literal grep for the first 12 bytes (or entire shorter value), no logging."""
-    return any(v[:12].encode() in data for v in values if v)
+    """Scan structured keys/strings or sink bytes for raw/encoded secret prefixes."""
+    needles = set()
+    for value in values:
+        if not value:
+            continue
+        # Include encoded raw prefixes as well as prefixes of the full encodings.
+        for v in (value, value[:12]):
+            raw = v.encode()
+            forms = (v, json.dumps(v)[1:-1], quote(v, safe=""), quote_plus(v),
+                     base64.b64encode(raw).decode(), base64.urlsafe_b64encode(raw).decode())
+            for form in forms:
+                # Also cover a wire/escaped form after the durable JSON writer escapes it.
+                for candidate in (form, json.dumps(form)[1:-1]):
+                    needles.add(candidate[:12].encode())
+                    if candidate.rstrip("="):
+                        needles.add(candidate.rstrip("=")[:12].encode())
+
+    def walk(value):
+        if isinstance(value, str):
+            value = value.encode()
+        if isinstance(value, bytes):
+            return any(needle in value for needle in needles)
+        if isinstance(value, dict):
+            return any(walk(k) or walk(v) for k, v in value.items())
+        if isinstance(value, (list, tuple)):
+            return any(walk(v) for v in value)
+        return False
+
+    return walk(data)
 
 
 def callback_code(path, host, expected_state):
@@ -483,6 +512,8 @@ class Trial:
             self.ev["pkce_delete_failed"] = True
 
     def exchange(self, code, verifier, pkce=None):
+        self.remember(code)
+        self.remember(verifier)
         form = {"grant_type": "authorization_code", "client_id": self.args.client_id,
                 "redirect_uri": REDIRECT, "code": code, "code_verifier": verifier}
         try:
@@ -494,14 +525,23 @@ class Trial:
         finally:
             if pkce is not None:
                 self.delete_pkce(pkce)
-        self.ev["token"] = {"token_type": data.get("token_type"),
-                            "expires_in": data.get("expires_in"),
+        token_type = data.get("token_type")
+        bearer = isinstance(token_type, str) and token_type.lower() == "bearer"
+        scope = data.get("scope")
+        scope_equal = isinstance(scope, str) and set(scope.split()) == set(SCOPES.split())
+        lifetime = data.get("expires_in")
+        lifetime_valid = type(lifetime) in (int, float) and 0 < lifetime <= MAX_TOKEN_LIFETIME
+        # Validate before recording: never retain arbitrary rejected response metadata.
+        self.ev["token"] = {"token_type_is_bearer": bearer,
+                            "expires_in": lifetime if lifetime_valid else "invalid_lifetime",
                             "refresh_token_issued": bool(self.refresh),
                             "refresh_issued": bool(self.refresh),
                             "scope_field_present": "scope" in data,
-                            "scope_set_equal": isinstance(data.get("scope"), str) and
-                                set(data["scope"].split()) == set(SCOPES.split()),
-                            "granted_scope": data.get("scope"), "received_at": utc()}
+                            "scope_set_equal": scope_equal, "received_at": utc()}
+        if not scope_equal:
+            self.ev["token"]["granted_scope"] = sorted(
+                item if re.fullmatch(SCOPE_TOKEN_RE, item) else "[invalid_scope_token]"
+                for item in scope.split()) if isinstance(scope, str) else ["[invalid_scope_token]"]
         accepted = 200 <= response.status_code < 300 and bool(self.access) and data.get("success") is not False
         if self.args.token_auth != "none":
             self.ev["secret_accepted"] = accepted
@@ -509,16 +549,14 @@ class Trial:
             self.ev["exchange_without_secret_refused"] = response.status_code in (400, 401, 403)
         self.ok(response)
         require(isinstance(self.access, str) and self.access, "access_token_missing")
-        require(str(data.get("token_type", "")).lower() == "bearer", "token_type_refused")
+        require(bearer, "token_type_refused")
         if "scope" not in data:
             self.ev["token"]["missing_scope_accepted"] = self.args.accept_missing_scope_field
             require(self.args.accept_missing_scope_field and not self.args.exchange_only and
                     self.args.token_auth == "none", "granted_scope_missing")
         else:
-            require(isinstance(data["scope"], str) and set(data["scope"].split()) == set(SCOPES.split()),
-                    "granted_scope_mismatch")
-        require(isinstance(data.get("expires_in"), (int, float)) and data["expires_in"] > 0,
-                "token_lifetime_missing")
+            require(scope_equal, "granted_scope_mismatch")
+        require(lifetime_valid, "token_lifetime_missing")
         self.scopes_verified = True
 
     def account_baseline(self):
@@ -560,8 +598,7 @@ class Trial:
         if self.args.r2_bucket and not 200 <= response.status_code < 300:
             # Preserve the API errors verbatim, except never persist a secret-bearing response.
             errors = response.json().get("errors") or []
-            raw = json.dumps(errors).encode()
-            require(not leaks(raw, self.sensitive), "secret_in_provider_error")
+            require(not leaks(errors, self.sensitive), "secret_in_provider_error")
             self.ev["findings"]["U2"]["r2_errors_verbatim"] = errors
         self.ok(response)
         self.worker_owned = True
@@ -916,8 +953,8 @@ def run_prepared(a, directory):
                                 "synthetic_stdout_detection": leaks(synthetic.encode(), [synthetic]),
                                 "issued_tokens_checked": len(trial.tokens), "prefix_bytes": 12}
     stdout_bytes = capture.buffered.getvalue().encode()
-    encoded = json.dumps(trial.ev, indent=2, sort_keys=True).encode() + b"\n"
-    clean = not leaks(encoded + stdout_bytes, trial.sensitive)
+    # Inspect keys and strings before JSON escaping can alter a secret's representation.
+    clean = not leaks((trial.ev, stdout_bytes), trial.sensitive)
     trial.ev["token_canary"]["evidence_and_stdout_pass"] = clean
     if not clean:
         # Never persist discovered secret bytes, even in a failed trial's evidence.
@@ -1072,11 +1109,123 @@ def self_test():
                             trial.exchange("fake-code", "fake-verifier")
                         self.assertFalse(trial.scopes_verified)
                     self.assertEqual(trial.access, access)  # retained for finally revoke even on refusal
-                    self.assertEqual(trial.ev["token"]["granted_scope"], scope)
+                    token = trial.ev["token"]
+                    self.assertEqual(token["scope_set_equal"], accepted and scope is not None)
+                    if token["scope_set_equal"]:
+                        self.assertNotIn("granted_scope", token)
+                    else:
+                        self.assertEqual(token["granted_scope"],
+                            sorted(scope.split()) if isinstance(scope, str) else ["[invalid_scope_token]"])
                     self.assertEqual(trial.ev["token"]["scope_field_present"], scope is not None)
                     with self.assertRaises(Refusal):  # account/collision preflight still missing
                         trial.request("early_write", "PUT", trial.path)
                     self.assertEqual(len(calls), 1)
+
+        def test_structured_canary_encodings_and_keys(self):
+            for value in ('synthetic"secret-123456789', 'synthetic\\secret-123456789',
+                          'syntheticésecret-123456789', 'synthetic /+secret-123456789'):
+                # The same scanner covers secret, access/refresh, code and verifier.
+                for sensitive in ([value], ["other-credential", value]):
+                    forms = (value, json.dumps(value)[1:-1], quote(value, safe=""), quote_plus(value),
+                             base64.b64encode(value.encode()).decode(), b64(value.encode()))
+                    for form in forms:
+                        with self.subTest(form=form):
+                            self.assertTrue(leaks({"nested": [{form: "safe"}]}, sensitive))
+                            self.assertTrue(leaks({"nested": ["prefix " + form + " suffix"]}, sensitive))
+                            self.assertTrue(leaks(json.dumps({"echo": form}).encode(), sensitive))
+                            self.assertTrue(leaks({"echo": form[:12]}, sensitive))
+                    self.assertFalse(leaks({"safe": [True, 3600, None]}, sensitive))
+
+        def test_secret_echo_redaction_and_finally_revocation(self):
+            from unittest.mock import patch
+            # Exercise real orchestration and the actual FD loader without disk writes.
+            for secret in ('synthetic"secret-123456789', 'synthetic\\secret-123456789',
+                           'syntheticésecret-123456789'):
+                for field in ("token_type", "scope", "expires_in", "evidence_key", "evidence_value"):
+                    with self.subTest(secret=secret, field=field):
+                        access, refresh = secrets.token_urlsafe(32), secrets.token_urlsafe(32)
+                        code, verifier = secrets.token_urlsafe(32), secrets.token_urlsafe(64)
+                        revoked, writes = [], {}
+                        def handler(req):
+                            form = parse_qs(req.content.decode())
+                            if req.url.path.endswith("/revoke"):
+                                revoked.append(form["token"][0])
+                                return httpx.Response(200)
+                            if req.url.path.endswith("/workers/scripts"):
+                                return httpx.Response(401, json={"errors": [{"code": 10000}]})
+                            if form.get("grant_type") == ["refresh_token"]:
+                                return httpx.Response(400, json={"error": "invalid_grant"})
+                            data = {"access_token": access, "refresh_token": refresh,
+                                    "token_type": "bearer", "scope": SCOPES, "expires_in": 3600}
+                            if field in data:
+                                data[field] = SCOPES + " " + secret if field == "scope" else secret
+                            return httpx.Response(200, json=data)
+                        fd, writer = os.pipe()
+                        try:
+                            os.write(writer, (secret + "\n").encode())
+                        finally:
+                            os.close(writer)
+                        a = self.args(exchange_only=True, token_auth="client_secret_post", client_secret_fd=fd)
+                        trial = Trial(a, httpx.Client(transport=httpx.MockTransport(handler)))
+                        def cleanup():
+                            if field == "evidence_key":
+                                trial.ev["diagnostic"] = [{secret: "safe"}]
+                            elif field == "evidence_value":
+                                trial.ev["diagnostic"] = [{"echo": json.dumps(secret)[1:-1]}]
+                        out, err = io.StringIO(), io.StringIO()
+                        with patch.dict(os.environ, {}, clear=True), \
+                             patch(__name__ + ".Trial", return_value=trial), \
+                             patch(__name__ + ".private_write", side_effect=lambda d, n, b: writes.update({n: b})), \
+                             patch.object(Path, "read_bytes", lambda p: writes[p.name]), \
+                             patch.object(trial, "authorize", side_effect=lambda: trial.exchange(code, verifier)), \
+                             patch.object(trial, "cleanup", side_effect=cleanup), \
+                             contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                            self.assertEqual(run_prepared(a, Path("/in-memory-evidence")), 1)
+                        evidence = json.loads(writes["evidence.json"])
+                        sinks = out.getvalue().encode() + err.getvalue().encode() + b"".join(writes.values())
+                        basic = base64.b64encode((quote_plus(a.client_id) + ":" + quote_plus(secret)).encode()).decode()
+                        self.assertFalse(leaks(sinks, [secret, basic, access, refresh, code, verifier]))
+                        for value in (secret, basic, access, refresh, code, verifier):
+                            for form in (value, json.dumps(value)[1:-1], quote(value, safe=""),
+                                         quote_plus(value), base64.b64encode(value.encode()).decode(),
+                                         b64(value.encode())):
+                                self.assertNotIn(form.encode(), sinks)
+                        # Also decode the durable JSON, independently of its escape spelling.
+                        self.assertFalse(leaks(evidence, [secret, access, refresh, code, verifier]))
+                        self.assertEqual(revoked, [access, refresh])
+                        self.assertEqual(err.getvalue(), "")
+                        if field.startswith("evidence_"):
+                            self.assertEqual(evidence["outcome"], "secret_canary_failed")
+                            self.assertEqual(writes["stdout.txt"], b"[capture withheld: secret canary failed]\n")
+                        else:
+                            token = evidence["token"]
+                            self.assertNotIn("token_type", token)
+                            self.assertEqual(token["token_type_is_bearer"], field != "token_type")
+                            if field == "scope":
+                                self.assertFalse(token["scope_set_equal"])
+                                self.assertEqual(token["granted_scope"],
+                                    sorted(SCOPES.split() + ["[invalid_scope_token]"]))
+                            if field == "expires_in":
+                                self.assertEqual(token["expires_in"], "invalid_lifetime")
+
+        def test_token_lifetime_validation_before_recording(self):
+            from unittest.mock import patch
+            for lifetime in (None, True, False, 0, -1, "3600", {}, [], float("nan"),
+                             float("inf"), MAX_TOKEN_LIFETIME + 1, 1, 0.5, MAX_TOKEN_LIFETIME):
+                with self.subTest(lifetime=lifetime):
+                    trial = Trial(self.args())
+                    # Inject even non-finite numbers without depending on httpx's JSON encoder.
+                    response = httpx.Response(200, request=httpx.Request("POST", OAUTH + "/token"))
+                    response.json = lambda: {"access_token": "synthetic-access", "token_type": "bearer",
+                                             "scope": SCOPES, "expires_in": lifetime}
+                    valid = type(lifetime) in (int, float) and 0 < lifetime <= MAX_TOKEN_LIFETIME
+                    with trial.client, patch.object(trial, "request", return_value=response):
+                        if valid:
+                            trial.exchange("synthetic-code", "synthetic-verifier")
+                        else:
+                            with self.assertRaisesRegex(Refusal, "token_lifetime_missing"):
+                                trial.exchange("synthetic-code", "synthetic-verifier")
+                    self.assertEqual(trial.ev["token"]["expires_in"], lifetime if valid else "invalid_lifetime")
 
         def test_confidential_shapes_and_fd_read_once(self):
             from unittest.mock import MagicMock, patch
@@ -1252,10 +1401,8 @@ def self_test():
                     self.assertFalse(leaks(combined, [secret, quote_plus(secret), basic, access, renewal, code, saved["verifier"]]))
                     self.assertIsNone(trial.client_secret)
                     if failure == "echo":
-                        self.assertEqual(evidence["outcome"], "secret_canary_failed")
-                        self.assertIn(access, revoked)
-                        self.assertIn(renewal, revoked)
-                        continue
+                        self.assertFalse(evidence["token"]["token_type_is_bearer"])
+                        self.assertNotIn("token_type", evidence["token"])
                     self.assertEqual(evidence["token_auth"], method)
                     self.assertTrue(all(host == "dash.cloudflare.com" or
                         (verb == "GET" and path == f"/client/v4/accounts/{APPROVED_ACCOUNT}/workers/scripts")
@@ -1279,7 +1426,8 @@ def self_test():
                             self.assertTrue(evidence["secret_accepted"])
                         self.assertEqual(evidence["token"]["refresh_issued"], refresh)
                         self.assertEqual(evidence["token"]["scope_set_equal"], failure not in ("scope", "missing_scope"))
-                        self.assertEqual(evidence["token"]["expires_in"], 0 if failure == "lifetime" else 3600)
+                        self.assertEqual(evidence["token"]["expires_in"],
+                                         "invalid_lifetime" if failure == "lifetime" else 3600)
                         self.assertIn(access, revoked)
                         if refresh:
                             self.assertIn(renewal, revoked)
