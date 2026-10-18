@@ -1,11 +1,12 @@
 name: Cloudflare verifier release
 on:
   push:
-    tags: ['cloudflare-verifier-v*']
+    tags: ['cloudflare-verifier-oauth-install-r1']
   workflow_dispatch:
     inputs:
       version:
-        description: 'Semver for candidate artifact build (no publication)'
+        description: 'Embedded binary version (OAuth requires 0.1.1; no publication)'
+        default: '0.1.1'
         required: true
         type: string
 permissions:
@@ -48,9 +49,9 @@ jobs:
         run: |
           python3 - <<'PY'
           import os, subprocess
-          version = os.environ['BUILD_VERSION'] or os.environ['RELEASE_TAG'].removeprefix('cloudflare-verifier-v')
+          version = os.environ['BUILD_VERSION'] or '0.1.1'
           subprocess.run(['python3', 'scripts/cloudflare-verifier-release.py', '--version', version,
-                          '--verify-committed'], check=True)
+                          '--distribution', 'oauth-install-r1', '--verify-committed'], check=True)
           PY
       - name: Offline release template contract checks
         run: python3 -m unittest discover -s scripts -p test_cloudflare_verifier_release.py
@@ -109,7 +110,7 @@ jobs:
           release = importlib.util.module_from_spec(spec)
           spec.loader.exec_module(release)
           release.sign(pathlib.Path('dist/cloudflare-verifier').resolve(),
-                       os.environ['RELEASE_TAG'].removeprefix('cloudflare-verifier-v'))
+                       '0.1.1', 'oauth-install-r1')
           PY
       - name: Publish artifacts in this repository only
         env:

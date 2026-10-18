@@ -19,7 +19,16 @@ from urllib.parse import quote
 
 ROOT = Path(__file__).resolve().parents[1]
 TEMPLATE = ROOT / "deploy/cloudflare-verifier"
-IDENTITY = "https://github.com/aidotmarket/aim-data-gateway/.github/workflows/cloudflare-verifier-release.yml@refs/tags/cloudflare-verifier-v"
+IDENTITY = "https://github.com/aidotmarket/aim-data-gateway/.github/workflows/cloudflare-verifier-release.yml@refs/tags/"
+APPROVED_IMAGE = "docker.io/aidotmarket/aim-cloudflare-verifier@sha256:19b7035f37e422df2dbf1af950af9eef7c6c15e9842c61b35a9274bbb04c60ba"
+BINARY_SOURCE = "baec125846638b65e211be9a11949d8898cdd128"  # frozen v0.1.1 gateway source
+APPROVED_BINARY = "45b5bf95b784bf6cc572fe84f8faba77bb09682a3d5cb1f25cae6eb4e6a1c8a6"
+
+
+def release_tag(version, distribution=None):
+    if distribution and (distribution != "oauth-install-r1" or version != "0.1.1"):
+        raise ValueError("OAuth distribution requires the approved 0.1.1 binary")
+    return "cloudflare-verifier-" + distribution if distribution else "cloudflare-verifier-v" + version
 
 
 def run(*args, env=None, cwd=ROOT):
@@ -41,7 +50,8 @@ def canonical(value):
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
 
 
-def build(version, output, verify_committed=False):
+def build(version, output, verify_committed=False, distribution=None):
+    release_tag(version, distribution)
     if run("go", "version").split()[2] != "go1.27.2":
         raise ValueError("use repository-pinned Go 1.27.2")
     output.mkdir(parents=True, exist_ok=True)
@@ -54,9 +64,14 @@ def build(version, output, verify_committed=False):
                    "GOCACHE": str(directory / "cache"), "GOFLAGS": "", "GOEXPERIMENT": "",
                    "GOPROXY": "off", "GOSUMDB": "off"}
             binary = directory / "aim-cloudflare-verifier"
-            run("go", "build", "-mod=readonly", "-trimpath", "-buildvcs=false",
-                f"-ldflags=-s -w -buildid= -X main.releaseID=cloudflare-verifier-v{version} -X main.scannerVersion={version}",
-                "-o", binary, "./cmd/aim-cloudflare-verifier", env=env)
+            if distribution:
+                shutil.copyfile(TEMPLATE / "aim-cloudflare-verifier", binary)
+                if digest(binary) != APPROVED_BINARY:
+                    raise ValueError("frozen binary changed")
+            else:
+                run("go", "build", "-mod=readonly", "-trimpath", "-buildvcs=false",
+                    f"-ldflags=-s -w -buildid= -X main.releaseID=cloudflare-verifier-v{version} -X main.scannerVersion={version}",
+                    "-o", binary, "./cmd/aim-cloudflare-verifier", env=env)
             bundle = directory / "worker.mjs"
             run(TEMPLATE / "node_modules/.bin/esbuild", "worker.ts", "--bundle", "--format=esm",
                 "--platform=neutral", "--external:cloudflare:*", "--external:node:*", "--outfile=" + str(bundle), cwd=TEMPLATE)
@@ -82,17 +97,25 @@ def build(version, output, verify_committed=False):
               "compiled_modules": run("go", "version", "-m", output / "aim-cloudflare-verifier").splitlines(),
               "go_version": run("go", "version"),
               "worker_lockfile_sha256": digest(TEMPLATE / "package-lock.json")}
+    if distribution:
+        if record["binary_sha256"] != APPROVED_BINARY:
+            raise ValueError("OAuth binary differs from approved image binary")
+        record.update(distribution_revision=distribution, approved_image=APPROVED_IMAGE, binary_source_commit=BINARY_SOURCE)
     (output / "build.json").write_text(json.dumps(record, indent=2) + "\n")
-    print("binary_bundle_reproducibility=PASS", flush=True)
+    print("frozen_binary_pin_and_bundle_reproducibility=PASS" if distribution else "binary_bundle_reproducibility=PASS", flush=True)
     return record
 
 
-def verify_built(record, output, version):
+def verify_built(record, output, version, distribution=None):
+    release_tag(version, distribution)
+    if distribution and (record.get("distribution_revision") != distribution or record.get("approved_image") != APPROVED_IMAGE or record.get("binary_source_commit") != BINARY_SOURCE or record["binary_sha256"] != APPROVED_BINARY):
+        raise ValueError("OAuth release pins changed")
     if (record["source_commit"] != run("git", "rev-parse", "HEAD")
             or record["release_id"] != "cloudflare-verifier-v" + version
             or record["scanner_version"] != version
             or record["binary_sha256"] != digest(output / "aim-cloudflare-verifier")
             or record["worker_identity"] != {"mode": "bundle", "sha256": digest(output / "worker.mjs")}
+            or record["bundle_sha256"] != digest(output / "worker.mjs")
             or record["worker_lockfile_sha256"] != digest(TEMPLATE / "package-lock.json")):
         raise ValueError("release inputs changed")
 
@@ -135,8 +158,23 @@ def export(record, output):
         "jurisdiction": "default",
         "release_id": record["release_id"], "scanner_version": record["scanner_version"],
         "binary_sha256": record["binary_sha256"], "worker_identity": record["worker_identity"]}).decode()
+    distribution = record.get("distribution_revision")
+    tag = release_tag(record["scanner_version"], distribution)
+    if distribution:
+        config["containers"][0]["image"] = APPROVED_IMAGE
+        config["triggers"]["crons"] = []  # Installer enables only after readback.
+        config["vars"]["BOOTSTRAP_INSTALL"] = "{}"  # Per-intent metadata; never a credential.
+        (tree / ".dev.vars.example").write_text('REGISTRATION_TOKEN=""\nBOOTSTRAP_WAKE_SECRET=""\n')
+        package = json.loads((tree / "package.json").read_text())
+        package["cloudflare"]["bindings"].pop("RUN_NOW_SECRET", None)
+        (tree / "package.json").write_text(json.dumps(package, indent=2) + "\n")
     (tree / "wrangler.jsonc").write_text(json.dumps(config, indent=2) + "\n")
-    source_archive(tree / "source.tar")
+    if distribution:
+        run("git", "archive", "--format=tar", "--output=" + str(tree / "source.tar"), BINARY_SOURCE, "--",
+            "go.mod", "go.sum", "LICENSE", "cmd/aim-cloudflare-verifier", "internal/cloudflareverification",
+            "verification", "internal/wire", "internal/config", "internal/ids", "internal/inventory")
+    else:
+        source_archive(tree / "source.tar")
     files = manifest(tree)
     (output / "template-manifest.json").write_bytes(canonical(files) + b"\n")
     # A deterministic local commit permits later exact export without account access.
@@ -146,11 +184,11 @@ def export(record, output):
            "GIT_AUTHOR_DATE": epoch + " +0000", "GIT_COMMITTER_DATE": epoch + " +0000"}
     run("git", "init", "--initial-branch=main", tree)
     run("git", "add", ".", cwd=tree)
-    run("git", "-c", "commit.gpgsign=false", "commit", "-m", record["release_id"], env=env, cwd=tree)
+    run("git", "-c", "commit.gpgsign=false", "commit", "-m", tag, env=env, cwd=tree)
     commit = run("git", "rev-parse", "HEAD", cwd=tree)
-    repo = "https://github.com/aidotmarket/" + record["release_id"]
+    repo = "https://github.com/aidotmarket/" + tag
     raw = repo.replace("github.com", "raw.githubusercontent.com") + "/" + commit
-    artifact = "https://github.com/aidotmarket/aim-data-gateway/releases/download/" + record["release_id"]
+    artifact = "https://github.com/aidotmarket/aim-data-gateway/releases/download/" + tag
     catalog = {"release_id": record["release_id"], "scanner_version": record["scanner_version"],
                "binary_sha256": record["binary_sha256"], "worker_identity": record["worker_identity"],
                "template_repo_url": repo, "template_commit": commit,
@@ -171,14 +209,16 @@ def export(record, output):
     print("template_export=PASS (no external repository created)", flush=True)
 
 
-def sign(output, version):
-    tag = "cloudflare-verifier-v" + version
+def sign(output, version, distribution=None):
+    tag = release_tag(version, distribution)
+    if version == "0.1.1" and not distribution:
+        raise ValueError("frozen v0.1.1 signing is prohibited; use its original source tag")
     if (os.environ.get("GITHUB_REPOSITORY") != "aidotmarket/aim-data-gateway"
             or os.environ.get("GITHUB_REF") != "refs/tags/" + tag
             or run("git", "rev-list", "-n", "1", tag) != run("git", "rev-parse", "HEAD")):
         raise ValueError("signing requires exact repository/tag workflow identity")
     record = json.loads((output / "build.json").read_text())
-    verify_built(record, output, version)
+    verify_built(record, output, version, distribution)
     entry = json.loads((output / "catalog.json").read_text())["default"]
     files = manifest(output / "template")
     if (entry["template_tree_sha256"] != hashlib.sha256(canonical(files)).hexdigest()
@@ -198,13 +238,14 @@ def sign(output, version):
     for path in paths:
         bundle = output / (path.name + ".sigstore.json")
         run("cosign", "sign-blob", "--yes", "--bundle", bundle, path)
-        run("cosign", "verify-blob", "--bundle", bundle, "--certificate-identity", IDENTITY + version,
+        run("cosign", "verify-blob", "--bundle", bundle, "--certificate-identity", IDENTITY + tag,
             "--certificate-oidc-issuer", "https://token.actions.githubusercontent.com", path)
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--version", required=True)
+    parser.add_argument("--distribution", required=True, choices=["oauth-install-r1"])
     parser.add_argument("--output", type=Path, default=ROOT / "dist/cloudflare-verifier")
     parser.add_argument("--verify-committed", action="store_true")
     parser.add_argument("--sign", action="store_true")
@@ -212,10 +253,10 @@ def main():
     if not re.fullmatch(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?", args.version):
         parser.error("version must be semver")
     output = args.output.resolve()
-    record = build(args.version, output, args.verify_committed)
+    record = build(args.version, output, args.verify_committed, args.distribution)
     export(record, output)
     if args.sign:
-        sign(output, args.version)
+        sign(output, args.version, args.distribution)
 
 
 if __name__ == "__main__":

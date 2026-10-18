@@ -61,6 +61,7 @@ class ReleaseTests(unittest.TestCase):
             record = {"source_commit": "pinned", "release_id": "cloudflare-verifier-v0.1.0",
                       "scanner_version": "0.1.0", "binary_sha256": release.digest(out / "aim-cloudflare-verifier"),
                       "worker_identity": {"mode": "bundle", "sha256": release.digest(out / "worker.mjs")},
+                      "bundle_sha256": release.digest(out / "worker.mjs"),
                       "worker_lockfile_sha256": release.digest(release.TEMPLATE / "package-lock.json")}
             with mock.patch.object(release, "run", return_value="pinned"):
                 release.verify_built(record, out, "0.1.0")
@@ -69,6 +70,44 @@ class ReleaseTests(unittest.TestCase):
                     release.verify_built(record, out, "0.1.0")
                 with self.assertRaises(ValueError):
                     release.verify_built(record, out, "0.2.0")
+
+    def test_oauth_distribution_keeps_binary_identity_and_immutable_artifact_names(self):
+        with tempfile.TemporaryDirectory() as temp:
+            out = Path(temp)
+            for name in ("aim-cloudflare-verifier", "worker.mjs"):
+                (out / name).write_bytes((release.TEMPLATE / name).read_bytes())
+            record = {"release_id": "cloudflare-verifier-v0.1.1", "scanner_version": "0.1.1",
+                      "binary_sha256": release.digest(out / "aim-cloudflare-verifier"),
+                      "worker_identity": {"mode": "bundle", "sha256": release.digest(out / "worker.mjs")},
+                      "bundle_sha256": release.digest(out / "worker.mjs"), "distribution_revision": "oauth-install-r1",
+                      "approved_image": release.APPROVED_IMAGE, "binary_source_commit": release.BINARY_SOURCE, "source_commit": "pinned",
+                      "worker_lockfile_sha256": release.digest(release.TEMPLATE / "package-lock.json")}
+            self.assertEqual(record["binary_sha256"], release.APPROVED_BINARY)
+            release.export(record, out)
+            catalog = json.loads((out / "catalog.json").read_text())["default"]
+            config = json.loads((out / "template/wrangler.jsonc").read_text())
+            self.assertEqual(json.loads(config["vars"]["DEPLOYMENT_CONFIG"])["release_id"], "cloudflare-verifier-v0.1.1")
+            self.assertEqual(catalog["scanner_version"], "0.1.1")
+            self.assertTrue(catalog["template_repo_url"].endswith("/cloudflare-verifier-oauth-install-r1"))
+            self.assertIn("/cloudflare-verifier-oauth-install-r1/", catalog["signature_url"])
+            self.assertEqual(config["containers"][0]["image"], release.APPROVED_IMAGE)
+            self.assertEqual(config["triggers"]["crons"], [])
+            self.assertNotIn("RUN_NOW_SECRET", (out / "template/.dev.vars.example").read_text())
+            self.assertNotIn("RUN_NOW_SECRET", (out / "template/package.json").read_text())
+            (out / "build.json").write_text(json.dumps(record))
+            tag = release.release_tag("0.1.1", "oauth-install-r1")
+            def commands(*args, **kwargs):
+                return "pinned" if args[0] == "git" else ""
+            with mock.patch.dict("os.environ", {"GITHUB_REPOSITORY": "aidotmarket/aim-data-gateway", "GITHUB_REF": "refs/tags/" + tag}), mock.patch.object(release, "run", side_effect=commands) as run:
+                release.sign(out, "0.1.1", "oauth-install-r1")
+                checks = [c.args for c in run.call_args_list if c.args[:2] == ("cosign", "verify-blob")]
+                self.assertTrue(checks)
+                self.assertTrue(all(release.IDENTITY + tag in c for c in checks))
+            with self.assertRaises(ValueError):
+                release.sign(out, "0.1.1")
+            for version, distribution in [("0.1.2", "oauth-install-r1"), ("0.1.1", "unknown")]:
+                with self.assertRaises(ValueError):
+                    release.release_tag(version, distribution)
 
     def test_restricted_dockerfile_and_proxy_export(self):
         self.assertEqual((release.TEMPLATE / "Dockerfile").read_text().splitlines(),
