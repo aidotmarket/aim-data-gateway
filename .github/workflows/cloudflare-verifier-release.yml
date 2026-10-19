@@ -5,8 +5,8 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Embedded binary version (OAuth requires 0.1.1; no publication)'
-        default: '0.1.1'
+        description: 'Embedded binary version (OAuth requires 0.1.2; no publication)'
+        default: '0.1.2'
         required: true
         type: string
 permissions:
@@ -20,7 +20,7 @@ jobs:
           fetch-depth: 0
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version-file: go.mod
+          go-version: '1.27.2'
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: '24'
@@ -49,7 +49,7 @@ jobs:
         run: |
           python3 - <<'PY'
           import os, subprocess
-          version = os.environ['BUILD_VERSION'] or '0.1.1'
+          version = os.environ['BUILD_VERSION'] or '0.1.2'
           subprocess.run(['python3', 'scripts/cloudflare-verifier-release.py', '--version', version,
                           '--distribution', 'oauth-install-r1', '--verify-committed'], check=True)
           PY
@@ -110,7 +110,7 @@ jobs:
           release = importlib.util.module_from_spec(spec)
           spec.loader.exec_module(release)
           release.sign(pathlib.Path('dist/cloudflare-verifier').resolve(),
-                       '0.1.1', 'oauth-install-r1')
+                       '0.1.2', 'oauth-install-r1')
           PY
       - name: Publish artifacts in this repository only
         env:

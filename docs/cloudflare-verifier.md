@@ -15,15 +15,16 @@ Authority: runbooks Amendment A merged at `10f75e45`,
 key rotation and ISRG transport are mirrored without importing AWS/Lambda SDKs.
 The gateway dependency graph and shared scanner are unchanged.
 
-## OAuth distribution oauth-install-r1 (S1807 I3)
+## OAuth distribution oauth-install-r1 (S1807 I3, S1810 Amendment A5)
 
 This separately cataloged distribution adds one-use bootstrap and bounded polling.
-Existing button installations remain on their frozen source and retain manual controls.
+Existing and new legacy button installs still get v0.1.1 until a separate legacy
+follow-up; existing installations retain their manual controls.
 The OAuth distribution has no `/operator` page; the frozen button instructions below do not apply to it.
-The binary stays `cloudflare-verifier-v0.1.1`, scanner `0.1.1`, SHA-256
-`45b5bf95b784bf6cc572fe84f8faba77bb09682a3d5cb1f25cae6eb4e6a1c8a6`.
+The OAuth binary is `cloudflare-verifier-v0.1.2`, scanner `0.1.2`, SHA-256
+`305f12ed690b29891398dd39ebf3aa84d7fcda8d4bcb58703fe30e1085c15488`.
 The Container image is pinned to
-`docker.io/aidotmarket/aim-cloudflare-verifier@sha256:19b7035f37e422df2dbf1af950af9eef7c6c15e9842c61b35a9274bbb04c60ba`.
+`docker.io/aidotmarket/aim-cloudflare-verifier@sha256:194576cdeea50798511acebb0ebd294841ffb1a1553c91f7e134c38c8813f087`.
 The new Worker hash selects a new binary/Worker allowlist pair; the old pair remains.
 Use the unchanged strict catalog entry in `CLOUDFLARE_OAUTH_INSTALL_RELEASE_CATALOG`
 (default `{}`, refusing new setup), selected internally only for installer intents.
@@ -52,14 +53,57 @@ has been saved or registered (e.g. unavailable image); saved keys are never repl
 Bootstrap/config/register/first empty poll open zero R2 objects. Ready still requires
 backend observation and installer cleanup proof; 202 alone does not establish Ready.
 
-Build locally with `COMMAND_PROXY="rtk proxy" python3 scripts/cloudflare-verifier-release.py
---version 0.1.1 --distribution oauth-install-r1 --output /absolute/candidate/path`
-(on one shell line). Copy only the new `worker.mjs` into the tracked template and
-repeat with `--verify-committed`; the approved binary must remain byte-identical.
-The frozen binary source archive comes from gateway commit
-`baec125846638b65e211be9a11949d8898cdd128` (Go 1.27.1). Main
-now uses Go 1.27.2: distribution builds copy/check the approved binary and reproduce
-only the Worker, avoiding a changed binary hash from rebuilding current main.
+Build locally with Go 1.27.2 and the locked npm dependencies:
+
+```sh
+# On this darwin/arm64 host, select the actual cached toolchain; the build uses GOTOOLCHAIN=local.
+export PATH="$(rtk proxy go env GOMODCACHE)/golang.org/toolchain@v0.0.1-go1.27.2.darwin-arm64/bin:$PATH"
+command -v go
+rtk proxy env GOTOOLCHAIN=local go version
+(cd deploy/cloudflare-verifier && rtk proxy npm ci)
+COMMAND_PROXY="rtk proxy" rtk proxy python3 scripts/cloudflare-verifier-release.py \
+  --version 0.1.2 --distribution oauth-install-r1 --verify-committed \
+  --output /absolute/candidate/path
+```
+
+`BINARY_SOURCE=2b1e4692bda7516e27a55f5cc4219e3305f1929e` is the immutable
+source for both compilation and the exported source archive. Each local/CI build
+extracts a fresh `git archive BINARY_SOURCE`, then compiles with Go 1.27.2 and a
+separate cache, using the script's exact environment and linker flags:
+`-s -w -buildid= -X main.releaseID=cloudflare-verifier-v0.1.2 -X main.scannerVersion=0.1.2`.
+Both independent clean builds must match the approved SHA-256 and the committed
+template binary before signing. Investigate any mismatch and preserve the failed
+run's evidence; never select a matching pair from repeated attempts.
+`build.json.compiled_modules` records `go1.27.2`. The Worker is also bundled twice
+and checked against the committed bundle. CI signs the bytes it compiled itself.
+A frozen binary is re-pinned, never re-signed, when the toolchain moves; the
+OAuth distribution name stays `oauth-install-r1` on this binary re-pin.
+
+The image uses the three-line `FROM scratch` Dockerfile in the template.
+`SOURCE_DATE_EPOCH=1792286324` is **BINARY_SOURCE's commit time**, not the later
+template export commit time. After verifying the binary above, reproduce a local
+OCI archive with this exact command (the context contains only that Dockerfile
+and the verified executable, mode 0755). The image was built with BuildKit
+v0.33.1 using the `s1807-repro` docker-container builder:
+
+```sh
+rtk proxy mkdir /absolute/image-context
+rtk proxy cp deploy/cloudflare-verifier/Dockerfile /absolute/image-context/Dockerfile
+rtk proxy cp /absolute/candidate/path/aim-cloudflare-verifier /absolute/image-context/aim-cloudflare-verifier
+rtk proxy chmod 0755 /absolute/image-context/aim-cloudflare-verifier
+rtk proxy docker buildx build --builder s1807-repro --no-cache --platform linux/amd64 \
+  --provenance=false --sbom=false --build-arg SOURCE_DATE_EPOCH=1792286324 \
+  --output type=oci,dest=/absolute/image.tar,name=docker.io/aidotmarket/aim-cloudflare-verifier:v0.1.2,rewrite-timestamp=true,oci-mediatypes=true \
+  --metadata-file /absolute/image-metadata.json /absolute/image-context
+```
+
+Require two independent clean image builds to match the pinned manifest digest
+above, and verify the image-extracted executable equals the approved binary.
+Keep the interval between image publication and tag push short, and **run
+govulncheck and Grype immediately before the tag push** (including the existing
+`--only-fixed --fail-on high` Grype gates for binary and template SBOMs).
+A newly disclosed fixed vulnerability blocks publication and requires a new pin.
+
 The candidate uses immutable repository/tag `cloudflare-verifier-oauth-install-r1`,
 its own bundle hash and Cosign workflow identity/signatures. Frozen v0.1.1 signing
 is rejected; the original repository, tag and signatures are never replaced.

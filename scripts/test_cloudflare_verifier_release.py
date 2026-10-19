@@ -76,7 +76,7 @@ class ReleaseTests(unittest.TestCase):
             out = Path(temp)
             for name in ("aim-cloudflare-verifier", "worker.mjs"):
                 (out / name).write_bytes((release.TEMPLATE / name).read_bytes())
-            record = {"release_id": "cloudflare-verifier-v0.1.1", "scanner_version": "0.1.1",
+            record = {"release_id": "cloudflare-verifier-v0.1.2", "scanner_version": "0.1.2",
                       "binary_sha256": release.digest(out / "aim-cloudflare-verifier"),
                       "worker_identity": {"mode": "bundle", "sha256": release.digest(out / "worker.mjs")},
                       "bundle_sha256": release.digest(out / "worker.mjs"), "distribution_revision": "oauth-install-r1",
@@ -86,8 +86,8 @@ class ReleaseTests(unittest.TestCase):
             release.export(record, out)
             catalog = json.loads((out / "catalog.json").read_text())["default"]
             config = json.loads((out / "template/wrangler.jsonc").read_text())
-            self.assertEqual(json.loads(config["vars"]["DEPLOYMENT_CONFIG"])["release_id"], "cloudflare-verifier-v0.1.1")
-            self.assertEqual(catalog["scanner_version"], "0.1.1")
+            self.assertEqual(json.loads(config["vars"]["DEPLOYMENT_CONFIG"])["release_id"], "cloudflare-verifier-v0.1.2")
+            self.assertEqual(catalog["scanner_version"], "0.1.2")
             self.assertTrue(catalog["template_repo_url"].endswith("/cloudflare-verifier-oauth-install-r1"))
             self.assertIn("/cloudflare-verifier-oauth-install-r1/", catalog["signature_url"])
             self.assertEqual(config["containers"][0]["image"], release.APPROVED_IMAGE)
@@ -95,19 +95,64 @@ class ReleaseTests(unittest.TestCase):
             self.assertNotIn("RUN_NOW_SECRET", (out / "template/.dev.vars.example").read_text())
             self.assertNotIn("RUN_NOW_SECRET", (out / "template/package.json").read_text())
             (out / "build.json").write_text(json.dumps(record))
-            tag = release.release_tag("0.1.1", "oauth-install-r1")
+            tag = release.release_tag("0.1.2", "oauth-install-r1")
             def commands(*args, **kwargs):
                 return "pinned" if args[0] == "git" else ""
             with mock.patch.dict("os.environ", {"GITHUB_REPOSITORY": "aidotmarket/aim-data-gateway", "GITHUB_REF": "refs/tags/" + tag}), mock.patch.object(release, "run", side_effect=commands) as run:
-                release.sign(out, "0.1.1", "oauth-install-r1")
+                release.sign(out, "0.1.2", "oauth-install-r1")
                 checks = [c.args for c in run.call_args_list if c.args[:2] == ("cosign", "verify-blob")]
                 self.assertTrue(checks)
                 self.assertTrue(all(release.IDENTITY + tag in c for c in checks))
             with self.assertRaises(ValueError):
                 release.sign(out, "0.1.1")
-            for version, distribution in [("0.1.2", "oauth-install-r1"), ("0.1.1", "unknown")]:
+            for version, distribution in [("0.1.1", "oauth-install-r1"), ("0.1.2", "unknown")]:
                 with self.assertRaises(ValueError):
                     release.release_tag(version, distribution)
+
+    def test_oauth_rebuilt_binary_mismatch_refuses(self):
+        # Exercise both builds and the mandatory template check even without
+        # --verify-committed. Compilation is stubbed; source export is real.
+        real_run = release.run
+        approved = b"approved rebuilt binary"
+        for mismatch_build, changed_template in [(1, False), (2, False), (1, True)]:
+            with self.subTest(build=mismatch_build, template=changed_template), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                template = root / "template"
+                template.mkdir()
+                (template / "aim-cloudflare-verifier").write_bytes(b"stale" if changed_template else approved)
+                builds = []
+
+                def commands(*args, **kwargs):
+                    if args[:2] == ("git", "archive"):
+                        self.assertEqual(args[-1], release.BINARY_SOURCE)
+                        return real_run(*args, **kwargs)
+                    if args[:2] == ("go", "version"):
+                        return "go version go1.27.2 linux/amd64"
+                    if args[:2] == ("go", "build"):
+                        source = kwargs["cwd"]
+                        self.assertNotEqual(source, release.ROOT)
+                        self.assertTrue((source / "cmd/aim-cloudflare-verifier/main.go").is_file())
+                        self.assertEqual(kwargs["env"]["GOTOOLCHAIN"], "local")
+                        self.assertIn("main.scannerVersion=0.1.2", args[5])
+                        builds.append(source)
+                        binary = Path(args[args.index("-o") + 1])
+                        binary.write_bytes(b"mismatch" if len(builds) == mismatch_build and not changed_template else approved)
+                        return ""
+                    if str(args[0]).endswith("esbuild"):
+                        Path(args[-1].removeprefix("--outfile=")).write_bytes(b"bundle")
+                        return ""
+                    self.fail(f"unexpected command: {args}")
+
+                message = "committed binary differs" if changed_template else "rebuilt binary differs"
+                with mock.patch.object(release, "TEMPLATE", template), \
+                        mock.patch.object(release, "APPROVED_BINARY", hashlib.sha256(approved).hexdigest()), \
+                        mock.patch.object(release, "run", side_effect=commands):
+                    with self.assertRaisesRegex(ValueError, message):
+                        release.build("0.1.2", root / "output", distribution="oauth-install-r1")
+                self.assertEqual(len(builds), mismatch_build)
+                self.assertEqual(len(set(builds)), len(builds))
+                self.assertFalse((root / "output/build.json").exists())
+                self.assertFalse((root / "output/aim-cloudflare-verifier").exists())
 
     def test_restricted_dockerfile_and_proxy_export(self):
         self.assertEqual((release.TEMPLATE / "Dockerfile").read_text().splitlines(),
