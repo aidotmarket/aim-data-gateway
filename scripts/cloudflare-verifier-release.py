@@ -20,14 +20,14 @@ from urllib.parse import quote
 ROOT = Path(__file__).resolve().parents[1]
 TEMPLATE = ROOT / "deploy/cloudflare-verifier"
 IDENTITY = "https://github.com/aidotmarket/aim-data-gateway/.github/workflows/cloudflare-verifier-release.yml@refs/tags/"
-APPROVED_IMAGE = "docker.io/aidotmarket/aim-cloudflare-verifier@sha256:19b7035f37e422df2dbf1af950af9eef7c6c15e9842c61b35a9274bbb04c60ba"
-BINARY_SOURCE = "baec125846638b65e211be9a11949d8898cdd128"  # frozen v0.1.1 gateway source
-APPROVED_BINARY = "45b5bf95b784bf6cc572fe84f8faba77bb09682a3d5cb1f25cae6eb4e6a1c8a6"
+APPROVED_IMAGE = "docker.io/aidotmarket/aim-cloudflare-verifier@sha256:194576cdeea50798511acebb0ebd294841ffb1a1553c91f7e134c38c8813f087"
+BINARY_SOURCE = "2b1e4692bda7516e27a55f5cc4219e3305f1929e"  # v0.1.2 source, Go 1.27.2
+APPROVED_BINARY = "305f12ed690b29891398dd39ebf3aa84d7fcda8d4bcb58703fe30e1085c15488"
 
 
 def release_tag(version, distribution=None):
-    if distribution and (distribution != "oauth-install-r1" or version != "0.1.1"):
-        raise ValueError("OAuth distribution requires the approved 0.1.1 binary")
+    if distribution and (distribution != "oauth-install-r1" or version != "0.1.2"):
+        raise ValueError("oauth-install-r1 requires the approved 0.1.2 binary")
     return "cloudflare-verifier-" + distribution if distribution else "cloudflare-verifier-v" + version
 
 
@@ -64,14 +64,22 @@ def build(version, output, verify_committed=False, distribution=None):
                    "GOCACHE": str(directory / "cache"), "GOFLAGS": "", "GOEXPERIMENT": "",
                    "GOPROXY": "off", "GOSUMDB": "off"}
             binary = directory / "aim-cloudflare-verifier"
+            source = ROOT
             if distribution:
-                shutil.copyfile(TEMPLATE / "aim-cloudflare-verifier", binary)
+                source = directory / "source"
+                source.mkdir()
+                archive = directory / "source.tar"
+                run("git", "archive", "--format=tar", "--output=" + str(archive), BINARY_SOURCE)
+                with tarfile.open(archive) as inputs:
+                    inputs.extractall(source, filter="data")
+            run("go", "build", "-mod=readonly", "-trimpath", "-buildvcs=false",
+                f"-ldflags=-s -w -buildid= -X main.releaseID=cloudflare-verifier-v{version} -X main.scannerVersion={version}",
+                "-o", binary, "./cmd/aim-cloudflare-verifier", env=env, cwd=source)
+            if distribution:
                 if digest(binary) != APPROVED_BINARY:
-                    raise ValueError("frozen binary changed")
-            else:
-                run("go", "build", "-mod=readonly", "-trimpath", "-buildvcs=false",
-                    f"-ldflags=-s -w -buildid= -X main.releaseID=cloudflare-verifier-v{version} -X main.scannerVersion={version}",
-                    "-o", binary, "./cmd/aim-cloudflare-verifier", env=env)
+                    raise ValueError("rebuilt binary differs from approved binary")
+                if binary.read_bytes() != (TEMPLATE / "aim-cloudflare-verifier").read_bytes():
+                    raise ValueError("committed binary differs from rebuilt binary")
             bundle = directory / "worker.mjs"
             run(TEMPLATE / "node_modules/.bin/esbuild", "worker.ts", "--bundle", "--format=esm",
                 "--platform=neutral", "--external:cloudflare:*", "--external:node:*", "--outfile=" + str(bundle), cwd=TEMPLATE)
