@@ -53,18 +53,18 @@ has been saved or registered (e.g. unavailable image); saved keys are never repl
 Bootstrap/config/register/first empty poll open zero R2 objects. Ready still requires
 backend observation and installer cleanup proof; 202 alone does not establish Ready.
 
-Build locally with Go 1.27.2 and the locked npm dependencies:
+Build locally with Go 1.27.2 first on PATH and the locked npm dependencies:
 
 ```sh
-# On this darwin/arm64 host, select the actual cached toolchain; the build uses GOTOOLCHAIN=local.
-export PATH="$(rtk proxy go env GOMODCACHE)/golang.org/toolchain@v0.0.1-go1.27.2.darwin-arm64/bin:$PATH"
 command -v go
-rtk proxy env GOTOOLCHAIN=local go version
-(cd deploy/cloudflare-verifier && rtk proxy npm ci)
-COMMAND_PROXY="rtk proxy" rtk proxy python3 scripts/cloudflare-verifier-release.py \
+GOTOOLCHAIN=local go version
+(cd deploy/cloudflare-verifier && npm ci)
+python3 scripts/cloudflare-verifier-release.py \
   --version 0.1.2 --distribution oauth-install-r1 --verify-committed \
   --output /absolute/candidate/path
 ```
+
+Optionally set `COMMAND_PROXY` to wrap commands invoked by the release script.
 
 `BINARY_SOURCE=2b1e4692bda7516e27a55f5cc4219e3305f1929e` is the immutable
 source for both compilation and the exported source archive. Each local/CI build
@@ -87,11 +87,11 @@ and the verified executable, mode 0755). The image was built with BuildKit
 v0.33.1 using the `s1807-repro` docker-container builder:
 
 ```sh
-rtk proxy mkdir /absolute/image-context
-rtk proxy cp deploy/cloudflare-verifier/Dockerfile /absolute/image-context/Dockerfile
-rtk proxy cp /absolute/candidate/path/aim-cloudflare-verifier /absolute/image-context/aim-cloudflare-verifier
-rtk proxy chmod 0755 /absolute/image-context/aim-cloudflare-verifier
-rtk proxy docker buildx build --builder s1807-repro --no-cache --platform linux/amd64 \
+mkdir /absolute/image-context
+cp deploy/cloudflare-verifier/Dockerfile /absolute/image-context/Dockerfile
+cp /absolute/candidate/path/aim-cloudflare-verifier /absolute/image-context/aim-cloudflare-verifier
+chmod 0755 /absolute/image-context/aim-cloudflare-verifier
+docker buildx build --builder s1807-repro --no-cache --platform linux/amd64 \
   --provenance=false --sbom=false --build-arg SOURCE_DATE_EPOCH=1792286324 \
   --output type=oci,dest=/absolute/image.tar,name=docker.io/aidotmarket/aim-cloudflare-verifier:v0.1.2,rewrite-timestamp=true,oci-mediatypes=true \
   --metadata-file /absolute/image-metadata.json /absolute/image-context

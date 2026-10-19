@@ -52,7 +52,7 @@ def canonical(value):
 
 def build(version, output, verify_committed=False, distribution=None):
     release_tag(version, distribution)
-    if run("go", "version").split()[2] != "go1.27.2":
+    if run("go", "version", env={**os.environ, "GOTOOLCHAIN": "local"}).split()[2] != "go1.27.2":
         raise ValueError("use repository-pinned Go 1.27.2")
     output.mkdir(parents=True, exist_ok=True)
     binaries, bundles = [], []

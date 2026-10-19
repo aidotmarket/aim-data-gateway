@@ -28,6 +28,8 @@ jobs:
           cache-dependency-path: deploy/cloudflare-verifier/package-lock.json
       - name: Fetch pinned dependencies before offline checks
         run: |
+          # Fetch HEAD dependencies for checks below; release builds use BINARY_SOURCE.
+          # Any uncached dependency from source divergence fails closed with GOPROXY=off.
           go mod download
           npm ci --prefix deploy/cloudflare-verifier
       - name: Offline adapter, shared contract and Worker storage checks

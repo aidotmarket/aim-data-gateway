@@ -109,6 +109,19 @@ class ReleaseTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     release.release_tag(version, distribution)
 
+    def test_wrong_path_toolchain_refuses_before_build(self):
+        # Stub the local version; never invoke Go or allow auto-switching.
+        with tempfile.TemporaryDirectory() as temp:
+            output = Path(temp) / "output"
+            with mock.patch.dict("os.environ", {"GOTOOLCHAIN": "auto"}), \
+                    mock.patch.object(release, "run", return_value="go version go1.27.1 linux/amd64") as run:
+                with self.assertRaisesRegex(ValueError, r"use repository-pinned Go 1\.27\.2"):
+                    release.build("0.1.2", output, distribution="oauth-install-r1")
+            run.assert_called_once()
+            self.assertEqual(run.call_args.args, ("go", "version"))
+            self.assertEqual(run.call_args.kwargs["env"]["GOTOOLCHAIN"], "local")
+            self.assertFalse(output.exists())
+
     def test_oauth_rebuilt_binary_mismatch_refuses(self):
         # Exercise both builds and the mandatory template check even without
         # --verify-committed. Compilation is stubbed; source export is real.
