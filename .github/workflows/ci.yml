@@ -16,6 +16,8 @@ jobs:
       GOINSECURE: ''
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0 # Release tests archive the pinned BINARY_SOURCE commit.
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
@@ -33,6 +35,8 @@ jobs:
       - run: bash scripts/check-reproducible-build.sh
       - run: python3 scripts/check-module-budget.py
       - run: python3 scripts/count-lines.py
+      - name: Offline release template contract checks
+        run: python3 -m unittest discover -s scripts -p test_cloudflare_verifier_release.py
       - run: python3 scripts/check-vector-digest.py
       - run: python3 scripts/check-compose.py --self-check
       - run: python3 scripts/check-license.py --self-check
