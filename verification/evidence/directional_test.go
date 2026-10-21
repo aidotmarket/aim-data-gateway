@@ -20,10 +20,10 @@ import (
 // re-signing the tokens in Go. The backend signer test reproduces these tokens
 // through its real _sign path with test-only KMS.
 func TestE1DirectionalBackendSpecs(t *testing.T) {
-	const backend = "/var/tmp/cp81-backend-4d6875d"
+	const backend = "/var/tmp/cp81-backend-0f7b61ff"
 	sha, err := exec.Command("rtk", "proxy", "git", "-C", backend, "rev-parse", "HEAD").Output()
 	must(t, err)
-	if strings.TrimSpace(string(sha)) != "4d6875dec49e3ca877e39258ffad11ec8714bfdb" {
+	if strings.TrimSpace(string(sha)) != "0f7b61ff58463a1bd1fe40f89d824059d1bb2bc3" {
 		t.Fatalf("incorrect backend checkout: %s", sha)
 	}
 	results := []map[string]any{}
@@ -57,6 +57,6 @@ func TestE1DirectionalBackendSpecs(t *testing.T) {
 		}
 		results = append(results, r)
 	}
-	writeJSON(t, filepath.Join(conformanceDir, "directional-go.json"), map[string]any{"backend_actual": "4d6875dec49e3ca877e39258ffad11ec8714bfdb", "results": results})
+	writeJSON(t, filepath.Join(conformanceDir, "directional-go.json"), map[string]any{"backend_actual": "0f7b61ff58463a1bd1fe40f89d824059d1bb2bc3", "results": results})
 	t.Logf("backend committed scan/probe specs: %d verified", len(results))
 }

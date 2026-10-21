@@ -10,18 +10,24 @@ import copy
 import hashlib
 import json
 import pathlib
+import os
 import subprocess
 import sys
 sys.dont_write_bytecode = True
 
-OUT = pathlib.Path('/Users/max/koskadeux-state/s1791/cp81/conformance')
+OUT = pathlib.Path(os.environ['EVIDENCE_OUT']).parent/'conformance'
 def canon(value):
     return json.dumps(value, sort_keys=True, separators=(',', ':'), ensure_ascii=False, allow_nan=False).encode()
 def digest(value):
     return hashlib.sha256(canon(value)).hexdigest()
 def save(name, value):
     OUT.mkdir(parents=True, exist_ok=True)
-    (OUT/name).write_text(json.dumps(value, indent=2, sort_keys=True)+'\n')
+    path = OUT/name
+    raw = json.dumps(value, indent=2, sort_keys=True)+'\n'
+    if path.exists():
+        assert path.read_text() == raw, f'refusing to replace evidence: {path}'
+    else:
+        path.write_text(raw)
 
 def main():
     p = argparse.ArgumentParser()
@@ -44,6 +50,7 @@ def main():
     save('schema-digests.json', {**{k: {'model': models[k].__module__+'.'+models[k].__name__, 'sha256': digest(s)} for k,s in schemas.items()},
                                'legacy_signed_scan_spec': {'model': 'SignedScanSpec', 'sha256': digest(SignedScanSpec.model_json_schema())}})
     sha = subprocess.check_output(['rtk','proxy','git','-C',args.backend,'rev-parse','HEAD'], text=True).strip()
+    assert sha == '0f7b61ff58463a1bd1fe40f89d824059d1bb2bc3', sha
     if args.generate:
         root = pathlib.Path(__file__).resolve().parents[2]/'contract/vectors/verification'
         if not root.exists():
@@ -113,7 +120,7 @@ def main():
         except Exception as e:
             r['error']=str(e)
         results.append(r)
-    save('python-results.json',dict(backend_actual=sha,backend_requested='4d6875de',authority='5d8267dc',results=results))
+    save('python-results.json',dict(backend_actual=sha,backend_requested='0f7b61ff58463a1bd1fe40f89d824059d1bb2bc3',authority='5d8267dc',results=results))
     if (OUT/'go-results.json').exists() and not args.generate:
         go={r['id']:r for r in json.loads((OUT/'go-results.json').read_text())['results']}
         if set(go) != {r['id'] for r in results}:
@@ -123,7 +130,7 @@ def main():
             g=go.get(r['id'])
             if g is None or g['accept'] != r['accept'] or (r['accept'] and g.get('sha256') != r.get('sha256')):
                 differences.append(dict(id=r['id'],go=g,python=r))
-        save('diff.json',dict(authority='5d8267dc',backend_actual=sha,backend_requested='4d6875de',cases=len(results),differences=differences,zero_diff=not differences))
+        save('diff.json',dict(authority='5d8267dc',backend_actual=sha,backend_requested='0f7b61ff58463a1bd1fe40f89d824059d1bb2bc3',cases=len(results),differences=differences,zero_diff=not differences))
         print(f'{len(results)} cases; {len(differences)} divergences; backend {sha}')
     else: print(f'{len(results)} Python cases; backend {sha}; run Go then rerun Python')
 
@@ -133,7 +140,7 @@ def directional(backend, models, canonical_json_bytes):
     from app.schemas.verification_runner import AWSRunnerRegistration, CloudflareRunnerRegistration
     from services.gateway_signer.verification_contract import require_canonical_json
     sha = subprocess.check_output(['rtk', 'proxy', 'git', '-C', backend, 'rev-parse', 'HEAD'], text=True).strip()
-    assert sha == '4d6875dec49e3ca877e39258ffad11ec8714bfdb', sha
+    assert sha == '0f7b61ff58463a1bd1fe40f89d824059d1bb2bc3', sha
     original = {n: hashlib.sha256((OUT/n).read_bytes()).hexdigest()
                 for n in ['diff.json', 'corpus.json', 'python-results.json', 'go-results.json']}
     frames, validations = [], []
@@ -144,7 +151,8 @@ def directional(backend, models, canonical_json_bytes):
                       received_sha256=hashlib.sha256(raw).hexdigest(), accept=False)
         try:
             value = model.model_validate(require_canonical_json(raw))
-            result.update(accept=True, dump_sha256=hashlib.sha256(canonical_json_bytes(value.model_dump(mode='json'))).hexdigest())
+            dump = canonical_json_bytes(value.model_dump(mode='json'))
+            result.update(accept=True, dump_sha256=hashlib.sha256(dump).hexdigest(), canonical_bytes_equal_received=dump == raw)
         except Exception as exc:
             result['error'] = str(exc)
         validations.append(result)
@@ -180,6 +188,20 @@ def directional(backend, models, canonical_json_bytes):
         else:
             frame['role'] = 'local audit/log record, not sent to backend report receiver'
     corpus = {c['id']: c for c in json.loads((OUT/'corpus.json').read_text())['cases']}
+    expected = json.loads((OUT/'python-results.json').read_text())['results']
+    negatives = []
+    for prior in expected:
+        case = corpus[prior['id']]
+        if case['cls'] == 'scan_spec' or prior['accept']:
+            continue
+        try:
+            models[case['cls']].model_validate(require_canonical_json(canon(case['input'])))
+            rejected, error = False, None
+        except Exception as exc:
+            rejected, error = True, str(exc)
+        negatives.append(dict(id=case['id'], cls=case['cls'], rejected=rejected, error=error))
+    save('negative-receive.json', dict(backend_actual=sha, definition='All corpus cases invalid under the backend receiver schema; accepted mutations are positive or normalization cases, not mislabeled negatives.', results=negatives, total=len(negatives), rejected=sum(v['rejected'] for v in negatives)))
+    assert negatives and all(v['rejected'] for v in negatives)
     differences = json.loads((OUT/'diff.json').read_text())['differences']
     classified, counts = [], {}
     for diff in differences:
@@ -202,6 +224,7 @@ def directional(backend, models, canonical_json_bytes):
             rc['rc_dump_sha256'] = hashlib.sha256(canonical_json_bytes(parsed.model_dump(mode='json'))).hexdigest()
         except Exception as exc:
             rc.update(rc_accept=False, rc_error=str(exc))
+        rc['closure_citation'] = {'a': 'backend receiver model (schema-digests.json) rejects receive-direction mutation; negative-receive.json', 'b': 'internal/wire/verification.go:VerifyScan; fail-closed spec receiver; directional-go.json', 'c': 'verification_sites re-encoding audit and admission_impact on this row'}[category]
         classified.append(rc)
         counts.setdefault(cls, Counter())[category] += 1
         if category == 'c':
@@ -226,6 +249,7 @@ def directional(backend, models, canonical_json_bytes):
     aws = 'app/services/aws_verification_service.py'
     cf = 'app/services/cloudflare_verification_service.py'
     dv = 'app/services/data_verification_service.py'
+    site('app/services/verification_runner_service.py', 114, 137, False, 'Gateway registration proof canonicalizes the original decoded dict excluding key_proof; never a normalized model dump.')
     site(gw, 587, 609, False, 'Probe signature canonicalizes received decoded dict excluding signature, not ProbeReceipt.model_dump; numeric owner_consent stays numeric in signature input.')
     site(gw, 614, 623, False, 'Snapshot hash uses stored exact payload_bytes.')
     site(gw, 748, 754, True, 'Spec hash is over canonical payload.model_dump.')
@@ -252,7 +276,7 @@ def directional(backend, models, canonical_json_bytes):
             if ' = verify_gateway_jws(' in line:
                 site(file, i+1, min(i+3, len(lines)), False, 'JWS signature verification delegates to exact encoded signing input; model-dump hash checks, where present, are separate sites above.')
     result = dict(backend_requested=sha, backend_actual=sha, backend_checkout=backend,
-                  gateway_head='13167d197f8544a41caa8f19a74823c1f7f584c5', symmetric_artifact_sha256=original,
+                  gateway_head='25779953b1c27e0dec5f39ba871422a6b81f8cff', symmetric_artifact_sha256=original,
                   frames=frames, real_documents=validations,
                   real_document_counts=dict(Counter((v['cls']) for v in validations)),
                   unique_document_validations_total=sum('_http_request.frame' not in v['frame'] for v in validations),
@@ -262,12 +286,13 @@ def directional(backend, models, canonical_json_bytes):
                   category_c=[v for v in classified if v['category']=='c'], verification_sites=sites,
                   rc_verdict_changes=[v['id'] for v in classified if v['rc_accept'] != v['original_python']['accept']],
                   signed_specs=json.loads((OUT/'directional-go.json').read_text()),
+                  capture_frame_sha256={v['path']: v['sha256'] for v in frames if v['path'].endswith('.frame')},
                   limits=['Model conformance is not full database-backed receipt/admission acceptance.',
                           'Category c uses real emitter representations for the six equal-accept normalization differences; they cannot be classified by accept bits alone.',
                           'No demonstrated signature bypass: report dump-equality guard rejects normalized timestamps; probe/registration proofs retain original values.'])
     save('directional.json', result)
     assert original == {n: hashlib.sha256((OUT/n).read_bytes()).hexdigest() for n in original}
     print(f'Backend {sha}: real documents {result["real_documents_accepted"]}/{len(validations)} accepted; classifications {dict(Counter(v["category"] for v in classified))}')
-    assert all(v['accept'] for v in validations), 'real frame rejection recorded in directional.json'
+    assert all(v['accept'] and v['canonical_bytes_equal_received'] for v in validations), 'real frame rejection recorded in directional.json'
 
 if __name__ == '__main__': main()
