@@ -1,0 +1,16 @@
+{
+  "label": "TEST ONLY - synthetic opaque description",
+  "test_only_seed_hex": "4242424242424242424242424242424242424242424242424242424242424242",
+  "test_only_public_hex": "2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12",
+  "input": {
+    "columns": [],
+    "file_id": "0123456789abcdef0123456789abcdef",
+    "row_count": 0,
+    "sha256": "64c8ce024c86f307452426e7a332aed27713e3ae376733904de5f5b7aa0dcd9a"
+  },
+  "canonical": "{\"columns\":[],\"file_id\":\"0123456789abcdef0123456789abcdef\",\"row_count\":0,\"sha256\":\"64c8ce024c86f307452426e7a332aed27713e3ae376733904de5f5b7aa0dcd9a\"}",
+  "token": "eyJhbGciOiJFZERTQSIsImtpZCI6InRlc3Qtb25seS1raWQiLCJ0eXAiOiJhaW0tZGVzY3JpcHRpb24rand0In0.eyJjb2x1bW5zIjpbXSwiZmlsZV9pZCI6IjAxMjM0NTY3ODlhYmNkZWYwMTIzNDU2Nzg5YWJjZGVmIiwicm93X2NvdW50IjowLCJzaGEyNTYiOiI2NGM4Y2UwMjRjODZmMzA3NDUyNDI2ZTdhMzMyYWVkMjc3MTNlM2FlMzc2NzMzOTA0ZGU1ZjViN2FhMGRjZDlhIn0.uMik_SX-IUvqBLQyASfwsoj8oQ474ScsOjdwij2bIgwmdn_w-11OWZSoVBgouCyPGj900OsNx8yy4Nmk2nR5DA",
+  "expected_verdict": "valid",
+  "source_hex": "255044462d312e370a6f706171756520646f63756d656e740a",
+  "detected_type": "application/octet-stream"
+}

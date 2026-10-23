@@ -1,0 +1,572 @@
+{
+  "bom_csv/filtered": {
+    "sha256": "9ed169b1d95e555102ea11c70d775a7d9fd44b3e8f7564ee008547b4b598cfd8",
+    "row_count": 1,
+    "columns": [
+      {
+        "name": "﻿keep",
+        "type": "integer",
+        "null_rate_pct": 0,
+        "distinct_bucket": "1"
+      }
+    ]
+  },
+  "bom_csv/none": {
+    "sha256": "9ed169b1d95e555102ea11c70d775a7d9fd44b3e8f7564ee008547b4b598cfd8",
+    "row_count": 1,
+    "columns": [
+      {
+        "name": "﻿keep",
+        "type": "integer",
+        "null_rate_pct": 0,
+        "distinct_bucket": "1"
+      },
+      {
+        "name": "secret",
+        "type": "string",
+        "null_rate_pct": 0,
+        "distinct_bucket": "1"
+      }
+    ]
+  },
+  "csv/filtered": {
+    "sha256": "520844305b1013b27f4d5c76975cbab0e49d1440cd0088f115400258b0386513",
+    "row_count": 2,
+    "columns": [
+      {
+        "name": "public",
+        "type": "integer",
+        "null_rate_pct": 0,
+        "distinct_bucket": "2-10"
+      }
+    ]
+  },
+  "csv/none": {
+    "sha256": "520844305b1013b27f4d5c76975cbab0e49d1440cd0088f115400258b0386513",
+    "row_count": 2,
+    "columns": [
+      {
+        "name": "keep",
+        "type": "integer",
+        "null_rate_pct": 0,
+        "distinct_bucket": "2-10"
+      },
+      {
+        "name": "secret",
+        "type": "string",
+        "null_rate_pct": 0,
+        "distinct_bucket": "1"
+      }
+    ]
+  },
+  "f_dict.parquet/filtered": {
+    "sha256": "13dc173ac2a3b1999a9a41d5de82cc0c5d428d3827d3740327c430e780b17284",
+    "row_count": 4,
+    "columns": [
+      {
+        "name": "public",
+        "type": "integer",
+        "null_rate_pct": 25,
+        "distinct_bucket": "2-10"
+      },
+      {
+        "name": "f",
+        "type": "float",
+        "null_rate_pct": 25,
+        "distinct_bucket": "2-10"
+      },
+      {
+        "name": "b",
+        "type": "boolean",
+        "null_rate_pct": 25,
+        "distinct_bucket": "2-10"
+      },
+      {
+        "name": "d",
+        "type": "date",
+        "null_rate_pct": 25,
+        "distinct_bucket": "2-10"
+      },
+      {
+        "name": "ts",
+        "type": "timestamp",
+        "null_rate_pct": 25,
+        "distinct_bucket": "2-10"
+      }
+    ]
+  },
+  "f_dict.parquet/none": {
+    "sha256": "13dc173ac2a3b1999a9a41d5de82cc0c5d428d3827d3740327c430e780b17284",
+    "row_count": 4,
+    "columns": [
+      {
+        "name": "i",
+        "type": "integer",
+        "null_rate_pct": 25,
+        "distinct_bucket": "2-10"
+      },
+      {
+        "name": "f",
+        "type": "float",
+        "null_rate_pct": 25,
+        "distinct_bucket": "2-10"
+      },
+      {
+        "name": "s",
+        "type": "string",
+        "null_rate_pct": 25,
+        "distinct_bucket": "2-10"
+      },
+      {
+        "name": "b",
+        "type": "boolean",
+        "null_rate_pct": 25,
+        "distinct_bucket": "2-10"
+      },
+      {
+        "name": "d",
+        "type": "date",
+        "null_rate_pct": 25,
+        "distinct_bucket": "2-10"
+      },
+      {
+        "name": "ts",
+        "type": "timestamp",
+        "null_rate_pct": 25,
+        "distinct_bucket": "2-10"
+      }
+    ]
+  },
+  "f_gzip.parquet/filtered": {
+    "sha256": "5e24635ed3ca2b666fb68eef15bb44e6cfb1112b968ad293f562e55a648d7906",
+    "row_count": 4,
+    "columns": [
+      {
+        "name": "public",
+        "type": "integer",
+        "null_rate_pct": 25,
+        "distinct_bucket": "2-10"
+      },
+      {
+        "name": "f",
+        "type": "float",
+        "null_rate_pct": 25,
+        "distinct_bucket": "2-10"
+      },
+      {
+        "name": "b",
+        "type": "boolean",
+        "null_rate_pct": 25,
+        "distinct_bucket": "2-10"
+      },
+      {
+        "name": "d",
+        "type": "date",
+        "null_rate_pct": 25,
+        "distinct_bucket": "2-10"
+      },
+      {
+        "name": "ts",
+        "type": "timestamp",
+        "null_rate_pct": 25,
+        "distinct_bucket": "2-10"
+      }
+    ]
+  },
+  "f_gzip.parquet/none": {
+    "sha256": "5e24635ed3ca2b666fb68eef15bb44e6cfb1112b968ad293f562e55a648d7906",
+    "row_count": 4,
+    "columns": [
+      {
+        "name": "i",
+        "type": "integer",
+        "null_rate_pct": 25,
+        "distinct_bucket": "2-10"
+      },
+      {
+        "name": "f",
+        "type": "float",
+        "null_rate_pct": 25,
+        "distinct_bucket": "2-10"
+      },
+      {
+        "name": "s",
+        "type": "string",
+        "null_rate_pct": 25,
+        "distinct_bucket": "2-10"
+      },
+      {
+        "name": "b",
+        "type": "boolean",
+        "null_rate_pct": 25,
+        "distinct_bucket": "2-10"
+      },
+      {
+        "name": "d",
+        "type": "date",
+        "null_rate_pct": 25,
+        "distinct_bucket": "2-10"
+      },
+      {
+        "name": "ts",
+        "type": "timestamp",
+        "null_rate_pct": 25,
+        "distinct_bucket": "2-10"
+      }
+    ]
+  },
+  "f_none.parquet/filtered": {
+    "sha256": "ad7d997b355d50b2b88022979c35dc7b64603d8d514d5939a8d4e26511c4085c",
+    "row_count": 4,
+    "columns": [
+      {
+        "name": "public",
+        "type": "integer",
+        "null_rate_pct": 25,
+        "distinct_bucket": "2-10"
+      },
+      {
+        "name": "f",
+        "type": "float",
+        "null_rate_pct": 25,
+        "distinct_bucket": "2-10"
+      },
+      {
+        "name": "b",
+        "type": "boolean",
+        "null_rate_pct": 25,
+        "distinct_bucket": "2-10"
+      },
+      {
+        "name": "d",
+        "type": "date",
+        "null_rate_pct": 25,
+        "distinct_bucket": "2-10"
+      },
+      {
+        "name": "ts",
+        "type": "timestamp",
+        "null_rate_pct": 25,
+        "distinct_bucket": "2-10"
+      }
+    ]
+  },
+  "f_none.parquet/none": {
+    "sha256": "ad7d997b355d50b2b88022979c35dc7b64603d8d514d5939a8d4e26511c4085c",
+    "row_count": 4,
+    "columns": [
+      {
+        "name": "i",
+        "type": "integer",
+        "null_rate_pct": 25,
+        "distinct_bucket": "2-10"
+      },
+      {
+        "name": "f",
+        "type": "float",
+        "null_rate_pct": 25,
+        "distinct_bucket": "2-10"
+      },
+      {
+        "name": "s",
+        "type": "string",
+        "null_rate_pct": 25,
+        "distinct_bucket": "2-10"
+      },
+      {
+        "name": "b",
+        "type": "boolean",
+        "null_rate_pct": 25,
+        "distinct_bucket": "2-10"
+      },
+      {
+        "name": "d",
+        "type": "date",
+        "null_rate_pct": 25,
+        "distinct_bucket": "2-10"
+      },
+      {
+        "name": "ts",
+        "type": "timestamp",
+        "null_rate_pct": 25,
+        "distinct_bucket": "2-10"
+      }
+    ]
+  },
+  "f_snappy.parquet/filtered": {
+    "sha256": "cb02d573fed16cddc43ecc9c0102492f1547ab84bfc8279ded91c24e56718330",
+    "row_count": 4,
+    "columns": [
+      {
+        "name": "public",
+        "type": "integer",
+        "null_rate_pct": 25,
+        "distinct_bucket": "2-10"
+      },
+      {
+        "name": "f",
+        "type": "float",
+        "null_rate_pct": 25,
+        "distinct_bucket": "2-10"
+      },
+      {
+        "name": "b",
+        "type": "boolean",
+        "null_rate_pct": 25,
+        "distinct_bucket": "2-10"
+      },
+      {
+        "name": "d",
+        "type": "date",
+        "null_rate_pct": 25,
+        "distinct_bucket": "2-10"
+      },
+      {
+        "name": "ts",
+        "type": "timestamp",
+        "null_rate_pct": 25,
+        "distinct_bucket": "2-10"
+      }
+    ]
+  },
+  "f_snappy.parquet/none": {
+    "sha256": "cb02d573fed16cddc43ecc9c0102492f1547ab84bfc8279ded91c24e56718330",
+    "row_count": 4,
+    "columns": [
+      {
+        "name": "i",
+        "type": "integer",
+        "null_rate_pct": 25,
+        "distinct_bucket": "2-10"
+      },
+      {
+        "name": "f",
+        "type": "float",
+        "null_rate_pct": 25,
+        "distinct_bucket": "2-10"
+      },
+      {
+        "name": "s",
+        "type": "string",
+        "null_rate_pct": 25,
+        "distinct_bucket": "2-10"
+      },
+      {
+        "name": "b",
+        "type": "boolean",
+        "null_rate_pct": 25,
+        "distinct_bucket": "2-10"
+      },
+      {
+        "name": "d",
+        "type": "date",
+        "null_rate_pct": 25,
+        "distinct_bucket": "2-10"
+      },
+      {
+        "name": "ts",
+        "type": "timestamp",
+        "null_rate_pct": 25,
+        "distinct_bucket": "2-10"
+      }
+    ]
+  },
+  "f_zstd.parquet/filtered": {
+    "sha256": "a48ffc7ac85737c815c585249031e2057c7216b721f87c5e43c7f3cac5cf3e50",
+    "row_count": 4,
+    "columns": [
+      {
+        "name": "public",
+        "type": "integer",
+        "null_rate_pct": 25,
+        "distinct_bucket": "2-10"
+      },
+      {
+        "name": "f",
+        "type": "float",
+        "null_rate_pct": 25,
+        "distinct_bucket": "2-10"
+      },
+      {
+        "name": "b",
+        "type": "boolean",
+        "null_rate_pct": 25,
+        "distinct_bucket": "2-10"
+      },
+      {
+        "name": "d",
+        "type": "date",
+        "null_rate_pct": 25,
+        "distinct_bucket": "2-10"
+      },
+      {
+        "name": "ts",
+        "type": "timestamp",
+        "null_rate_pct": 25,
+        "distinct_bucket": "2-10"
+      }
+    ]
+  },
+  "f_zstd.parquet/none": {
+    "sha256": "a48ffc7ac85737c815c585249031e2057c7216b721f87c5e43c7f3cac5cf3e50",
+    "row_count": 4,
+    "columns": [
+      {
+        "name": "i",
+        "type": "integer",
+        "null_rate_pct": 25,
+        "distinct_bucket": "2-10"
+      },
+      {
+        "name": "f",
+        "type": "float",
+        "null_rate_pct": 25,
+        "distinct_bucket": "2-10"
+      },
+      {
+        "name": "s",
+        "type": "string",
+        "null_rate_pct": 25,
+        "distinct_bucket": "2-10"
+      },
+      {
+        "name": "b",
+        "type": "boolean",
+        "null_rate_pct": 25,
+        "distinct_bucket": "2-10"
+      },
+      {
+        "name": "d",
+        "type": "date",
+        "null_rate_pct": 25,
+        "distinct_bucket": "2-10"
+      },
+      {
+        "name": "ts",
+        "type": "timestamp",
+        "null_rate_pct": 25,
+        "distinct_bucket": "2-10"
+      }
+    ]
+  },
+  "header_only/filtered": {
+    "sha256": "383275a544619c53190ee84fb6bcac4ecfe4d2b515e6316eb654c02ba2f7b267",
+    "row_count": 0,
+    "columns": [
+      {
+        "name": "public",
+        "type": "string",
+        "null_rate_pct": null,
+        "distinct_bucket": "1"
+      }
+    ]
+  },
+  "header_only/none": {
+    "sha256": "383275a544619c53190ee84fb6bcac4ecfe4d2b515e6316eb654c02ba2f7b267",
+    "row_count": 0,
+    "columns": [
+      {
+        "name": "keep",
+        "type": "string",
+        "null_rate_pct": null,
+        "distinct_bucket": "1"
+      },
+      {
+        "name": "secret",
+        "type": "string",
+        "null_rate_pct": null,
+        "distinct_bucket": "1"
+      }
+    ]
+  },
+  "jsonl/filtered": {
+    "sha256": "0aa200d7c3b3e119b5eddda4d65a5c1c1499a960be0b4f66d53dd41ac38f2ba4",
+    "row_count": 2,
+    "columns": [
+      {
+        "name": "public",
+        "type": "integer",
+        "null_rate_pct": 50,
+        "distinct_bucket": "1"
+      }
+    ]
+  },
+  "jsonl/none": {
+    "sha256": "0aa200d7c3b3e119b5eddda4d65a5c1c1499a960be0b4f66d53dd41ac38f2ba4",
+    "row_count": 2,
+    "columns": [
+      {
+        "name": "keep",
+        "type": "integer",
+        "null_rate_pct": 50,
+        "distinct_bucket": "1"
+      },
+      {
+        "name": "secret",
+        "type": "string",
+        "null_rate_pct": 50,
+        "distinct_bucket": "1"
+      }
+    ]
+  },
+  "ragged_csv/filtered": {
+    "sha256": "71439ff3f42c787a416378182f78eea62b911fad9dd2084f4ff86eaff23a62fe",
+    "row_count": 2,
+    "columns": [
+      {
+        "name": "public",
+        "type": "integer",
+        "null_rate_pct": 0,
+        "distinct_bucket": "2-10"
+      }
+    ]
+  },
+  "ragged_csv/none": {
+    "sha256": "71439ff3f42c787a416378182f78eea62b911fad9dd2084f4ff86eaff23a62fe",
+    "row_count": 2,
+    "columns": [
+      {
+        "name": "keep",
+        "type": "integer",
+        "null_rate_pct": 0,
+        "distinct_bucket": "2-10"
+      },
+      {
+        "name": "secret",
+        "type": "string",
+        "null_rate_pct": 50,
+        "distinct_bucket": "1"
+      }
+    ]
+  },
+  "tsv/filtered": {
+    "sha256": "985bd4e7587e4dfe372c47163e12e31a16d0ac96e282cd70cd733a1c9f7d30ae",
+    "row_count": 1,
+    "columns": [
+      {
+        "name": "public",
+        "type": "integer",
+        "null_rate_pct": 0,
+        "distinct_bucket": "1"
+      }
+    ]
+  },
+  "tsv/none": {
+    "sha256": "985bd4e7587e4dfe372c47163e12e31a16d0ac96e282cd70cd733a1c9f7d30ae",
+    "row_count": 1,
+    "columns": [
+      {
+        "name": "keep",
+        "type": "integer",
+        "null_rate_pct": 0,
+        "distinct_bucket": "1"
+      },
+      {
+        "name": "secret",
+        "type": "string",
+        "null_rate_pct": 0,
+        "distinct_bucket": "1"
+      }
+    ]
+  }
+}

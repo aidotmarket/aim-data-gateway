@@ -231,7 +231,7 @@ func (r *Runner) Submit(ctx context.Context, token string) error {
 	if e != nil {
 		return r.refusal(ctx, a, "snapshot_invalid")
 	}
-	src := &source{runner: r, snapshot: s}
+	src := &source{runner: r, snapshot: s, ctx: ctx}
 	if e = src.metadata(ctx); e != nil {
 		return r.refusal(ctx, a, "source_unavailable")
 	}
@@ -373,7 +373,7 @@ func (r *Runner) run(ctx context.Context, j wire.ScanJob, s wire.Snapshot) error
 	started := r.now()
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Minute)
 	defer cancel()
-	src := &source{runner: r, snapshot: s}
+	src := &source{runner: r, snapshot: s, ctx: ctx}
 	affected, e := src.eligibility(ctx)
 	code := ""
 	var document map[string]any
@@ -383,7 +383,7 @@ func (r *Runner) run(ctx context.Context, j wire.ScanJob, s wire.Snapshot) error
 		result := core.ProbeResult{ObjectsDiscovered: len(s.Members), SizeClass: sizeClass(s), EstimatedMaxInputTokens: 1, SupportedCapabilities: []string{"complete_traversal", "deterministic_object_order", "fixed_bucket_aggregates", "exact_or_declared_estimated_row_counts"}}
 		if reachable && len(affected) == 0 {
 			result, e = core.Probe(ctx, src, policy(j, r.Keys))
-			reachable = e == nil
+			reachable = e == nil && len(src.failed) == 0 && ctx.Err() == nil
 		}
 		if !reachable {
 			result = core.ProbeResult{ObjectsDiscovered: len(s.Members), SizeClass: sizeClass(s), EstimatedMaxInputTokens: 8192, SupportedCapabilities: []string{"complete_traversal", "deterministic_object_order", "fixed_bucket_aggregates", "exact_or_declared_estimated_row_counts"}}
@@ -613,6 +613,8 @@ func (r *Runner) Recover(ctx context.Context) error {
 
 // source retains pinned identities. Metadata checks never open bytes.
 type source struct {
+	ctx      context.Context
+	failed   map[string]bool
 	index    map[string]wire.SnapshotMember
 	runner   *Runner
 	snapshot wire.Snapshot
@@ -661,27 +663,53 @@ func (s *source) check(ctx context.Context, id string) (ledger.File, error) {
 	return f, nil
 }
 func (s *source) Members() []core.Member {
+	if s.failed == nil {
+		s.failed = map[string]bool{}
+	}
 	out := make([]core.Member, 0, len(s.snapshot.Members))
 	for _, m := range s.snapshot.Members {
 		sha, _ := hex.DecodeString(m.SHA256)
 		v := core.Member{Identity: m.FileID, Size: m.Size}
 		copy(v.SHA256[:], sha)
-		f, e := s.runner.Ledger.File(context.Background(), m.FileID)
+		f, e := s.open(s.ctx, m.FileID)
 		if e == nil {
-			v.Format = format(f.RelativePath)
+			v.Format, e = contentFormat(s.ctx, f)
+			f.Close()
+		}
+		if e != nil {
+			s.failed[m.FileID] = true
 		}
 		out = append(out, v)
 	}
 	return out
 }
-func format(path string) string {
-	ext := strings.ToLower(filepath.Ext(path))
-	if ext == ".ndjson" {
-		return "jsonl"
+func contentFormat(ctx context.Context, f *os.File) (string, error) {
+	stop := context.AfterFunc(ctx, func() { f.Close() })
+	first := make([]byte, 4096)
+	n, e := io.ReadFull(f, first)
+	stop()
+	if ctx.Err() != nil {
+		return "", ctx.Err()
 	}
-	return strings.TrimPrefix(ext, ".")
+	if e != nil && e != io.EOF && e != io.ErrUnexpectedEOF {
+		return "", e
+	}
+	if _, e = f.Seek(0, io.SeekStart); e != nil {
+		return "", e
+	}
+	kind := map[string]string{
+		"text/csv": "csv", "text/tab-separated-values": "tsv",
+		"application/x-ndjson": "jsonl", "application/vnd.apache.parquet": "parquet",
+	}[inventory.Detect(first[:n])]
+	if kind == "" {
+		kind = "unsupported"
+	}
+	return kind, nil
 }
 func (s *source) open(ctx context.Context, id string) (*os.File, error) {
+	if s.failed[id] {
+		return nil, core.ErrArtifactChanged
+	}
 	if e := s.runner.health(); e != nil {
 		return nil, e
 	}
@@ -702,7 +730,11 @@ func (s *source) checkedOpen(ctx context.Context, id string) (*os.File, error) {
 	if e != nil {
 		return nil, e
 	}
-	names, e := s.schema(ctx, f, id)
+	kind, e := contentFormat(ctx, f)
+	var names []string
+	if e == nil {
+		names, e = s.schema(ctx, f, kind)
+	}
 	if e == nil {
 		v, err := s.runner.Ledger.File(ctx, id)
 		e = err
@@ -719,16 +751,12 @@ func (s *source) checkedOpen(ctx context.Context, id string) (*os.File, error) {
 	}
 	return f, nil
 }
-func (s *source) schema(ctx context.Context, f *os.File, id string) ([]string, error) {
-	v, e := s.runner.Ledger.File(ctx, id)
-	if e != nil {
-		return nil, e
-	}
+func (s *source) schema(ctx context.Context, f *os.File, kind string) ([]string, error) {
 	st, e := f.Stat()
 	if e != nil {
 		return nil, e
 	}
-	return core.DiscoverSchema(ctx, randomFile{f, st.Size()}, format(v.RelativePath))
+	return core.DiscoverSchema(ctx, randomFile{f, st.Size()}, kind)
 }
 func (s *source) Open(ctx context.Context, id string) (io.ReadCloser, error) {
 	f, e := s.checkedOpen(ctx, id)
@@ -777,20 +805,23 @@ func (s *source) eligibility(ctx context.Context) ([]string, error) {
 		if e != nil {
 			return out, e
 		}
-		kind := format(f.RelativePath)
-		if kind != "csv" && kind != "tsv" && kind != "jsonl" && kind != "parquet" {
-			continue
-		}
 		handle, e := s.open(ctx, m.FileID)
 		if e != nil {
 			return out, e
 		}
 		stop := context.AfterFunc(ctx, func() { handle.Close() })
-		names, e := s.schema(ctx, handle, m.FileID)
+		kind, e := contentFormat(ctx, handle)
+		var names []string
+		if e == nil && kind != "unsupported" {
+			names, e = s.schema(ctx, handle, kind)
+		}
 		stop()
 		handle.Close()
 		if e != nil {
 			return out, e
+		}
+		if kind == "unsupported" {
+			continue
 		}
 		bound += 512
 		for _, n := range names {
@@ -853,7 +884,7 @@ func (r *Runner) Preview(ctx context.Context, id, specID string) ([]byte, error)
 	if len(a.Result) > 0 {
 		return r.savedPreview(ctx, a, s)
 	}
-	src := &source{runner: r, snapshot: s}
+	src := &source{runner: r, snapshot: s, ctx: ctx}
 	ids, e := src.eligibility(ctx)
 	if e != nil {
 		return nil, errors.New("verification preview refused")

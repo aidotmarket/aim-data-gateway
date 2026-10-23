@@ -358,7 +358,7 @@ func TestE7RecheckedAtEveryMemberOpen(t *testing.T) {
 		t.Fatal(e)
 	}
 	_, _, snapshot, _ := f.sourceJob(t, "jsonl", data, "scan")
-	src := &source{runner: f.r, snapshot: snapshot}
+	src := &source{runner: f.r, snapshot: snapshot, ctx: context.Background()}
 	if ids, e := src.eligibility(context.Background()); e != nil || len(ids) != 0 {
 		t.Fatal(ids, e)
 	}
