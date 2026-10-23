@@ -1,0 +1,6 @@
+--- a/aim-data-gateway.md
++++ b/aim-data-gateway.md
+@@ -28 +28,2 @@
+-- Line caps: `scripts/count-lines.py` measures the gateway (≤ 9,275, Amendment B) and AWS-only code (≤ 3,500) separately; the gateway binary must not link AWS, Lambda or `golang.org/x/text` modules.
++- Amendment B update (BQ-GATEWAY-OPAQUE-FILES chunk A; Max, Event Ledger `89cefcdb`, 2026-10-23): gateway cap raised from 9,275 to **9,325** non-test Go lines; chunk A measures **9,325** using `python3 scripts/count-lines.py`. Counting exclusions and the AWS/Cloudflare budgets are unchanged.
++- Line caps: `scripts/count-lines.py` measures the gateway (≤ 9,325, Amendment B) and AWS-only code (≤ 3,500) separately; the gateway binary must not link AWS, Lambda or `golang.org/x/text` modules.

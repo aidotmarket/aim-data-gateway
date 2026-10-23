@@ -2,6 +2,7 @@ package profile
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/binary"
@@ -13,6 +14,7 @@ import (
 	"io"
 	"math"
 	"math/bits"
+	"os"
 	"sort"
 	"strconv"
 	"time"
@@ -157,7 +159,7 @@ func File(r inventory.Record, rule config.Columns) (Description, error) {
 	return FileContext(ctx, r, rule)
 }
 
-var ErrUnsupportedFormat = errors.New("unsupported_format")
+var errTooManyColumns = errors.New("too many columns")
 var ErrGatewayTimeout = errors.New("gateway_timeout")
 
 func FileContext(ctx context.Context, r inventory.Record, rule config.Columns) (Description, error) {
@@ -166,23 +168,10 @@ func FileContext(ctx context.Context, r inventory.Record, rule config.Columns) (
 	}
 	sha := hex.EncodeToString(r.SHA256[:])
 	switch r.Phase1.MediaType {
-	case "text/csv", "text/tab-separated-values":
-		return delimited(ctx, r, rule, sha)
-	case "application/x-ndjson":
-		return jsonLines(ctx, r, rule, sha)
-	case "application/vnd.apache.parquet":
-		return parquetFile(ctx, r, rule, sha)
+	case "text/csv", "text/tab-separated-values", "application/x-ndjson", "application/vnd.apache.parquet":
 	default:
-		return Description{}, ErrUnsupportedFormat
+		return opaque(sha), nil
 	}
-}
-func checkDeadline(ctx context.Context) error {
-	if ctx.Err() != nil {
-		return ErrGatewayTimeout
-	}
-	return nil
-}
-func delimited(ctx context.Context, r inventory.Record, rule config.Columns, sha string) (Description, error) {
 	f, e := r.Open()
 	if e != nil {
 		return Description{}, e
@@ -190,14 +179,62 @@ func delimited(ctx context.Context, r inventory.Record, rule config.Columns, sha
 	defer f.Close()
 	stop := context.AfterFunc(ctx, func() { f.Close() })
 	defer stop()
-	cr := csv.NewReader(f)
-	if r.Phase1.MediaType == "text/tab-separated-values" {
+	switch r.Phase1.MediaType {
+	case "application/x-ndjson":
+		return jsonLines(ctx, f, rule, sha)
+	case "application/vnd.apache.parquet":
+		return parquetFile(ctx, f, rule, sha)
+	}
+	return delimited(ctx, f, r.Phase1.MediaType, rule, sha)
+}
+func opaque(sha string) Description { return Description{SHA256: sha, Columns: []Column{}} }
+
+type rec struct {
+	r   io.Reader
+	err error
+}
+
+func (r *rec) Read(p []byte) (int, error) {
+	n, e := r.r.Read(p)
+	if e != nil && e != io.EOF && r.err == nil {
+		r.err = e
+	}
+	return n, e
+}
+func (r *rec) fallback(ctx context.Context, sha string, e error) (Description, error) {
+	var ce *csv.ParseError
+	var se *json.SyntaxError
+	var te *json.UnmarshalTypeError
+	if errors.As(e, &ce) && (errors.Is(e, csv.ErrBareQuote) || errors.Is(e, csv.ErrQuote)) || errors.As(e, &se) || errors.As(e, &te) || errors.Is(e, errTooManyColumns) || errors.Is(e, bufio.ErrTooLong) {
+		_, e = io.Copy(io.Discard, r)
+		if r.err != nil {
+			e = r.err
+		}
+	}
+	if timeout := checkDeadline(ctx); timeout != nil {
+		e = timeout
+	}
+	if e != nil {
+		return Description{}, e
+	}
+	return opaque(sha), nil
+}
+func checkDeadline(ctx context.Context) error {
+	if ctx.Err() != nil {
+		return ErrGatewayTimeout
+	}
+	return nil
+}
+func delimited(ctx context.Context, f io.Reader, mediaType string, rule config.Columns, sha string) (Description, error) {
+	rr := &rec{r: f}
+	cr := csv.NewReader(rr)
+	if mediaType == "text/tab-separated-values" {
 		cr.Comma = '\t'
 	}
 	cr.FieldsPerRecord = -1
 	names, e := cr.Read()
 	if e != nil {
-		return Description{}, e
+		return rr.fallback(ctx, sha, e)
 	}
 	acc := make([]*accumulator, len(names))
 	for i, n := range names {
@@ -215,10 +252,7 @@ func delimited(ctx context.Context, r inventory.Record, rule config.Columns, sha
 			break
 		}
 		if e != nil {
-			if timeout := checkDeadline(ctx); timeout != nil {
-				return Description{}, timeout
-			}
-			return Description{}, e
+			return rr.fallback(ctx, sha, e)
 		}
 		rows++
 		for i, a := range acc {
@@ -234,15 +268,9 @@ func delimited(ctx context.Context, r inventory.Record, rule config.Columns, sha
 	}
 	return describe(acc, rows, rule, sha), nil
 }
-func jsonLines(ctx context.Context, r inventory.Record, rule config.Columns, sha string) (Description, error) {
-	f, e := r.Open()
-	if e != nil {
-		return Description{}, e
-	}
-	defer f.Close()
-	stop := context.AfterFunc(ctx, func() { f.Close() })
-	defer stop()
-	sc := bufio.NewScanner(f)
+func jsonLines(ctx context.Context, f io.Reader, rule config.Columns, sha string) (Description, error) {
+	rr := &rec{r: f}
+	sc := bufio.NewScanner(rr)
 	sc.Buffer(make([]byte, 64*1024), 16<<20)
 	acc := map[string]*accumulator{}
 	order := []string{}
@@ -251,9 +279,12 @@ func jsonLines(ctx context.Context, r inventory.Record, rule config.Columns, sha
 		if e := checkDeadline(ctx); e != nil {
 			return Description{}, e
 		}
+		if len(bytes.TrimSpace(sc.Bytes())) == 0 {
+			continue
+		}
 		var obj map[string]json.RawMessage
 		if e := json.Unmarshal(sc.Bytes(), &obj); e != nil {
-			return Description{}, e
+			return rr.fallback(ctx, sha, e)
 		}
 		rows++
 		for k, v := range obj {
@@ -263,7 +294,7 @@ func jsonLines(ctx context.Context, r inventory.Record, rule config.Columns, sha
 			a := acc[k]
 			if a == nil {
 				if len(acc) >= 1000 {
-					return Description{}, errors.New("too many columns")
+					return rr.fallback(ctx, sha, errTooManyColumns)
 				}
 				a = &accumulator{name: k, nulls: rows - 1}
 				acc[k] = a
@@ -286,10 +317,7 @@ func jsonLines(ctx context.Context, r inventory.Record, rule config.Columns, sha
 		}
 	}
 	if e := sc.Err(); e != nil {
-		if timeout := checkDeadline(ctx); timeout != nil {
-			return Description{}, timeout
-		}
-		return Description{}, e
+		return rr.fallback(ctx, sha, e)
 	}
 	cols := make([]*accumulator, 0, len(order))
 	sort.Strings(order)
@@ -298,14 +326,7 @@ func jsonLines(ctx context.Context, r inventory.Record, rule config.Columns, sha
 	}
 	return describe(cols, rows, rule, sha), nil
 }
-func parquetFile(ctx context.Context, r inventory.Record, rule config.Columns, sha string) (Description, error) {
-	f, e := r.Open()
-	if e != nil {
-		return Description{}, e
-	}
-	defer f.Close()
-	stop := context.AfterFunc(ctx, func() { f.Close() })
-	defer stop()
+func parquetFile(ctx context.Context, f *os.File, rule config.Columns, sha string) (Description, error) {
 	pf, e := file.NewParquetReader(f)
 	if e != nil {
 		return Description{}, e

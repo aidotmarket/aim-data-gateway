@@ -1,0 +1,16 @@
+{
+  "label": "TEST ONLY - synthetic opaque description",
+  "test_only_seed_hex": "4242424242424242424242424242424242424242424242424242424242424242",
+  "test_only_public_hex": "2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12",
+  "input": {
+    "columns": [],
+    "file_id": "0123456789abcdef0123456789abcdef",
+    "row_count": 0,
+    "sha256": "becb5e3f51f56e99a8451821a2822a1e7aa28a6ad8c497550820fed3936cd929"
+  },
+  "canonical": "{\"columns\":[],\"file_id\":\"0123456789abcdef0123456789abcdef\",\"row_count\":0,\"sha256\":\"becb5e3f51f56e99a8451821a2822a1e7aa28a6ad8c497550820fed3936cd929\"}",
+  "token": "eyJhbGciOiJFZERTQSIsImtpZCI6InRlc3Qtb25seS1raWQiLCJ0eXAiOiJhaW0tZGVzY3JpcHRpb24rand0In0.eyJjb2x1bW5zIjpbXSwiZmlsZV9pZCI6IjAxMjM0NTY3ODlhYmNkZWYwMTIzNDU2Nzg5YWJjZGVmIiwicm93X2NvdW50IjowLCJzaGEyNTYiOiJiZWNiNWUzZjUxZjU2ZTk5YTg0NTE4MjFhMjgyMmExZTdhYTI4YTZhZDhjNDk3NTUwODIwZmVkMzkzNmNkOTI5In0.W8g3QFog9qkGngup_6TarZMaGV0sDsoEwPYxnOK1E4udW2Mqd2pm_bbyLiChWZ3ce6-3kx0W0_Aylxa6-47oAw",
+  "expected_verdict": "valid",
+  "source_hex": "48656c6c6f2c207265616465720a412062617265202271756f746520696e2070726f73650a",
+  "detected_type": "text/csv"
+}

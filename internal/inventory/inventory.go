@@ -247,10 +247,12 @@ func readFileContext(ctx context.Context, f *os.File) (Record, error) {
 		}
 	}
 	copy(r.SHA256[:], full.Sum(nil))
-	r.Phase1.MediaType = detect(first)
+	r.Phase1.MediaType = Detect(first)
 	return r, nil
 }
-func detect(b []byte) string {
+
+// Detect classifies the inventory prefix from content, independently of its name.
+func Detect(b []byte) string {
 	if len(b) >= 4 && bytes.Equal(b[:4], []byte("PAR1")) {
 		return "application/vnd.apache.parquet"
 	}

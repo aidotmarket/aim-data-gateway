@@ -417,9 +417,6 @@ func (c *Client) Connect(ctx context.Context) error {
 			code := "instruction_failed"
 			if i.Op == "describe" {
 				code = "read_error"
-				if errors.Is(e, profile.ErrUnsupportedFormat) {
-					code = "unsupported_format"
-				}
 				if errors.Is(e, profile.ErrGatewayTimeout) || errors.Is(e, context.DeadlineExceeded) {
 					code = "gateway_timeout"
 				}
