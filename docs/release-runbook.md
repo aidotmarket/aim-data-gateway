@@ -4,6 +4,8 @@ The `Release` workflow builds the existing `v<semver>` tag. A tag push publishes
 the image and release assets; a manual workflow dispatch is a dry run and does
 not push an image or create a release.
 
+From this change, the next AWS verifier release (built with `go-version-file: go.mod`) carries new binary hashes because of Go 1.27.3; the Cloudflare reproducible rebuild of v0.1.2 stays on Go 1.27.2; coordinate any verifier catalog or allowlist change with Vulcan first.
+
 Before a release, dispatch `release.yml` from the intended workflow ref with
 `tag` set to an existing tag. The workflow file comes from the dispatch ref;
 checkout and the build source come from the tag. Wait for the image job to
