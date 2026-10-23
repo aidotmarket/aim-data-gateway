@@ -25,8 +25,10 @@ setting is changed by this build.
   scanner source. Both verifier binaries must compare byte for byte with the
   parent using the release Go toolchain, target architectures and linker flags.
 - The three new signed description vectors include source bytes and their
-  detected media types. Chunk B carries their identical backend copies under
-  `tests/contract/gateway/`; `contract/VECTORS.sha256` pins the gateway copy.
+  detected media types; `contract/VECTORS.sha256` pins the gateway copy. The
+  backend copies under `tests/contract/gateway/` are **not yet added** (chunk B,
+  ai-market-backend `ab7e7ec3`, deferred them). Add byte-identical copies, the
+  manifest update and a passing backend contract check before this release.
 
 ## Later operator procedure (not executed)
 
@@ -61,5 +63,5 @@ The gateway measures **9,325 non-test Go lines** with
 `python3 scripts/count-lines.py`, above the previous 9,275 cap. The approved cap
 is 9,325 (Max, Event Ledger `89cefcdb`, 2026-10-23); both the gateway cap and
 `over_budget` default change in this PR. Counting rules and all other budgets are
-unchanged. The adjacent `aim-data-gateway-amendment-b.patch` prepares the required
-note for `runbooks/aim-data-gateway.md` without writing to a second checkout.
+unchanged. The matching note in `aim-data-gateway.md` (aidotmarket/runbooks) is
+updated in its own reviewed runbooks PR when this change merges.
