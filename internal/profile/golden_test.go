@@ -29,6 +29,9 @@ func TestExistingTableDescriptionsGolden(t *testing.T) {
 		t.Fatal(e)
 	}
 	for _, r := range parquet {
+		if filepath.Dir(r.RelativePath) != "." {
+			continue // Nested fixtures have their own opaque assertions.
+		}
 		records[filepath.Base(r.Path)] = r
 	}
 	got := map[string]Description{}

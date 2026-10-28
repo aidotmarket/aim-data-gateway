@@ -1,0 +1,12 @@
+{
+  "label": "TEST ONLY - synthetic description failure",
+  "test_only_seed_hex": "4242424242424242424242424242424242424242424242424242424242424242",
+  "test_only_public_hex": "2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12",
+  "input": {
+    "failure_code": "file_missing",
+    "file_id": "0123456789abcdef0123456789abcdef"
+  },
+  "canonical": "{\"failure_code\":\"file_missing\",\"file_id\":\"0123456789abcdef0123456789abcdef\"}",
+  "token": "eyJhbGciOiJFZERTQSIsImtpZCI6InRlc3Qtb25seS1raWQiLCJ0eXAiOiJhaW0tZGVzY3JpcHRpb24rand0In0.eyJmYWlsdXJlX2NvZGUiOiJmaWxlX21pc3NpbmciLCJmaWxlX2lkIjoiMDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWYifQ.n-yrnVN0k2yn1o1-NSf9Zk_gQ09CHXq8Tytu9wEJmpFiSykHgs7pFQnnoZO7hVmLrG2niUmDTHHUce87RdAjDw",
+  "expected_verdict": "invalid"
+}

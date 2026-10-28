@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 import sys
 
-TYPES = ("hello", "inventory", "description", "receipt", "canary_result",
+TYPES = ("hello", "inventory", "description", "description_failure", "receipt", "canary_result",
          "revocation_ack", "offer_ack", "prepare_ack", "error")
 OUTPUT = Path("docs/outbound-messages.md")
 
@@ -16,7 +16,7 @@ def render() -> str:
         vector = json.loads((Path("contract/vectors") / f"{name}.json").read_text())
         if vector.get("expected_verdict") != "valid" or not isinstance(vector.get("input"), dict):
             raise ValueError(f"missing valid input for {name}")
-        lines.extend((f"## `{name}`", "", "```json", json.dumps(vector["input"], indent=2, sort_keys=True), "```", ""))
+        lines.extend((f"## `{name}`" if name != "description_failure" else "## `description` (failure)", "", "```json", json.dumps(vector["input"], indent=2, sort_keys=True), "```", ""))
     lines.extend(("## `scan_report`", "", "Identity-key audit envelope; successful, terminal and probe receipts use the separate local receipt key.",
                   "Decoded documents are Python-canonical JSON (700 KiB maximum); the whole audit frame remains at most 1 MiB.", ""))
     for name in ("registration", "probe_report", "scan_report", "terminal_report"):

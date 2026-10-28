@@ -441,10 +441,17 @@ func verify(kind, token string, keys map[string]ed25519.PublicKey) error {
 		_, err := wire.VerifyInstruction(token, keys)
 		return err
 	default:
-		return wire.VerifyGatewayAnswer(token, kind, keys, newAnswer(kind))
+		name := kind
+		if strings.HasPrefix(kind, "description_failure") {
+			name = "description"
+		}
+		return wire.VerifyGatewayAnswer(token, name, keys, newAnswer(kind))
 	}
 }
 func newAnswer(kind string) any {
+	if strings.HasPrefix(kind, "description_failure") {
+		return new(wire.DescriptionFailure)
+	}
 	switch kind {
 	case "revoke_ack":
 		return new(wire.RevokeAck)

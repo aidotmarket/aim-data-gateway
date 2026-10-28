@@ -333,6 +333,11 @@ func parquetFile(ctx context.Context, f *os.File, rule config.Columns, sha strin
 	}
 	defer pf.Close()
 	sch := pf.MetaData().Schema
+	for i := 0; i < sch.NumColumns(); i++ {
+		if sch.Column(i).MaxRepetitionLevel() != 0 || sch.Column(i).MaxDefinitionLevel() > 1 {
+			return opaque(sha), nil
+		}
+	}
 	rows := pf.NumRows()
 	acc := make([]*accumulator, sch.NumColumns())
 	for i := range acc {
@@ -412,10 +417,6 @@ func parquetType(t parquet.Type) string {
 	}
 }
 func readParquetColumn(ctx context.Context, c file.ColumnChunkReader, rows int64, a *accumulator) error {
-	// Flat columns have at most one value per row; nested columns are rejected until a flattening rule is specified.
-	if c.Descriptor().MaxRepetitionLevel() > 0 {
-		return errors.New("nested parquet column unsupported")
-	}
 	defs := make([]int16, 1024)
 	reps := make([]int16, 1024)
 	remaining := rows
