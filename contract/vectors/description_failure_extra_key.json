@@ -1,0 +1,13 @@
+{
+  "label": "TEST ONLY - synthetic description failure",
+  "test_only_seed_hex": "4242424242424242424242424242424242424242424242424242424242424242",
+  "test_only_public_hex": "2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12",
+  "input": {
+    "extra": true,
+    "failure_code": "read_error",
+    "file_id": "0123456789abcdef0123456789abcdef"
+  },
+  "canonical": "{\"extra\":true,\"failure_code\":\"read_error\",\"file_id\":\"0123456789abcdef0123456789abcdef\"}",
+  "token": "eyJhbGciOiJFZERTQSIsImtpZCI6InRlc3Qtb25seS1raWQiLCJ0eXAiOiJhaW0tZGVzY3JpcHRpb24rand0In0.eyJleHRyYSI6dHJ1ZSwiZmFpbHVyZV9jb2RlIjoicmVhZF9lcnJvciIsImZpbGVfaWQiOiIwMTIzNDU2Nzg5YWJjZGVmMDEyMzQ1Njc4OWFiY2RlZiJ9.i_bewFbu1AI6AGqvn_9KfjmhCduMvlIQq86-qLjZjWT5zx7ps8U0eAzwb4Rya0aNIeHAFoyM4HJDHd8Siq9fCQ",
+  "expected_verdict": "invalid"
+}

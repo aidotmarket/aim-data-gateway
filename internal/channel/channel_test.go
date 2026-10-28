@@ -318,6 +318,8 @@ func TestDescribeFailureCodeInAudit(t *testing.T) {
 		err        error
 	}{
 		{"read", "read_error", io.ErrUnexpectedEOF},
+		{"missing", "read_error", errors.New("file_missing")},
+		{"non_describe", "instruction_failed", io.ErrUnexpectedEOF},
 		{"timeout", "gateway_timeout", profile.ErrGatewayTimeout},
 		{"deadline", "gateway_timeout", context.DeadlineExceeded},
 	} {
@@ -331,7 +333,13 @@ func TestDescribeFailureCodeInAudit(t *testing.T) {
 			c.Complete = func(context.Context, string) error { t.Error("failed description was marked seen"); return nil }
 			now := time.Now().Unix()
 			i := wire.Instruction{Op: "describe", Audience: c.State.Pins.GatewayID, IID: "44444444-4444-4444-8444-444444444444", IssuedAt: now, ExpiresAt: now + 900, FileID: "0123456789abcdef0123456789abcdef", ConfirmationID: "33333333-3333-4333-8333-333333333333"}
-			token, err := wire.Sign("aim-describe+jwt", "listing", i, key)
+			typ := "aim-describe+jwt"
+			if tc.name == "non_describe" {
+				i.Op, i.ExpiresAt, i.ConfirmationID = "unoffer", 0, ""
+				i.SHA256, i.ListingVersionID = strings.Repeat("a", 64), "33333333-3333-4333-8333-333333333333"
+				typ = "aim-offer+jwt"
+			}
+			token, err := wire.Sign(typ, "listing", i, key)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -347,8 +355,18 @@ func TestDescribeFailureCodeInAudit(t *testing.T) {
 					return
 				}
 				var entry audit.Entry
-				if json.Unmarshal(raw, &entry) != nil || entry.MessageType != "error" || !strings.Contains(string(entry.Body), tc.code) {
-					t.Errorf("wrong failure code: %s", raw)
+				if err := json.Unmarshal(raw, &entry); err != nil {
+					t.Error(err)
+					return
+				}
+				wantType := "description"
+				wantBody := any(wire.DescriptionFailure{FileID: i.FileID, FailureCode: tc.code})
+				if tc.name == "non_describe" {
+					wantType, wantBody = "error", wire.GatewayError{Code: tc.code, Message: tc.code}
+				}
+				want, _ := wire.Canonical(wantBody)
+				if entry.MessageType != wantType || !bytes.Equal(entry.Body, want) {
+					t.Errorf("wrong failure body: %s", raw)
 				}
 				_ = ws.Close(websocket.StatusNormalClosure, "done")
 			})

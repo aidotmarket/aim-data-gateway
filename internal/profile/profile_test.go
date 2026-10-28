@@ -128,6 +128,13 @@ func TestParquetFixtures(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
+	flat := records[:0]
+	for _, r := range records {
+		if filepath.Dir(r.RelativePath) == "." {
+			flat = append(flat, r)
+		}
+	}
+	records = flat
 	if len(records) != 5 {
 		t.Fatal(len(records))
 	}

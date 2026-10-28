@@ -52,6 +52,15 @@ Examples are synthetic test data. The local signed audit log records each outbou
 }
 ```
 
+## `description` (failure)
+
+```json
+{
+  "failure_code": "read_error",
+  "file_id": "0123456789abcdef0123456789abcdef"
+}
+```
+
 ## `receipt`
 
 ```json

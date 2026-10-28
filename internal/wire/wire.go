@@ -105,6 +105,10 @@ type Description struct {
 	RowCount int64    `json:"row_count"`
 	Columns  []Column `json:"columns"`
 }
+type DescriptionFailure struct {
+	FileID      string `json:"file_id"`
+	FailureCode string `json:"failure_code"`
+}
 type Column struct {
 	Name           string `json:"name"`
 	Type           string `json:"type"`
@@ -462,6 +466,12 @@ func VerifyGatewayAnswer(token, name string, keys map[string]ed25519.PublicKey, 
 		}
 		return required(token, "generation", "files")
 	case "description":
+		if v, ok := out.(*DescriptionFailure); ok {
+			if !hex32.MatchString(v.FileID) || !slices.Contains([]string{"unsupported_format", "read_error", "gateway_timeout"}, v.FailureCode) {
+				return errors.New("invalid description failure")
+			}
+			return required(token, "file_id", "failure_code")
+		}
 		v, ok := out.(*Description)
 		if !ok || !hex32.MatchString(v.FileID) || !hex64.MatchString(v.SHA256) || v.Columns == nil {
 			return errors.New("invalid description")

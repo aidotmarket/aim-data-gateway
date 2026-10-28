@@ -422,6 +422,9 @@ func (c *Client) Connect(ctx context.Context) error {
 				}
 			}
 			typ, body = "error", wire.GatewayError{Code: code, Message: code}
+			if i.Op == "describe" {
+				typ, body = "description", wire.DescriptionFailure{FileID: i.FileID, FailureCode: code}
+			}
 		}
 		if typ != "" {
 			if _, e = c.Log.Append(typ, body); e != nil {

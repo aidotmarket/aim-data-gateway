@@ -1,0 +1,15 @@
+{
+  "label": "TEST ONLY - synthetic description failure",
+  "test_only_seed_hex": "4242424242424242424242424242424242424242424242424242424242424242",
+  "test_only_public_hex": "2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12",
+  "input": {
+    "columns": [],
+    "failure_code": "read_error",
+    "file_id": "0123456789abcdef0123456789abcdef",
+    "row_count": 0,
+    "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  "canonical": "{\"columns\":[],\"failure_code\":\"read_error\",\"file_id\":\"0123456789abcdef0123456789abcdef\",\"row_count\":0,\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}",
+  "token": "eyJhbGciOiJFZERTQSIsImtpZCI6InRlc3Qtb25seS1raWQiLCJ0eXAiOiJhaW0tZGVzY3JpcHRpb24rand0In0.eyJjb2x1bW5zIjpbXSwiZmFpbHVyZV9jb2RlIjoicmVhZF9lcnJvciIsImZpbGVfaWQiOiIwMTIzNDU2Nzg5YWJjZGVmMDEyMzQ1Njc4OWFiY2RlZiIsInJvd19jb3VudCI6MCwic2hhMjU2IjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSJ9.3lx0zRVH0ld7weJoXdij5sE6eKPoJSEfewCMu1gv5klGTG73Sekm3elO2HUfbCdso41BsgflW-fc5akML85TDQ",
+  "expected_verdict": "invalid"
+}
