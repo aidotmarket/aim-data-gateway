@@ -164,8 +164,11 @@ func TestExactResourcesAndRuntime(t *testing.T) {
 		"PollSchedule": "AWS::Scheduler::Schedule", "LogGroup": "AWS::Logs::LogGroup"})
 	f := props(r, "VerifierFunction")
 	for k, want := range (object{"Runtime": "provided.al2023", "Handler": "bootstrap", "MemorySize": 1769,
-		"Architectures": []string{"arm64"}, "Timeout": 900, "ReservedConcurrentExecutions": 1}) {
+		"Architectures": []string{"arm64"}, "Timeout": 900}) {
 		equal(t, f[k], want)
+	}
+	if _, ok := f["ReservedConcurrentExecutions"]; ok {
+		t.Fatal("reserved concurrency prevents installation with the default 10-concurrency quota")
 	}
 	equal(t, f["Code"], object{"S3Bucket": "public-eu-north-1", "S3Key": parameters()["ArtifactKey"], "S3ObjectVersion": "immutable-version"})
 	// Ref enforces creation of the explicit log group before the function.

@@ -414,7 +414,6 @@
           "Ref": "MemorySize"
         },
         "Timeout": 900,
-        "ReservedConcurrentExecutions": 1,
         "Role": {
           "Fn::GetAtt": [
             "ExecutionRole",
