@@ -8,7 +8,9 @@ The binary includes the 2b-1 Gate 3 fold; polling is configured only in Schedule
 
 Supported regions: `eu-north-1`, `eu-west-1`, `eu-central-1`, `us-east-1`,
 `us-west-2`. The stack region must equal the connection/bucket region. Memory is
-1769 MB by default, optionally 3008 MB; timeout 900 seconds, concurrency one.
+1769 MB by default, optionally 3008 MB; timeout 900 seconds, no reserved concurrency
+(works on accounts with the default 10-concurrency quota). Overlapping invocations
+are safe because of the conditional ledger.
 Admission remains text ≤6 GB / Parquet ≤1 GB with the shared mixed budget,
 17,033 members, 780-second scan deadline and 1,920-second terminal deadline from
 pickup. A free probe traverses the source and incurs AWS compute cost.
