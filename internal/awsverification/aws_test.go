@@ -3,17 +3,21 @@ package awsverification
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/aws/retry"
 	"github.com/aws/aws-sdk-go-v2/credentials"
+	d "github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/aws/aws-sdk-go-v2/service/secretsmanager"
@@ -21,25 +25,57 @@ import (
 )
 
 type fakeSecretsAPI struct {
-	value string
-	err   error
-	puts  []*secretsmanager.PutSecretValueInput
+	mu       sync.Mutex
+	value    string
+	version  string
+	versions map[string]string
+	err      error
+	puts     []*secretsmanager.PutSecretValueInput
 }
 
-func (s *fakeSecretsAPI) GetSecretValue(context.Context, *secretsmanager.GetSecretValueInput, ...func(*secretsmanager.Options)) (*secretsmanager.GetSecretValueOutput, error) {
+func (s *fakeSecretsAPI) GetSecretValue(_ context.Context, i *secretsmanager.GetSecretValueInput, _ ...func(*secretsmanager.Options)) (*secretsmanager.GetSecretValueOutput, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.err != nil {
 		return nil, s.err
 	}
-	return &secretsmanager.GetSecretValueOutput{SecretString: aws.String(s.value)}, nil
+	value, version := s.value, s.version
+	if i.VersionId != nil {
+		var ok bool
+		version = *i.VersionId
+		value, ok = s.versions[version]
+		if !ok {
+			return nil, &sm.ResourceNotFoundException{Message: aws.String("version missing")}
+		}
+	} else if value == "" {
+		return nil, &sm.ResourceNotFoundException{Message: aws.String("Can't find secret value for staging label: AWSCURRENT")}
+	}
+	return &secretsmanager.GetSecretValueOutput{SecretString: aws.String(value), VersionId: aws.String(version)}, nil
 }
 func (s *fakeSecretsAPI) PutSecretValue(_ context.Context, i *secretsmanager.PutSecretValueInput, _ ...func(*secretsmanager.Options)) (*secretsmanager.PutSecretValueOutput, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.puts = append(s.puts, i)
-	s.value = aws.ToString(i.SecretString)
-	return &secretsmanager.PutSecretValueOutput{}, s.err
+	if s.err != nil {
+		return nil, s.err
+	}
+	version, value := aws.ToString(i.ClientRequestToken), aws.ToString(i.SecretString)
+	if old, ok := s.versions[version]; ok {
+		if old != value {
+			return nil, ErrRefused
+		}
+	} else {
+		if s.versions == nil {
+			s.versions = map[string]string{}
+		}
+		s.versions[version] = value
+		s.value, s.version = value, version
+	}
+	return &secretsmanager.PutSecretValueOutput{VersionId: aws.String(version)}, nil
 }
 func TestSecretsAdapterEmptyUnavailableAndRetainedMaterial(t *testing.T) {
 	api := &fakeSecretsAPI{err: &sm.ResourceNotFoundException{Message: aws.String("Can't find secret value for staging label: AWSCURRENT")}}
-	store := Secrets{Client: api, ID: "secret"}
+	store := Secrets{Client: api, ID: "secret", Ledger: Ledger{Client: newDynamo(), Table: "table"}}
 	if s, e := store.Load(ctx); e != nil || s != nil {
 		t.Fatal("empty stack secret", e)
 	}
@@ -55,6 +91,7 @@ func TestSecretsAdapterEmptyUnavailableAndRetainedMaterial(t *testing.T) {
 		t.Fatal(e)
 	}
 	api.err = nil
+	s.StateVersion = 0 // Existing deployments start without a secret fence.
 	if e = store.Save(ctx, s); e != nil {
 		t.Fatal(e)
 	}
@@ -69,6 +106,91 @@ func TestSecretsAdapterEmptyUnavailableAndRetainedMaterial(t *testing.T) {
 	f.h.Ledger.Client = newDynamo()
 	if _, e = Bootstrap(ctx, f.h.Config, f.h.Ledger, f.secrets, f.backend, f.at); e == nil {
 		t.Fatal("missing bootstrap state reset replay ledger")
+	}
+}
+
+func TestSecretsFenceMigratesLegacyAndIgnoresCurrentLabel(t *testing.T) {
+	f := newFixture(t)
+	legacy, err := Bootstrap(ctx, f.h.Config, f.h.Ledger, f.secrets, f.backend, f.at)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy.StateVersion = 0
+	// A pre-fence deployment has no StateVersion field in its JSON.
+	b, _ := json.Marshal(legacy)
+	var fields map[string]any
+	json.Unmarshal(b, &fields)
+	delete(fields, "StateVersion")
+	b, _ = json.Marshal(fields)
+	api := &fakeSecretsAPI{value: string(b), version: strings.Repeat("a", 43)}
+	store := Secrets{Client: api, ID: "secret", Ledger: f.h.Ledger}
+	s, err := store.Load(ctx)
+	if err != nil || !reflect.DeepEqual(s, legacy) {
+		t.Fatal("legacy identity could not load", err)
+	}
+	stale := copySecret(s)
+	if err = Rotate(ctx, store, s, rotationToken(t, f.at, "migrated-key", 0x44), f.at); err != nil {
+		t.Fatal("legacy rotation could not establish fence", err)
+	}
+	if err = store.Save(ctx, stale); !errors.Is(err, ErrRefused) || len(api.puts) != 1 {
+		t.Fatal("unfenced legacy writer overwrote migrated state", err)
+	}
+	// Even a delayed provider request moving AWSCURRENT back cannot select
+	// older bytes: the strongly consistent fence names an immutable version.
+	api.value, api.version = string(b), strings.Repeat("a", 43)
+	reloaded, err := store.Load(ctx)
+	if err != nil || !reflect.DeepEqual(reloaded, s) || s.StateVersion != 1 {
+		t.Fatal("current label overrode authoritative secret fence", err)
+	}
+}
+
+func TestSecretsFenceMissingAmbiguousAndFailedWritesRefuse(t *testing.T) {
+	for _, failure := range []string{"ledger_unavailable", "missing_fence", "malformed_fence", "empty_fence", "missing_version", "mismatched_version", "put_failed"} {
+		t.Run(failure, func(t *testing.T) {
+			f := newFixture(t)
+			api := &fakeSecretsAPI{}
+			store := Secrets{Client: api, ID: "secret", Ledger: f.h.Ledger}
+			s, err := Bootstrap(ctx, f.h.Config, f.h.Ledger, store, f.backend, f.at)
+			if err != nil {
+				t.Fatal(err)
+			}
+			puts := len(api.puts)
+			switch failure {
+			case "ledger_unavailable":
+				f.db.down = true
+				if err = store.Save(ctx, s); !errors.Is(err, ErrRefused) || len(api.puts) != puts {
+					t.Fatal("secret put bypassed unavailable ledger", err)
+				}
+			case "missing_fence":
+				delete(f.db.items, "secret")
+				if err = store.Save(ctx, s); !errors.Is(err, ErrRefused) || len(api.puts) != puts {
+					t.Fatal("missing fence reset version history", err)
+				}
+			case "malformed_fence":
+				f.db.items["secret"]["data"] = &d.AttributeValueMemberB{Value: []byte("{")}
+			case "empty_fence":
+				f.db.items["secret"]["data"] = &d.AttributeValueMemberB{Value: []byte("{}")}
+			case "missing_version":
+				delete(api.versions, api.version)
+			case "mismatched_version":
+				api.versions[api.version] = `{"StateVersion":999}`
+			case "put_failed":
+				api.err = errors.New("RAW_PROVIDER_MARKER")
+				if err = store.Save(ctx, s); !errors.Is(err, ErrRefused) {
+					t.Fatal("failed put did not refuse", err)
+				}
+				api.err = nil
+				if err = store.Save(ctx, s); !errors.Is(err, ErrRefused) || len(api.puts) != puts+1 {
+					t.Fatal("failed put fence allowed stale retry", err)
+				}
+			}
+			if _, err = store.Load(ctx); !errors.Is(err, ErrRefused) {
+				t.Fatal("missing/ambiguous state did not refuse", err)
+			}
+			if _, err = Bootstrap(ctx, f.h.Config, f.h.Ledger, store, f.backend, f.at); !errors.Is(err, ErrRefused) {
+				t.Fatal("bootstrap replaced ambiguous state", err)
+			}
+		})
 	}
 }
 

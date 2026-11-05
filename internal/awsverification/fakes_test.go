@@ -188,6 +188,10 @@ func (m *memorySecrets) Save(_ context.Context, s *Secret) error {
 	if m.down || m.saves == m.failSaveAt {
 		return ErrRefused
 	}
+	if (m.s == nil && s.StateVersion != 0) || (m.s != nil && s.StateVersion != m.s.StateVersion) {
+		return ErrRefused
+	}
+	s.StateVersion++
 	m.s = copySecret(s)
 	return nil
 }

@@ -17,6 +17,7 @@ type Pin struct {
 	Until int64
 }
 type Secret struct {
+	StateVersion                                 int64
 	Private                                      ed25519.PrivateKey
 	Commitment                                   [32]byte
 	Runner, Receipt, Version, Digest, Connection string
@@ -27,6 +28,8 @@ type Secret struct {
 }
 type SecretStore interface {
 	Load(context.Context) (*Secret, error)
+	// Save conditionally advances the loaded StateVersion. A refused transition
+	// must be reloaded on a later invocation, never retried with a newer version.
 	Save(context.Context, *Secret) error
 }
 type RegistrationAck struct {
