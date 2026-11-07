@@ -169,13 +169,17 @@ func readZip(ctx context.Context, s CensusSource, m Member, p Policy, stats *Run
 	for _, x := range plan.extents {
 		if !x.valid || x.file.Flags&1 != 0 || x.file.Method != zip.Store && x.file.Method != zip.Deflate {
 			complete = false
+			full.release()
 		}
 	}
 	dropFull := func() {
 		complete = false
 		full.release()
 		r.reason = "read_error"
-		r.reasons[r.reason]++
+		// read_error + zip_entries + every entry credited means "full hash not attempted".
+		if ctx.Err() == nil {
+			r.reasons[r.reason]++
+		}
 	}
 	// Conservatively include local headers along with the prefix, gaps and
 	// descriptors. The central-directory tail has its own fixed transport cap.
@@ -209,6 +213,7 @@ func readZip(ctx context.Context, s CensusSource, m Member, p Policy, stats *Run
 		}
 		if ctx.Err() != nil {
 			complete = false
+			full.release()
 			r.reason = "budget_exhausted"
 			r.reasons[r.reason] += int64(len(plan.extents) - i)
 			break
@@ -223,6 +228,7 @@ func readZip(ctx context.Context, s CensusSource, m Member, p Policy, stats *Run
 		}
 		if reason != "" {
 			complete = false
+			full.release()
 			r.reason = reason
 			r.reasons[reason]++
 			creditBad(f.CompressedSize64)
@@ -244,6 +250,7 @@ func readZip(ctx context.Context, s CensusSource, m Member, p Policy, stats *Run
 		stream, e := s.OpenRange(ctx, m.Identity, x.off, length)
 		if e != nil {
 			complete = false
+			full.release()
 			r.reason = "read_error"
 			if ctx.Err() != nil {
 				r.reason = "budget_exhausted"
@@ -273,6 +280,7 @@ func readZip(ctx context.Context, s CensusSource, m Member, p Policy, stats *Run
 		if e != nil || ctx.Err() != nil {
 			committed.(encoding.BinaryUnmarshaler).UnmarshalBinary(state)
 			complete = false
+			full.release()
 			if errors.Is(e, ErrResourceLimit) {
 				r.err = e
 				return
@@ -454,9 +462,11 @@ func (h *zipFullHash) reserve(n int64) bool {
 	if h.memory == nil {
 		return true
 	}
+	// Leave required census reservations a fixed floor of shared headroom.
+	headroom := max(int64(8<<20), h.memory.limit/8)
 	for {
 		v := h.memory.used.Load()
-		if n > h.memory.limit-v || h.memory.failed.Load() {
+		if n > h.memory.limit-headroom-v || h.memory.failed.Load() {
 			return false
 		}
 		if h.memory.used.CompareAndSwap(v, v+n) {

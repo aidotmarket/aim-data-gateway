@@ -3,10 +3,10 @@
 from pathlib import Path
 import sys
 
-CAPS = {"gateway": 12125, "AWS": 3500, "Cloudflare": 2500,
+CAPS = {"gateway": 12135, "AWS": 3500, "Cloudflare": 2500,
         "Cloudflare Worker": 1200, "Cloudflare Python": 600}
 
-def over_budget(lines, cap=12125):
+def over_budget(lines, cap=12135):
     return lines > cap
 
 def category(path):

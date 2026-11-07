@@ -81,7 +81,7 @@ func TestZipFullHashReservesBeforeAllocation(t *testing.T) {
 	const charge = (32 << 10) + zipHashBookkeeping
 	for _, shared := range []bool{false, true} {
 		limit := int64(2 * charge)
-		memoryLimit := limit
+		memoryLimit := int64(8<<20) + limit
 		if shared {
 			memoryLimit--
 		} else {

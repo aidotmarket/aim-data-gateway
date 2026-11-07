@@ -22,8 +22,13 @@ func TestZipReordered17000MemberReservationFallsBack(t *testing.T) {
 	const reserved = 17000*1024 + 16*(4<<20)
 	p.censusMemory.used.Store(reserved)
 	var peak int64
+	gets := 0
 	s.read = func(_ context.Context, _ rangeCall, data []byte) (io.ReadCloser, error) {
+		gets++
 		used := p.censusMemory.used.Load()
+		if gets == 3 && used > reserved+384 {
+			t.Fatal("dropFull retained buffers during next GET", used)
+		}
 		peak = max(peak, used)
 		if used > p.MaxMemoryBytes {
 			t.Fatal("over budget before GET", used)
@@ -201,5 +206,85 @@ func TestZipTailIgnoringRangeIsReadError(t *testing.T) {
 	r := readZip(context.Background(), s, s.members[0], censusPolicy(), stats)
 	if r.err != nil || r.reason != "read_error" || r.opened || stats.StoredBytes.Load() != archiveTransportSlack+1 {
 		t.Fatal(r, stats.StoredBytes.Load())
+	}
+}
+
+func TestZipReorderedRequiredReservationsKeepHeadroom(t *testing.T) {
+	b := reversedZip(t, 4, 16<<20)
+	s := censusFor(b, "zip")
+	p := censusPolicy()
+	p.MaxMemoryBytes = 128 << 20
+	p.censusMemory = &censusMemory{limit: p.MaxMemoryBytes}
+	// Without headroom three blocks plus the first finding leave only 100 bytes.
+	const charge = (16 << 20) + (32 << 10) + zipHashBookkeeping
+	const reserved = (128 << 20) - 3*charge - 384 - 100
+	p.censusMemory.used.Store(reserved)
+	other := inspection{memory: p.censusMemory}
+	gets := 0
+	s.read = func(_ context.Context, _ rangeCall, data []byte) (io.ReadCloser, error) {
+		gets++
+		if gets == 4 {
+			done := make(chan struct{})
+			go func() {
+				other.addFile(fileFinding{digest: sha256.Sum256([]byte("concurrent")), nearEligible: true})
+				close(done)
+			}()
+			<-done
+			if other.files != 1 || p.censusMemory.failed.Load() {
+				t.Fatal("optional buffers starved required addFile", p.censusMemory.used.Load())
+			}
+		}
+		return io.NopCloser(bytes.NewReader(data)), nil
+	}
+	r := readZip(context.Background(), s, s.members[0], p, &RunStats{})
+	if r.err != nil || p.censusMemory.failed.Load() || r.commitment.Tag != "zip_entries" || r.entries != 4 || r.readable != 64<<20 || gets != 5 {
+		t.Fatal("required reservations refused entry fallback", r, gets)
+	}
+	if p.censusMemory.used.Load() != reserved+384+384 {
+		t.Fatal("optional buffer leak", p.censusMemory.used.Load())
+	}
+}
+
+func TestZipEntryFailureReleasesBuffersImmediately(t *testing.T) {
+	b := reversedZip(t, 4, 1<<20)
+	_, cd := zipDirectory(b)
+	off := binary.LittleEndian.Uint32(b[cd[2]+42:])
+	b[off] = 0 // Corrupt the third local header after two blocks are buffered.
+	s := censusFor(b, "zip")
+	p := censusPolicy()
+	p.MaxMemoryBytes = 128 << 20
+	p.censusMemory = &censusMemory{limit: p.MaxMemoryBytes}
+	gets := 0
+	s.read = func(_ context.Context, _ rangeCall, data []byte) (io.ReadCloser, error) {
+		gets++
+		used := p.censusMemory.used.Load()
+		if gets == 3 && used < 2<<20 {
+			t.Fatal("buffers not exercised", used)
+		}
+		if gets == 5 && used > 384 {
+			t.Fatal("entry failure retained buffers during next GET", used)
+		}
+		return io.NopCloser(bytes.NewReader(data)), nil
+	}
+	r := readZip(context.Background(), s, s.members[0], p, &RunStats{})
+	if r.err != nil || r.commitment.Tag != "zip_entries" || r.entries != 3 || gets != 5 || r.reasons["archive_corrupt"] != 1 {
+		t.Fatal(r, gets)
+	}
+}
+
+func TestZipCancelledPrefixDoesNotCountReadError(t *testing.T) {
+	s := censusFor(sfxZip(t, 100), "zip")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s.read = func(_ context.Context, c rangeCall, data []byte) (io.ReadCloser, error) {
+		if c.off == 0 && c.n == 100 {
+			cancel()
+			return nil, ctx.Err()
+		}
+		return io.NopCloser(bytes.NewReader(data)), nil
+	}
+	r := readZip(ctx, s, s.members[0], censusPolicy(), &RunStats{})
+	if r.err != nil || r.commitment.Tag != "zip_entries" || r.reason != "budget_exhausted" || r.reasons["read_error"] != 0 || r.reasons["budget_exhausted"] != 2 {
+		t.Fatal(r)
 	}
 }
