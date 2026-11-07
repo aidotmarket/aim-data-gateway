@@ -163,7 +163,7 @@ func readZip(ctx context.Context, s CensusSource, m Member, p Policy, stats *Run
 	r.state = "partly_read"
 	r.reason = ""
 	committed := sha256.New()
-	full := &zipFullHash{h: sha256.New(), pending: map[int64][]byte{}, memory: p.censusMemory, limit: p.MaxMemoryBytes}
+	full := &zipFullHash{h: sha256.New(), memory: p.censusMemory, limit: p.MaxMemoryBytes}
 	defer full.release()
 	complete := plan.selected == len(plan.extents)
 	for _, x := range plan.extents {
@@ -223,6 +223,12 @@ func readZip(ctx context.Context, s CensusSource, m Member, p Policy, stats *Run
 			creditBad(f.CompressedSize64)
 			continue
 		}
+		if complete {
+			if e := full.start(x.off, x.bound-x.off); e != nil {
+				r.err = e
+				return
+			}
+		}
 		stats.GETs.Add(1)
 		stats.RequestedBytes.Add(x.bound - x.off)
 		stream, e := s.OpenRange(ctx, m.Identity, x.off, x.bound-x.off)
@@ -241,7 +247,6 @@ func readZip(ctx context.Context, s CensusSource, m Member, p Policy, stats *Run
 		input := &countingReader{r: io.LimitReader(&statsReader{stream, stats}, x.bound-x.off)}
 		var reader io.Reader = input
 		if complete {
-			full.off = x.off
 			reader = io.TeeReader(input, full)
 		}
 		state, _ := committed.(encoding.BinaryMarshaler).MarshalBinary()
@@ -390,13 +395,44 @@ func readZipEntry(ctx context.Context, reader io.Reader, x zipExtent, committed 
 }
 
 // Full hashing follows physical offset order without another GET. A reordered
-// central directory buffers only out-of-order ranges, charged to census memory.
+// central directory buffers whole out-of-order extents, independent of reads.
 // Normal writers need no retained bytes. Exhaustion refuses, never publishes.
+// Capacity is rounded to 32 KiB (whole allocator pages), plus 128 bytes per
+// node allocation (48 bytes on 64-bit targets, with headroom). Reserve before make;
+// no growing slices or maps retain uncharged capacity or bookkeeping.
+const zipHashBookkeeping = int64(128)
+
+type zipHashBlock struct {
+	off  int64
+	data []byte
+	next *zipHashBlock
+}
+
 type zipFullHash struct {
 	h                      hash.Hash
 	next, off, held, limit int64
-	pending                map[int64][]byte
+	pending, current       *zipHashBlock
 	memory                 *censusMemory
+}
+
+func (h *zipFullHash) start(off, size int64) error {
+	h.off, h.current = off, nil
+	if off == h.next {
+		return nil
+	}
+	capacity := (size + (32 << 10) - 1) &^ ((32 << 10) - 1)
+	charge := capacity + zipHashBookkeeping
+	if charge > h.limit-h.held || !h.memory.reserve(charge) {
+		return ErrResourceLimit
+	}
+	h.held += charge
+	link := &h.pending
+	for *link != nil && (*link).off < off {
+		link = &(*link).next
+	}
+	h.current = &zipHashBlock{off: off, data: make([]byte, 0, capacity), next: *link}
+	*link = h.current
+	return nil
 }
 
 func (h *zipFullHash) Write(b []byte) (int, error) {
@@ -404,33 +440,31 @@ func (h *zipFullHash) Write(b []byte) (int, error) {
 	if h.off == h.next {
 		h.h.Write(b)
 		h.next += int64(n)
-		for {
-			v, ok := h.pending[h.next]
-			if !ok {
-				break
-			}
-			delete(h.pending, h.next)
-			h.h.Write(v)
-			h.next += int64(len(v))
-			h.held -= int64(len(v))
+		for h.pending != nil && h.pending.off == h.next {
+			v := h.pending
+			h.pending = v.next
+			h.h.Write(v.data)
+			h.next += int64(len(v.data))
+			charge := int64(cap(v.data)) + zipHashBookkeeping
+			v.data, v.next = nil, nil
+			h.held -= charge
 			if h.memory != nil {
-				h.memory.used.Add(-int64(len(v)))
+				h.memory.used.Add(-charge)
 			}
 		}
 	} else {
-		if int64(n) > h.limit-h.held || !h.memory.reserve(int64(n)) {
+		if h.current == nil || n > cap(h.current.data)-len(h.current.data) {
 			return 0, ErrResourceLimit
 		}
-		h.pending[h.off] = bytes.Clone(b)
-		h.held += int64(n)
+		h.current.data = append(h.current.data, b...)
 	}
 	h.off += int64(n)
 	return n, nil
 }
 func (h *zipFullHash) release() {
+	h.pending, h.current = nil, nil
 	if h.memory != nil {
 		h.memory.used.Add(-h.held)
 	}
 	h.held = 0
-	h.pending = nil
 }
