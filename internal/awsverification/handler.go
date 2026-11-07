@@ -312,8 +312,15 @@ func (h Handler) scan(ctx context.Context, s *Secret, j wire.ScanJob, src *Sourc
 			},
 		}
 		if censusJob(j) {
-			document["probe"].(map[string]any)["known_processed_bytes"] = result.KnownProcessedBytes
-			document["probe"].(map[string]any)["unknown_expansion_containers"] = result.UnknownExpansionContainers
+			for _, m := range src.Members() {
+				if !tableFormat(m.Format) {
+					if result.CensusPreflight == nil {
+						result.CensusPreflight = &censusPreflight{}
+					}
+					document["probe"].(map[string]any)["census_preflight"] = result.CensusPreflight
+					break
+				}
+			}
 		}
 		if e != nil {
 			document["probe"].(map[string]any)["refusal_reason"] = errorCode(e)
