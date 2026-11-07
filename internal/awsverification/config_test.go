@@ -95,8 +95,8 @@ func TestIntegerMixedSizeAndMemberCeilings(t *testing.T) {
 			t.Fatal("one byte beyond shared size allowed")
 		}
 	}
-	if AdmitSize([]Object{{Format: "zip", Size: 1}}) == nil {
-		t.Fatal("unsupported format admitted")
+	if AdmitSize([]Object{{Format: "zip", Size: 8_000_000_000}}) != nil {
+		t.Fatal("census stored size must not use table limit")
 	}
 	a := make([]Object, MaxMembers)
 	for i := range a {

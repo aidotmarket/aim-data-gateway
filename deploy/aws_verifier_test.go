@@ -130,7 +130,7 @@ func parameters() object {
 	return object{
 		"AWS::Region": "eu-north-1", "AWS::AccountId": "123456789012",
 		"ConnectionId": "11111111-1111-1111-1111-111111111111", "Bucket": "seller-fixture", "BucketRegion": "eu-north-1",
-		"ReadKeys": []any{"exact.csv", "folder/é space.jsonl"}, "ReadPrefixes": []any{"workspace/approval/"},
+		"ReadScope": "prefix", "ReadKeys": []any{"exact.csv", "folder/é space.jsonl"}, "ReadPrefixes": []any{"workspace/approval/"},
 		"SseKmsKeyArn": "", "RegistrationToken": base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{9}, 32)), "PollIntervalMinutes": 1, "MemorySize": 1769,
 		"ArtifactBucket": "public-eu-north-1", "ArtifactKey": "aws-verifier/1.0.0/" + strings.Repeat("a", 64) + "/bootstrap.zip",
 		"ArtifactObjectVersion": "immutable-version", "ExpectedCodeHash": "sha256:" + strings.Repeat("a", 64),
@@ -164,7 +164,7 @@ func TestExactResourcesAndRuntime(t *testing.T) {
 		"PollSchedule": "AWS::Scheduler::Schedule", "LogGroup": "AWS::Logs::LogGroup"})
 	f := props(r, "VerifierFunction")
 	for k, want := range (object{"Runtime": "provided.al2023", "Handler": "bootstrap", "MemorySize": 1769,
-		"Architectures": []string{"arm64"}, "Timeout": 900}) {
+		"Architectures": []string{"arm64"}, "Timeout": 900, "EphemeralStorage": object{"Size": 512}}) {
 		equal(t, f[k], want)
 	}
 	if _, ok := f["ReservedConcurrentExecutions"]; ok {
@@ -245,7 +245,7 @@ func TestTokenPathAndBinaryConfigContract(t *testing.T) {
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
-	want := strings.Fields("AIM_AWS_CONNECTION_ID AIM_AWS_BUCKET AIM_AWS_BUCKET_REGION AIM_AWS_READ_SCOPE AIM_AWS_SECRET_ID AIM_AWS_LEDGER_TABLE AIM_AWS_REGISTRATION_TOKEN AIM_AWS_SCANNER_VERSION AIM_AWS_IMAGE_DIGEST AIM_AWS_API_BASE_URL AIM_AWS_LOG_GROUP AIM_AWS_SSE_KMS_KEY_ARN")
+	want := strings.Fields("AIM_AWS_CONNECTION_ID AIM_AWS_BUCKET AIM_AWS_BUCKET_REGION AIM_AWS_READ_SCOPE AIM_AWS_READ_SCOPE_MODE AIM_AWS_SECRET_ID AIM_AWS_LEDGER_TABLE AIM_AWS_REGISTRATION_TOKEN AIM_AWS_SCANNER_VERSION AIM_AWS_IMAGE_DIGEST AIM_AWS_API_BASE_URL AIM_AWS_LOG_GROUP AIM_AWS_SSE_KMS_KEY_ARN")
 	sort.Strings(want)
 	equal(t, keys, want)
 	equal(t, env[av.EnvToken], parameters()["RegistrationToken"])
@@ -427,7 +427,7 @@ func TestExactParameters(t *testing.T) {
 	for key := range template(t)["Parameters"].(object) {
 		keys = append(keys, key)
 	}
-	want := strings.Fields("ConnectionId Bucket BucketRegion ReadKeys ReadPrefixes SseKmsKeyArn RegistrationToken PollIntervalMinutes MemorySize ArtifactBucket ArtifactKey ArtifactObjectVersion ExpectedCodeHash ScannerVersion ApiBaseUrl")
+	want := strings.Fields("ConnectionId Bucket BucketRegion ReadScope ReadKeys ReadPrefixes SseKmsKeyArn RegistrationToken PollIntervalMinutes MemorySize ArtifactBucket ArtifactKey ArtifactObjectVersion ExpectedCodeHash ScannerVersion ApiBaseUrl")
 	sort.Strings(keys)
 	sort.Strings(want)
 	if !reflect.DeepEqual(keys, want) {
@@ -461,6 +461,9 @@ func TestScopeCompilerAndTemplateRefuseIAMPolicyVariables(t *testing.T) {
 			}
 		}
 		for _, value := range []string{"", "cost$5.csv", "dollars$$", "{literal}/", "folder/é space.csv"} {
+			if field == "prefixes" && value != "" {
+				value = strings.TrimRight(value, "/") + "/"
+			}
 			if !matchesParameter(t, parameter, value) {
 				t.Fatal("literal scope refused", value)
 			}
@@ -482,4 +485,40 @@ func TestKMSCompilerAndTemplateCanonicalUUIDAgreement(t *testing.T) {
 		t.Fatal("empty KMS refused")
 	}
 	compile(t, object{"connection_id": parameters()["ConnectionId"], "bucket": "seller-fixture", "region": "eu-north-1", "keys": []string{"exact.csv"}, "prefixes": []string{}, "sse_kms_key_arn": ""}, true)
+}
+
+func TestCensusWholeBucketGrantRequiresExplicitSetup(t *testing.T) {
+	for _, mode := range []string{"prefix", "whole_bucket"} {
+		p := parameters()
+		p["ReadScope"] = mode
+		p["ReadKeys"], p["ReadPrefixes"] = []any{""}, []any{"data/"}
+		r := resolved(t, p)
+		resources := statements(r, "ExecutionRole")[0].(object)["Resource"]
+		want := []string{"arn:aws:s3:::seller-fixture/data/*"}
+		if mode == "whole_bucket" {
+			want = []string{"arn:aws:s3:::seller-fixture/*"}
+		}
+		equal(t, resources, want)
+		env := props(r, "VerifierFunction")["Environment"].(object)["Variables"].(object)
+		equal(t, env[av.EnvReadScope], mode)
+		if mode == "whole_bucket" {
+			equal(t, env[av.EnvScope], `{"keys":[],"prefixes":[]}`)
+		}
+	}
+	source := object{"connection_id": parameters()["ConnectionId"], "bucket": "seller-fixture", "region": "eu-north-1", "keys": []string{}, "prefixes": []string{}}
+	compile(t, source, false)
+	source["prefixes"] = []string{"data"}
+	prefixResult := compile(t, source, true)
+	equal(t, prefixResult["object_arns"], []string{"arn:aws:s3:::seller-fixture/data/*"})
+	if matchesParameter(t, "ReadPrefixes", "data") {
+		t.Fatal("noncanonical IAM prefix")
+	}
+	source["prefixes"] = []string{}
+	source["read_scope"] = "whole_bucket"
+	result := compile(t, source, true)
+	equal(t, result["object_arns"], []string{"arn:aws:s3:::seller-fixture/*"})
+	source["prefixes"] = []string{"*"}
+	compile(t, source, false)
+	source["read_scope"] = "prefix"
+	compile(t, source, false)
 }

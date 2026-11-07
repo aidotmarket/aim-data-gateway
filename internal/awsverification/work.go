@@ -3,7 +3,9 @@ package awsverification
 import (
 	"crypto/ed25519"
 	"encoding/json"
+	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -34,6 +36,19 @@ func closed(raw []byte, names string) (map[string]any, error) {
 
 const probeFields = "spec_id spec_version probe_id listing_id source_handle_id listing_version_id runner_id source_kind manifest_hash owner_authorization_id accepted_at_utc issued_at_utc expires_at_utc nonce platform_key_id connector_type connector_version preview_requested"
 const scanFields = "spec_id spec_version verification_id listing_id source_handle_id listing_version_id runner_id source_kind manifest_hash owner_authorization_id accepted_at_utc issued_at_utc expires_at_utc nonce platform_key_id connector_type connector_version preview_requested quote_id idempotency_key deterministic_seed requested_action wire_manifest_version corpus_disclosure_version payment_disclosure_version traversal_root traversal_order fingerprint_algorithm canonicalization_version approximate_distinct_algorithm output_contract depth_class field_contract bucket_definitions minimum_aggregate_occupancy low_occupancy_behavior row_count_algorithm_version histogram_version numeric_bucket_version d6_schema_version d6_sanitizer_policy_version hard_inference_budget cancellation_signal"
+
+// AWS census R1 starting literals; R1 changes this single declaration.
+// Content throughput and request latency are measured in R1 for C3's quote estimator (§3).
+const censusR1BudgetBytes, censusR1ArchiveAllowanceBytes = int64(4_000_000_000), int64(64 << 20)
+
+const ScannerVersion = "0.3.0"
+const censusFields = " scan_mode planned_processed_bytes binding_method"
+
+func censusJob(j wire.ScanJob) bool { return j.Text("scan_mode") == core.ContentCensusV1 }
+func plannedBytes(j wire.ScanJob) int64 {
+	n, _ := strconv.ParseInt(fmt.Sprint(j.Payload["planned_processed_bytes"]), 10, 64)
+	return n
+}
 
 func VerifyWork(token string, keys map[string]ed25519.PublicKey, gateway, runner, version string, now time.Time) (wire.ScanJob, error) {
 	j := wire.ScanJob{Token: token}
@@ -75,6 +90,15 @@ func VerifyWork(token string, keys map[string]ed25519.PublicKey, gateway, runner
 	if e != nil || wire.Digest(j.Raw) != a.SpecHash {
 		return j, wire.ErrVerification
 	}
+	var schema struct {
+		Version string `json:"spec_version"`
+	}
+	if json.Unmarshal(j.Raw, &schema) != nil {
+		return j, wire.ErrVerification
+	}
+	if schema.Version == "2" {
+		payloadFields += censusFields
+	}
 	j.Payload, e = closed(j.Raw, payloadFields)
 	if e != nil {
 		return j, e
@@ -89,7 +113,7 @@ func VerifyWork(token string, keys map[string]ed25519.PublicKey, gateway, runner
 			return j, wire.ErrVerification
 		}
 	}
-	if j.Text("runner_id") != runner || j.Text("platform_key_id") != j.KID || j.Text("spec_version") != "1" || j.Text("source_kind") != "s3_listing" || j.Text("connector_type") != "aws_s3_verifier" || j.Text("connector_version") != "aws_s3_verifier-v1" || !hex64.MatchString(j.Text("manifest_hash")) {
+	if j.Text("runner_id") != runner || j.Text("platform_key_id") != j.KID || (j.Text("spec_version") != "1" && j.Text("spec_version") != "2") || j.Text("source_kind") != "s3_listing" || j.Text("connector_type") != "aws_s3_verifier" || j.Text("connector_version") != "aws_s3_verifier-v1" || !hex64.MatchString(j.Text("manifest_hash")) {
 		return j, wire.ErrVerification
 	}
 	if _, ok := j.Payload["preview_requested"].(bool); !ok {
@@ -112,6 +136,25 @@ func VerifyWork(token string, keys map[string]ed25519.PublicKey, gateway, runner
 	}
 	if j.Issued.Unix() != a.IssuedAt || j.Accepted.After(j.Issued) || !j.Issued.Before(j.Expires) || j.Expires.Sub(j.Issued) > 24*time.Hour || j.Issued.After(now.Add(300*time.Second)) || j.Issued.Before(now.Add(-24*time.Hour-300*time.Second)) || j.Accepted.Before(now.Add(-24*time.Hour-300*time.Second)) || j.Expires.Before(now.Add(-300*time.Second)) {
 		return j, wire.ErrVerification
+	}
+	if j.Text("spec_version") == "2" {
+		// Backend eligibility is C3. This parser independently refuses v2 on old runners.
+		parts := strings.Split(version, ".")
+		major, minor := -1, -1
+		if len(parts) == 3 {
+			major, _ = strconv.Atoi(parts[0])
+			minor, _ = strconv.Atoi(parts[1])
+		}
+		if !regexp.MustCompile(`^[0-9]+\.[0-9]+\.[0-9]+$`).MatchString(version) || major < 0 || minor < 0 || major == 0 && minor < 3 {
+			return j, core.ErrVerifierUpgradeRequired
+		}
+		n, err := strconv.ParseInt(fmt.Sprint(j.Payload["planned_processed_bytes"]), 10, 64)
+		if !censusJob(j) || j.Text("binding_method") != "planned_read_commitment_v2" || err != nil || n < 0 || n > censusR1BudgetBytes {
+			return j, wire.ErrVerification
+		}
+		if _, ok := j.Payload["planned_processed_bytes"].(json.Number); !ok {
+			return j, wire.ErrVerification
+		}
 	}
 	if a.Variant == "probe" {
 		if !uuid.MatchString(j.Text("probe_id")) {
@@ -140,6 +183,12 @@ func VerifyWork(token string, keys map[string]ed25519.PublicKey, gateway, runner
 		"numeric_bucket_version":         "fixed-buckets-v1",
 		"d6_schema_version":              "d6-v1",
 		"d6_sanitizer_policy_version":    "nfkc-fixed-enum-v1",
+	}
+	if censusJob(j) {
+		if j.Text("depth_class") != "content_census_complete_v1" && j.Text("depth_class") != "content_census_sampled_v1" {
+			return j, wire.ErrVerification
+		}
+		delete(fixed, "depth_class")
 	}
 	for k, v := range fixed {
 		if j.Text(k) != v {

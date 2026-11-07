@@ -55,7 +55,7 @@ def compile_scope(source):
         raise ValueError("aws_source_scope_unrepresentable")
 
     if not isinstance(source, dict) or set(source) - {
-        "connection_id", "bucket", "region", "keys", "prefixes", "sse_kms_key_arn"
+        "connection_id", "bucket", "region", "keys", "prefixes", "sse_kms_key_arn", "read_scope"
     }:
         refuse()
     connection, bucket, region = (source.get(k, "") for k in ("connection_id", "bucket", "region"))
@@ -65,8 +65,15 @@ def compile_scope(source):
         r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", connection
     ) or not isinstance(bucket, str) or not re.fullmatch(r"[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]", bucket):
         refuse()
+    mode = source.get("read_scope", "prefix")
+    if mode not in ("prefix", "whole_bucket"):
+        refuse()
     keys, prefixes = source.get("keys"), source.get("prefixes")
-    if not isinstance(keys, list) or not isinstance(prefixes, list) or not 1 <= len(keys) + len(prefixes) <= 50:
+    if mode == "whole_bucket":
+        if keys != [] or prefixes not in ([], [""]):
+            refuse()
+        prefixes = []
+    if not isinstance(keys, list) or not isinstance(prefixes, list) or not (0 if mode == "whole_bucket" else 1) <= len(keys) + len(prefixes) <= 50:
         refuse()
     for entry in keys + prefixes:
         # Native CommaDelimitedList trims members; JSON and IAM metacharacters
@@ -75,13 +82,17 @@ def compile_scope(source):
                 or "${" in entry or re.search(r'[,\x00-\x1f\x7f*?"\\]', entry)
                 or len(entry.encode("utf-8")) > 1024):
             refuse()
+    # Match the connection root, never a neighbouring prefix such as database/.
+    if any(not prefix.strip("/") for prefix in prefixes):
+        refuse()
+    prefixes = [prefix.strip("/") + "/" for prefix in prefixes]
     kms = source.get("sse_kms_key_arn", "")
     if not isinstance(kms, str) or (kms and not re.fullmatch(
         rf"arn:aws:kms:{region}:[0-9]{{12}}:key/[0-9a-f]{{8}}-[0-9a-f]{{4}}-[0-9a-f]{{4}}-[0-9a-f]{{4}}-[0-9a-f]{{12}}", kms
     )):
         refuse()
     params = {"ConnectionId": connection, "Bucket": bucket, "BucketRegion": region,
-              "ReadKeys": ",".join(keys), "ReadPrefixes": ",".join(prefixes), "SseKmsKeyArn": kms}
+              "ReadScope": mode, "ReadKeys": ",".join(keys), "ReadPrefixes": ",".join(prefixes), "SseKmsKeyArn": kms}
     # Deterministic resource names, 12-digit account and six-character Secrets
     # Manager suffix make this an upper bound independent of the seller account.
     name = f"aim-aws-verifier-{connection}"

@@ -27,6 +27,15 @@ func report(j wire.ScanJob, f core.Facts, start, end time.Time) map[string]any {
 	d["spec_hash"], d["nonce_echo"], d["install_key_id"] = j.Envelope.SpecHash, j.Text("nonce"), j.ReceiptKeyID
 	d["agent_version"], d["distinct_algorithm_version"], d["started_at_utc"], d["completed_at_utc"], d["duration_ms"], d["signature_algorithm"] = j.ScannerVersion, "hll-sha256-v1", timestamp(start), timestamp(end), end.Sub(start).Milliseconds(), "Ed25519"
 	d["artifact_locator_commitment"], d["content_sha256"], d["coverage"], d["objects"], d["fingerprint_hash"], d["d6_description"] = f.LocatorCommitment, f.ContentSHA256, f.Coverage, f.Objects, f.FingerprintHash, j.D6
+	if censusJob(j) {
+		for _, k := range strings.Fields("scan_mode planned_processed_bytes binding_method") {
+			d[k] = j.Payload[k]
+		}
+		d["content_census"], d["unread_binding_sha256"] = f.ContentCensus, f.UnreadBindingSHA256
+		if f.ContentCensus != nil {
+			d["depth_class"] = f.ContentCensus.DepthClass
+		}
+	}
 	return d
 }
 func receiptBinding(d map[string]any, variant string) map[string]any {
@@ -35,6 +44,11 @@ func receiptBinding(d map[string]any, variant string) map[string]any {
 		binding = map[string]any{}
 		for _, k := range strings.Fields("spec_hash nonce_echo install_key_id artifact_locator_commitment content_sha256 started_at_utc completed_at_utc duration_ms coverage fingerprint_hash") {
 			binding[k] = d[k]
+		}
+		if d["binding_method"] == "planned_read_commitment_v2" {
+			for _, k := range strings.Fields("scan_mode binding_method planned_processed_bytes depth_class content_census unread_binding_sha256") {
+				binding[k] = d[k]
+			}
 		}
 	}
 	return binding

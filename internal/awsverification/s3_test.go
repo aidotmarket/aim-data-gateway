@@ -21,11 +21,13 @@ import (
 )
 
 type fakeS3 struct {
+	mu           sync.Mutex
 	objects      map[string][]byte
 	requests     []Request
 	heads        []Request
 	bytes        int64
 	mutate       func(*fakeS3, Request)
+	onHead       func(Request)
 	fail         bool
 	latency      time.Duration
 	headOverride *Head
@@ -34,16 +36,30 @@ type fakeS3 struct {
 }
 
 func (f *fakeS3) Head(_ context.Context, r Request) (Head, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.heads = append(f.heads, r)
+	if f.onHead != nil {
+		f.onHead(r)
+	}
 	if f.headOverride != nil {
 		return *f.headOverride, nil
 	}
 	if r.VersionID == "" && r.IfMatch == "" {
 		return Head{}, errors.New("unpinned")
 	}
-	return Head{int64(len(f.objects[r.Key])), r.VersionID, strings.Trim(r.IfMatch, "\"")}, nil
+	etag := strings.Trim(r.IfMatch, "\"")
+	if r.VersionID != "" {
+		etag = f.liveETag
+		if etag == "" {
+			etag = "etag"
+		}
+	}
+	return Head{int64(len(f.objects[r.Key])), r.VersionID, etag}, nil
 }
 func (f *fakeS3) Get(ctx context.Context, r Request) (io.ReadCloser, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.requests = append(f.requests, r)
 	if f.mutate != nil {
 		f.mutate(f, r)
