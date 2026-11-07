@@ -42,10 +42,11 @@ func checkZipHashAccounting(t *testing.T, h *zipFullHash) {
 }
 
 func TestZipFullHashFragmentationAccounting(t *testing.T) {
-	b := reversedZip(t, 2, 8<<20)
+	// Cross the 32 KiB allocation rounding boundary without a throughput-sized byte loop.
+	b := reversedZip(t, 2, 64<<10)
 	cdOff, cd := zipDirectory(b)
 	for _, chunk := range []int{1, 65536} {
-		h := &zipFullHash{h: sha256.New(), limit: 128 << 20, memory: &censusMemory{limit: 128 << 20}}
+		h := &zipFullHash{h: sha256.New(), limit: 1 << 20, memory: &censusMemory{limit: 9 << 20}}
 		for _, at := range cd {
 			off := int64(binary.LittleEndian.Uint32(b[at+42:]))
 			bound := int64(cdOff)
@@ -109,10 +110,12 @@ func TestZipFullHashReservesBeforeAllocation(t *testing.T) {
 }
 
 func TestZipReorderedShortReadsAndMemoryFallback(t *testing.T) {
-	b := reversedZip(t, 2, 8<<20)
+	// The fixed 8 MiB required-memory floor makes 9 MiB admit these small
+	// extents and 8 MiB fall back, even with one-byte detector writes.
+	b := reversedZip(t, 2, 64<<10)
 	want := MemberCommitment{"full", sha256.Sum256(b)}
 	for _, chunk := range []int{1, 65536} {
-		for _, limit := range []int64{128 << 20, 8 << 20} {
+		for _, limit := range []int64{9 << 20, 8 << 20} {
 			s := censusFor(b, "zip")
 			s.chunk = chunk
 			p := censusPolicy()
@@ -120,11 +123,11 @@ func TestZipReorderedShortReadsAndMemoryFallback(t *testing.T) {
 			p.censusMemory = &censusMemory{limit: limit}
 			stats := &RunStats{}
 			r := readZip(context.Background(), s, s.members[0], p, stats)
-			if limit == 128<<20 {
+			if limit == 9<<20 {
 				if r.err != nil || r.state != "fully_read" || r.commitment != want || stats.GETs.Load() != 3 {
 					t.Fatal("fragmentation changed digest or transport", chunk, r, stats.GETs.Load())
 				}
-			} else if r.err != nil || r.commitment.Tag != "zip_entries" || r.state != "partly_read" || r.reason != "read_error" || r.entries != 2 || r.readable != 16<<20 || stats.GETs.Load() != 3 || p.censusMemory.failed.Load() {
+			} else if r.err != nil || r.commitment.Tag != "zip_entries" || r.state != "partly_read" || r.reason != "read_error" || r.entries != 2 || r.readable != 2*(64<<10) || stats.GETs.Load() != 3 || p.censusMemory.failed.Load() {
 				t.Fatal("expected entry credit after optional buffer exhaustion", chunk, r, stats.GETs.Load())
 			}
 			if p.censusMemory.used.Load() > 256*2 {

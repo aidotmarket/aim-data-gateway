@@ -14,12 +14,17 @@ import (
 )
 
 func TestZipReordered17000MemberReservationFallsBack(t *testing.T) {
-	b := reversedZip(t, 4, 16<<20)
+	const entrySize = 64 << 10
+	b := reversedZip(t, 4, entrySize)
 	s := censusFor(b, "zip")
 	p := censusPolicy()
 	p.MaxMemoryBytes = 128 << 20
 	p.censusMemory = &censusMemory{limit: p.MaxMemoryBytes}
-	const reserved = 17000*1024 + 16*(4<<20)
+	const fleetReservation = 17000*1024 + 16*(4<<20)
+	const charge = entrySize + (32 << 10) + zipHashBookkeeping
+	// Model other required allocations under the 112 MiB optional ceiling
+	// (128 MiB minus 16 MiB headroom): one block fits, the second must drop full hashing.
+	const reserved = max(fleetReservation, (112<<20)-charge-384)
 	p.censusMemory.used.Store(reserved)
 	var peak int64
 	gets := 0
@@ -36,7 +41,7 @@ func TestZipReordered17000MemberReservationFallsBack(t *testing.T) {
 		return io.NopCloser(bytes.NewReader(data)), nil
 	}
 	r := readZip(context.Background(), s, s.members[0], p, &RunStats{})
-	if r.err != nil || r.state != "partly_read" || r.reason != "read_error" || r.commitment.Tag != "zip_entries" || r.entries != 4 || r.readable != 64<<20 || r.unreadable != 0 || p.censusMemory.failed.Load() {
+	if r.err != nil || r.state != "partly_read" || r.reason != "read_error" || r.commitment.Tag != "zip_entries" || r.entries != 4 || r.readable != 4*entrySize || r.unreadable != 0 || p.censusMemory.failed.Load() {
 		t.Fatal(r, p.censusMemory.failed.Load())
 	}
 	if peak <= reserved || p.censusMemory.used.Load() > reserved+4*256 {
@@ -210,13 +215,14 @@ func TestZipTailIgnoringRangeIsReadError(t *testing.T) {
 }
 
 func TestZipReorderedRequiredReservationsKeepHeadroom(t *testing.T) {
-	b := reversedZip(t, 4, 16<<20)
+	const entrySize = 64 << 10
+	b := reversedZip(t, 4, entrySize)
 	s := censusFor(b, "zip")
 	p := censusPolicy()
 	p.MaxMemoryBytes = 128 << 20
 	p.censusMemory = &censusMemory{limit: p.MaxMemoryBytes}
 	// Without headroom three blocks plus the first finding leave only 100 bytes.
-	const charge = (16 << 20) + (32 << 10) + zipHashBookkeeping
+	const charge = entrySize + (32 << 10) + zipHashBookkeeping
 	const reserved = (128 << 20) - 3*charge - 384 - 100
 	p.censusMemory.used.Store(reserved)
 	other := inspection{memory: p.censusMemory}
@@ -237,7 +243,7 @@ func TestZipReorderedRequiredReservationsKeepHeadroom(t *testing.T) {
 		return io.NopCloser(bytes.NewReader(data)), nil
 	}
 	r := readZip(context.Background(), s, s.members[0], p, &RunStats{})
-	if r.err != nil || p.censusMemory.failed.Load() || r.commitment.Tag != "zip_entries" || r.entries != 4 || r.readable != 64<<20 || gets != 5 {
+	if r.err != nil || p.censusMemory.failed.Load() || r.commitment.Tag != "zip_entries" || r.entries != 4 || r.readable != 4*entrySize || gets != 5 {
 		t.Fatal("required reservations refused entry fallback", r, gets)
 	}
 	if p.censusMemory.used.Load() != reserved+384+384 {
@@ -246,7 +252,8 @@ func TestZipReorderedRequiredReservationsKeepHeadroom(t *testing.T) {
 }
 
 func TestZipEntryFailureReleasesBuffersImmediately(t *testing.T) {
-	b := reversedZip(t, 4, 1<<20)
+	const entrySize = 64 << 10
+	b := reversedZip(t, 4, entrySize)
 	_, cd := zipDirectory(b)
 	off := binary.LittleEndian.Uint32(b[cd[2]+42:])
 	b[off] = 0 // Corrupt the third local header after two blocks are buffered.
@@ -258,7 +265,7 @@ func TestZipEntryFailureReleasesBuffersImmediately(t *testing.T) {
 	s.read = func(_ context.Context, _ rangeCall, data []byte) (io.ReadCloser, error) {
 		gets++
 		used := p.censusMemory.used.Load()
-		if gets == 3 && used < 2<<20 {
+		if gets == 3 && used < 2*entrySize {
 			t.Fatal("buffers not exercised", used)
 		}
 		if gets == 5 && used > 384 {

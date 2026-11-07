@@ -47,10 +47,12 @@ type repeatReader struct {
 }
 
 func (r *repeatReader) Read(b []byte) (int, error) {
-	for i := range b {
-		b[i] = r.block[r.off%len(r.block)]
-		r.off++
+	filled := copy(b, r.block[r.off:])
+	filled += copy(b[filled:], r.block[:r.off])
+	for filled < len(b) {
+		filled += copy(b[filled:], b[:filled])
 	}
+	r.off = (r.off + len(b)) % len(r.block)
 	return len(b), nil
 }
 func fixtureTar(t *testing.T, n, size, level int, block []byte) []byte {
@@ -84,6 +86,25 @@ func randomBlock(n int) []byte {
 	r.Read(b)
 	return b
 }
+
+// Boundary fixtures need transport entropy, not millions of incidental words
+// and simhash shingles. Keep a broad byte alphabet but exclude ASCII letters
+// and digits; detector correctness has separate planted-text fixtures.
+func archiveNoise(n int) []byte {
+	var alphabet []byte
+	for i := 0; i < 256; i++ {
+		if i >= 'a' && i <= 'z' || i >= 'A' && i <= 'Z' || i >= '0' && i <= '9' {
+			continue
+		}
+		alphabet = append(alphabet, byte(i))
+	}
+	b := randomBlock(n)
+	for i, v := range b {
+		b[i] = alphabet[int(v)%len(alphabet)]
+	}
+	return b
+}
+
 func archiveRun(t *testing.T, b []byte, format string, p Policy, chunk int) censusMemberResult {
 	t.Helper()
 	s := censusFor(b, format)
@@ -151,21 +172,21 @@ func TestZipOversizedEntryAndCaps(t *testing.T) {
 		}
 	})
 	t.Run("12000_entries_84percent_floor", func(t *testing.T) {
-		b := fixtureZip(t, 12000, 1024, zip.Store, []byte("generated words "), false)
+		b := fixtureZip(t, 12000, 64, zip.Store, []byte("generated words "), false)
 		r := archiveRun(t, b, "zip", censusPolicy(), 65536)
-		if r.entries != 10000 || r.readable != 10000*1024 || r.unreadable != 2000*1024 || r.reason != "archive_over_cap" {
+		if r.entries != 10000 || r.readable != 10000*64 || r.unreadable != 2000*64 || r.reason != "archive_over_cap" {
 			t.Fatal(r)
 		}
 		raw := newCensusRaw(nil)
 		raw.members = 2
 		raw.add(Member{Format: "zip"}, r)
-		raw.add(Member{Format: "txt"}, censusMemberResult{state: "fully_read", readable: 1 << 20})
+		raw.add(Member{Format: "txt"}, censusMemberResult{state: "fully_read", readable: 64 << 10})
 		if raw.finish().CoverageContent.LimitedCoverage {
 			t.Fatal("84.6% marked limited")
 		}
 	})
 	t.Run("over_256MiB", func(t *testing.T) {
-		b := fixtureZip(t, 257, 1<<20, zip.Deflate, randomBlock(32768), false)
+		b := fixtureZip(t, 257, 1<<20, zip.Deflate, archiveNoise(32768), false)
 		r := archiveRun(t, b, "zip", censusPolicy(), 65536)
 		if r.processed != 64<<20 || r.unreadable != 0 || r.entries != 64 || r.reason != "budget_exhausted" {
 			t.Fatal(r)
@@ -175,7 +196,7 @@ func TestZipOversizedEntryAndCaps(t *testing.T) {
 func TestArchiveAllowanceProcessedBytes(t *testing.T) {
 	p := censusPolicy()
 	t.Run("1to1_zip_65MiB", func(t *testing.T) {
-		b := fixtureZip(t, 65, 1<<20, zip.Store, randomBlock(65536), false)
+		b := fixtureZip(t, 65, 1<<20, zip.Store, []byte{0}, false)
 		assertArchiveDeterminism(t, b, "zip", p, func(r censusMemberResult) {
 			if r.processed != 64<<20 || r.entries != 64 || r.reason != "budget_exhausted" || r.unreadable != 0 {
 				t.Fatal(r)
@@ -186,9 +207,9 @@ func TestArchiveAllowanceProcessedBytes(t *testing.T) {
 	// realistic 3:1,4:1,5:1 streams without block-repeating compressor artifacts.
 	for _, ratio := range []int{1, 3, 4, 5, 65} {
 		t.Run(fmt.Sprintf("tar_ratio_%d", ratio), func(t *testing.T) {
-			block := randomBlock(64 << 10)
+			block := archiveNoise(64 << 10)
 			if ratio > 1 {
-				copy(block[len(block)/ratio:], bytes.Repeat([]byte{'x'}, len(block)-len(block)/ratio))
+				copy(block[len(block)/ratio:], bytes.Repeat([]byte{0}, len(block)-len(block)/ratio))
 			}
 			b := fixtureTar(t, 65, 1<<20, gzip.DefaultCompression, block)
 			assertArchiveDeterminism(t, b, "tar.gz", p, func(r censusMemberResult) {
@@ -202,7 +223,7 @@ func TestArchiveAllowanceProcessedBytes(t *testing.T) {
 		})
 	}
 	t.Run("64MiB_stored_is_full", func(t *testing.T) {
-		b := fixtureTar(t, 1, (64<<20)-16<<10, gzip.NoCompression, randomBlock(65536))
+		b := fixtureTar(t, 1, (64<<20)-16<<10, gzip.NoCompression, []byte{0})
 		if len(b) >= 64<<20 {
 			t.Fatal(len(b))
 		}
@@ -468,7 +489,7 @@ func fifteenBitGzip(t *testing.T, decoded []byte) []byte {
 func TestTarAdversarialTransportPolicy(t *testing.T) {
 	p := censusPolicy()
 	t.Run("2MiB_FNAME", func(t *testing.T) {
-		b := fixtureTar(t, 65, 1<<20, gzip.NoCompression, randomBlock(65536))
+		b := fixtureTar(t, 65, 1<<20, gzip.NoCompression, []byte{0})
 		b[3] |= 8
 		withName := append(append(append([]byte(nil), b[:10]...), bytes.Repeat([]byte{'n'}, 2<<20)...), 0)
 		withName = append(withName, b[10:]...)
@@ -482,7 +503,7 @@ func TestTarAdversarialTransportPolicy(t *testing.T) {
 		var raw bytes.Buffer
 		tw := tar.NewWriter(&raw)
 		tw.WriteHeader(&tar.Header{Name: "large.txt", Mode: 0600, Size: 40 << 20})
-		io.CopyN(tw, &repeatReader{[]byte("generated printable content "), 0}, 40<<20)
+		io.CopyN(tw, &repeatReader{[]byte(" "), 0}, 40<<20)
 		tw.Close()
 		b := fifteenBitGzip(t, raw.Bytes())
 		// Validate the adversarial compressor independently of the scanner first.
@@ -521,9 +542,9 @@ func TestTarCapsAndCompletedEntryBoundary(t *testing.T) {
 	}
 }
 func TestTarFourToOne64MiBStored(t *testing.T) {
-	block := randomBlock(65536)
+	block := archiveNoise(65536)
 	for i := len(block) / 4; i < len(block); i++ {
-		block[i] = 'x'
+		block[i] = 0
 	}
 	b := fixtureTar(t, 256, 1<<20, gzip.DefaultCompression, block)
 	if len(b) < 60<<20 || len(b) > 70<<20 {

@@ -28,7 +28,8 @@ func zipDirectory(b []byte) (int, []int) {
 }
 
 func TestZipDeclaredSelectionSurvivesEntryFailure(t *testing.T) {
-	original := fixtureZip(t, 2, 40<<20, zip.Deflate, randomBlock(4096), false)
+	const entrySize = 64 << 10
+	original := fixtureZip(t, 2, entrySize, zip.Deflate, randomBlock(4096), false)
 	_, cd := zipDirectory(original)
 	for _, kind := range []string{"encrypted", "corrupt", "unsupported"} {
 		t.Run(kind, func(t *testing.T) {
@@ -42,8 +43,10 @@ func TestZipDeclaredSelectionSurvivesEntryFailure(t *testing.T) {
 			}
 			s := censusFor(b, "zip")
 			stats := &RunStats{}
-			r := readZip(context.Background(), s, s.members[0], censusPolicy(), stats)
-			if stats.PlannedBytes.Load() != 40<<20 || r.entries != 0 || r.readable != 0 || r.unreadable == 0 || r.reasons["budget_exhausted"] != 1 || r.commitment != (MemberCommitment{"zip_entries", sha256.Sum256(nil)}) {
+			p := censusPolicy()
+			p.ArchiveAllowanceBytes = 96 << 10
+			r := readZip(context.Background(), s, s.members[0], p, stats)
+			if stats.PlannedBytes.Load() != entrySize || r.entries != 0 || r.readable != 0 || r.unreadable == 0 || r.reasons["budget_exhausted"] != 1 || r.commitment != (MemberCommitment{"zip_entries", sha256.Sum256(nil)}) {
 				t.Fatal(kind, r, stats.PlannedBytes.Load())
 			}
 			second := int64(binary.LittleEndian.Uint32(b[cd[1]+42:]))
@@ -57,13 +60,13 @@ func TestZipDeclaredSelectionSurvivesEntryFailure(t *testing.T) {
 }
 
 func TestZipBadOffsetBeyondEntryCapKeepsPrefix(t *testing.T) {
-	b := fixtureZip(t, 12000, 1024, zip.Store, []byte("generated words "), false)
+	b := fixtureZip(t, 12000, 64, zip.Store, []byte("generated words "), false)
 	_, cd := zipDirectory(b)
 	binary.LittleEndian.PutUint32(b[cd[10000]+42:], ^uint32(0))
 	s := censusFor(b, "zip")
 	stats := &RunStats{}
 	r := readZip(context.Background(), s, s.members[0], censusPolicy(), stats)
-	if r.entries != 10000 || r.readable != 10000*1024 || r.unreadable != 2000*1024 || stats.GETs.Load() != 10001 || r.reason != "archive_over_cap" {
+	if r.entries != 10000 || r.readable != 10000*64 || r.unreadable != 2000*64 || stats.GETs.Load() != 10001 || r.reason != "archive_over_cap" {
 		t.Fatal(r, stats.GETs.Load())
 	}
 	for _, c := range s.calls[1:] {
@@ -349,7 +352,7 @@ func TestArchiveRuleGzipAndTgz(t *testing.T) {
 }
 
 func TestTarAllowanceCommitmentExactPrefix(t *testing.T) {
-	b := fixtureTar(t, 65, 1<<20, gzip.NoCompression, randomBlock(4096))
+	b := fixtureTar(t, 65, 1<<20, gzip.NoCompression, []byte{0})
 	gz, e := gzip.NewReader(bytes.NewReader(b))
 	if e != nil {
 		t.Fatal(e)
@@ -366,7 +369,7 @@ func TestTarAllowanceCommitmentExactPrefix(t *testing.T) {
 }
 
 func TestTarIgnoringRangeStopsAtTransportLimit(t *testing.T) {
-	b := fixtureTar(t, 65, 1<<20, gzip.NoCompression, randomBlock(4096))
+	b := fixtureTar(t, 65, 1<<20, gzip.NoCompression, []byte{0})
 	b[3] |= 8
 	withName := append(append(append([]byte(nil), b[:10]...), bytes.Repeat([]byte{'n'}, 2<<20)...), 0)
 	withName = append(withName, b[10:]...)
