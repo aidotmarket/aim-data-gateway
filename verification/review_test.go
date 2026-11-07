@@ -63,6 +63,7 @@ func TestProbeAllFields(t *testing.T) {
 	got, e := Probe(context.Background(), src, testPolicy())
 	want := ProbeResult{
 		ObjectsDiscovered:       2,
+		SourceReachable:         true,
 		SizeClass:               "small",
 		EstimatedMaxInputTokens: 600,
 		SupportedCapabilities:   []string{"complete_traversal", "deterministic_object_order", "fixed_bucket_aggregates", "exact_or_declared_estimated_row_counts"},

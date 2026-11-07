@@ -340,7 +340,8 @@ func TestRejectMalformedAndResourceBounds(t *testing.T) {
 	}
 	p = testPolicy()
 	p.MaxFactBytes = 50
-	if _, e = Scan(context.Background(), sourceFor([]byte("a\n1\n"), "csv"), p); e != ErrBudget {
+	p.ScanMode = "table_v1"
+	if _, e = Scan(context.Background(), sourceFor([]byte("a\n1\n"), "csv"), p); e != ErrSummaryBudget {
 		t.Fatal(e)
 	}
 }
