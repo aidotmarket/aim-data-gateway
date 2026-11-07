@@ -14,9 +14,9 @@ import (
 	"unicode/utf8"
 )
 
-const ContentCensusV1 = "content_census_v1"
+const ContentCensusV1, archiveTransportSlack = "content_census_v1", int64(1 << 20)
 const CensusAdvisoryTokens = 2304 // Provisional bytes/3 estimate rounded up to 256; C3 measures provider tokens. Advisory only.
-const archiveTransportSlack = int64(1 << 20)
+const CensusR1AWSBudgetBytes, CensusR1CloudflareBudgetBytes, CensusR1ArchiveAllowanceBytes = int64(4_000_000_000), int64(3_000_000_000), int64(64 << 20)
 
 var patternVersions = []string{"email_v1", "phone_e164_or_separated_v1", "credential_v1", "licence_families_v1", "simhash64_5shingle_v1"}
 
@@ -87,10 +87,10 @@ func (p Policy) checkCensusPolicy() error {
 		return ErrUnsupported
 	}
 	census := p.ScanMode == ContentCensusV1
-	if (census || p.ContentReadBudgetBytes != 0) && p.ContentReadBudgetBytes != 4_000_000_000 && p.ContentReadBudgetBytes != 3_000_000_000 || p.PlannedProcessedBytes < 0 || p.PlannedProcessedBytes > p.ContentReadBudgetBytes {
+	if (census || p.ContentReadBudgetBytes != 0) && p.ContentReadBudgetBytes != CensusR1AWSBudgetBytes && p.ContentReadBudgetBytes != CensusR1CloudflareBudgetBytes || p.PlannedProcessedBytes < 0 || p.PlannedProcessedBytes > p.ContentReadBudgetBytes {
 		return ErrUnsupported
 	}
-	if (census || p.ArchiveAllowanceBytes != 0) && p.ArchiveAllowanceBytes != 64<<20 {
+	if (census || p.ArchiveAllowanceBytes != 0) && p.ArchiveAllowanceBytes != CensusR1ArchiveAllowanceBytes {
 		return ErrUnsupported
 	}
 	if (census || p.ArchiveCaps != (ArchiveCaps{})) && p.ArchiveCaps != (ArchiveCaps{256 << 20, 10000, 1000}) {

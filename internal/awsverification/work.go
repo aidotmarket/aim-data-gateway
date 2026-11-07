@@ -37,9 +37,9 @@ func closed(raw []byte, names string) (map[string]any, error) {
 const probeFields = "spec_id spec_version probe_id listing_id source_handle_id listing_version_id runner_id source_kind manifest_hash owner_authorization_id accepted_at_utc issued_at_utc expires_at_utc nonce platform_key_id connector_type connector_version preview_requested"
 const scanFields = "spec_id spec_version verification_id listing_id source_handle_id listing_version_id runner_id source_kind manifest_hash owner_authorization_id accepted_at_utc issued_at_utc expires_at_utc nonce platform_key_id connector_type connector_version preview_requested quote_id idempotency_key deterministic_seed requested_action wire_manifest_version corpus_disclosure_version payment_disclosure_version traversal_root traversal_order fingerprint_algorithm canonicalization_version approximate_distinct_algorithm output_contract depth_class field_contract bucket_definitions minimum_aggregate_occupancy low_occupancy_behavior row_count_algorithm_version histogram_version numeric_bucket_version d6_schema_version d6_sanitizer_policy_version hard_inference_budget cancellation_signal"
 
-// AWS census R1 starting literals; R1 changes this single declaration.
+// R1 edits one verification.CensusR1* declaration, shared with the policy checker.
 // Content throughput and request latency are measured in R1 for C3's quote estimator (§3).
-const censusR1BudgetBytes, censusR1ArchiveAllowanceBytes = int64(4_000_000_000), int64(64 << 20)
+const censusR1BudgetBytes, censusR1ArchiveAllowanceBytes = core.CensusR1AWSBudgetBytes, core.CensusR1ArchiveAllowanceBytes
 
 const ScannerVersion = "0.3.0"
 const censusFields = " scan_mode planned_processed_bytes binding_method"
