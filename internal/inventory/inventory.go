@@ -1,6 +1,7 @@
 package inventory
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -12,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/aidotmarket/aim-data-gateway/internal/config"
@@ -251,12 +253,33 @@ func readFileContext(ctx context.Context, f *os.File) (Record, error) {
 
 // Detect classifies the inventory prefix from content, independently of its name.
 func Detect(b []byte) string {
-	// Keep the existing gateway admission media types until its census follow-up.
-	t := DetectContent(b, "").MediaType
-	switch t {
-	case "application/vnd.apache.parquet", "application/x-ndjson", "text/tab-separated-values", "text/csv":
-		return t
+	if len(b) >= 4 && bytes.Equal(b[:4], []byte("PAR1")) {
+		return "application/vnd.apache.parquet"
+	}
+	// Text formats are recognized from content, never from names.
+	s := strings.TrimPrefix(string(b), "\ufeff")
+	line, _, _ := strings.Cut(s, "\n")
+	line = strings.TrimSuffix(line, "\r")
+	if len(line) == 0 || !utf8Text(b) {
+		return "application/octet-stream"
+	}
+	if json.Valid([]byte(line)) && (strings.HasPrefix(strings.TrimSpace(line), "{") || strings.HasPrefix(strings.TrimSpace(line), "[")) {
+		return "application/x-ndjson"
+	}
+	if strings.Contains(line, "\t") {
+		return "text/tab-separated-values"
+	}
+	if strings.Contains(line, ",") {
+		return "text/csv"
 	}
 	return "application/octet-stream"
+}
+func utf8Text(b []byte) bool {
+	for _, x := range b {
+		if x == 0 {
+			return false
+		}
+	}
+	return true
 }
 func SHAHex(r Record) string { return hex.EncodeToString(r.SHA256[:]) }

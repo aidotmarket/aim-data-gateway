@@ -25,6 +25,7 @@ type CensusFinding struct {
 type CensusDuplicates struct {
 	ExactRatePPM any    `json:"exact_rate_ppm,omitempty"`
 	NearRatePPM  any    `json:"near_rate_ppm,omitempty"`
+	NearState    string `json:"near_state"`
 	Definition   string `json:"definition"`
 	Population   any    `json:"population"`
 	State        string `json:"state"`
@@ -245,7 +246,7 @@ func (r *censusRaw) add(m Member, x censusMemberResult) {
 	r.readable += x.readable
 	r.unreadable += x.unreadable
 	r.inspected.merge(x.findings)
-	if archiveFormat(m) != "" && x.opened {
+	if archiveFormat(m) != "" && x.opened && !x.plain {
 		r.opened++
 		if x.state != "fully_read" {
 			r.partial++
@@ -311,11 +312,11 @@ func (r *censusRaw) finish() *ContentCensus {
 	c.Inspected.Duplicates = CensusDuplicates{Definition: "sha256_exact_and_simhash64_5shingle_v1_ge_256_bytes_among_inspected_files", Population: population(n), State: findingState(n)}
 	if n >= 10 {
 		c.Inspected.Duplicates.ExactRatePPM = duplicateRate(a.exact, n)
-		c.Inspected.Duplicates.NearRatePPM = findingState(a.nearFiles)
 		if a.nearFiles >= 10 {
 			c.Inspected.Duplicates.NearRatePPM = duplicateRate(a.near, n)
 		}
 	}
+	c.Inspected.Duplicates.NearState = findingState(a.nearFiles)
 	c.Inspected.Encodings = partition(a.encodings, n, false)
 	var text int64
 	for _, v := range a.scripts {
@@ -353,6 +354,7 @@ func suppressInspected(s *CensusInspected, n int64) {
 	s.Duplicates.Population = pop
 	s.Duplicates.ExactRatePPM = nil
 	s.Duplicates.NearRatePPM = nil
+	s.Duplicates.NearState = suppressed
 	s.EmptyFiles = CensusFinding{State: suppressed, Population: pop}
 	s.GarbageFiles = s.EmptyFiles
 }

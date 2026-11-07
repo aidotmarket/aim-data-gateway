@@ -30,17 +30,11 @@ func extensionClass(format string) string {
 		return "image"
 	case "zip":
 		return "archive_zip"
-	case "tar.gz", "tgz", "gz":
+	case "tar.gz", "tgz":
 		return "archive_tar_gz"
 	}
 	return "other"
 }
 func archiveFormat(m Member) string {
-	switch extensionClass(m.Format) {
-	case "archive_zip":
-		return "zip"
-	case "archive_tar_gz":
-		return "tar.gz"
-	}
-	return ""
+	return inventory.ArchiveFormat(m.Format)
 }

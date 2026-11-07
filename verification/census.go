@@ -15,7 +15,7 @@ import (
 )
 
 const ContentCensusV1 = "content_census_v1"
-const CensusAdvisoryTokens = 2816 // Census narration estimate; advisory, never an admission gate.
+const CensusAdvisoryTokens = 2304 // Provisional bytes/3 estimate rounded up to 256; C3 measures provider tokens. Advisory only.
 const archiveTransportSlack = int64(1 << 20)
 
 var patternVersions = []string{"email_v1", "phone_e164_or_separated_v1", "credential_v1", "licence_families_v1", "simhash64_5shingle_v1"}
@@ -30,6 +30,7 @@ type censusMemory struct {
 	used   atomic.Int64
 	limit  int64
 	failed atomic.Bool
+	spools chan struct{} // Two allowances: at most 128 MiB of decoded tar spool per run.
 }
 
 func (m *censusMemory) reserve(n int64) bool {
@@ -51,8 +52,22 @@ func (m *censusMemory) reserve(n int64) bool {
 // RunStats counts actual census GET and HEAD calls, including failures, locally.
 // Atomics allow all sixteen workers to share it; table requests stay adapter-owned.
 type RunStats struct {
-	GETs, HEADs    atomic.Int64
-	ProcessedBytes atomic.Int64
+	GETs, HEADs                atomic.Int64
+	ProcessedBytes             atomic.Int64
+	PlannedBytes, StoredBytes  atomic.Int64 // Planned decoded ZIP bytes; actual transport bytes, including preflight.
+	RequestedBytes             atomic.Int64 // Sum of OpenRange lengths, including failed requests.
+	SpoolBytes, SpoolPeakBytes atomic.Int64
+}
+
+type statsReader struct {
+	r     io.Reader
+	stats *RunStats
+}
+
+func (r *statsReader) Read(b []byte) (int, error) {
+	n, e := r.r.Read(b)
+	r.stats.StoredBytes.Add(int64(n))
+	return n, e
 }
 
 // CensusSource must enforce signed snapshot containment for both operations.
@@ -143,6 +158,8 @@ type memberSlice struct {
 func (s memberSlice) Members() []Member { return s.members }
 
 type censusMemberResult struct {
+	err                                         error // Verifier failures refuse the entire run before any facts/binding can publish.
+	plain                                       bool  // An archive candidate whose content proved to be a plain member.
 	commitment                                  MemberCommitment
 	state, reason                               string
 	opened                                      bool
@@ -178,7 +195,10 @@ func scanCensus(ctx context.Context, s Source, p Policy) (Facts, error) {
 		return Facts{}, ErrUnsupported
 	}
 	members := append([]Member(nil), s.Members()...)
-	if len(members) == 0 || len(members) > 100000 {
+	if len(members) == 0 {
+		return Facts{}, ErrEmptyVersion
+	}
+	if len(members) > 100000 {
 		return Facts{}, ErrMemberCountExceeded
 	}
 	var tables, census []Member
@@ -216,7 +236,7 @@ func scanCensus(ctx context.Context, s Source, p Policy) (Facts, error) {
 	if int64(len(census))*1024+16*(4<<20) > p.MaxMemoryBytes {
 		return Facts{}, ErrResourceLimit
 	}
-	p.censusMemory = &censusMemory{limit: p.MaxMemoryBytes}
+	p.censusMemory = &censusMemory{limit: p.MaxMemoryBytes, spools: make(chan struct{}, 2)}
 	p.censusMemory.used.Store(int64(len(census))*1024 + 16*(4<<20))
 	defer func() {
 		if p.MemoryPeak != nil {
@@ -243,6 +263,11 @@ func scanCensus(ctx context.Context, s Source, p Policy) (Facts, error) {
 	})
 	if p.censusMemory.failed.Load() {
 		return Facts{}, ErrResourceLimit
+	}
+	for _, r := range results {
+		if r.err != nil {
+			return Facts{}, r.err
+		}
 	}
 	// HEAD unread members even after a scan deadline, with a fresh bounded context:
 	// timing stops are publishable only after unread metadata was checked.
@@ -326,6 +351,7 @@ func readCensusMember(ctx context.Context, s CensusSource, m Member, p Policy, s
 	r := unreadResult(m, "read_error")
 	r.findings.memory = p.censusMemory
 	stats.GETs.Add(1)
+	stats.RequestedBytes.Add(m.Size)
 	stream, err := s.OpenRange(ctx, m.Identity, 0, m.Size)
 	if err != nil {
 		if ctx.Err() != nil {
@@ -340,7 +366,7 @@ func readCensusMember(ctx context.Context, s CensusSource, m Member, p Policy, s
 	defer stop()
 	defer stream.Close()
 	scan := newFileInspection("." + m.Format)
-	n, err := copyInspected(ctx, scan, io.LimitReader(stream, m.Size+1))
+	n, err := copyInspected(ctx, scan, io.LimitReader(&statsReader{stream, stats}, m.Size+1))
 	r.processed = min(n, m.Size)
 	if ctx.Err() != nil {
 		r.reason = "budget_exhausted"

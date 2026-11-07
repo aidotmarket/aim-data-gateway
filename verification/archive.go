@@ -2,19 +2,19 @@ package verification
 
 import (
 	"archive/tar"
-	"archive/zip"
 	"bufio"
 	"bytes"
-	"compress/flate"
 	"compress/gzip"
 	"context"
 	"crypto/sha256"
 	"encoding/binary"
 	"errors"
+	"fmt"
+	"github.com/aidotmarket/aim-data-gateway/internal/inventory"
+	"hash"
 	"hash/crc32"
 	"io"
 	"os"
-	"sort"
 )
 
 // Errors credit what failed as unreadable; not_examined arises only from
@@ -33,6 +33,7 @@ func rangeRead(ctx context.Context, s CensusSource, m Member, off, n int64, stat
 		return nil, io.ErrUnexpectedEOF
 	}
 	stats.GETs.Add(1)
+	stats.RequestedBytes.Add(n)
 	r, e := s.OpenRange(ctx, m.Identity, off, n)
 	if e != nil {
 		return nil, e
@@ -40,7 +41,7 @@ func rangeRead(ctx context.Context, s CensusSource, m Member, off, n int64, stat
 	defer r.Close()
 	stop := context.AfterFunc(ctx, func() { r.Close() })
 	defer stop()
-	b, e := io.ReadAll(io.LimitReader(r, n+1))
+	b, e := io.ReadAll(io.LimitReader(&statsReader{r, stats}, n))
 	if ctx.Err() != nil {
 		return nil, ctx.Err()
 	}
@@ -66,289 +67,32 @@ func (t tailAt) ReadAt(b []byte, off int64) (int, error) {
 	return n, nil
 }
 
-type zipExtent struct {
-	file           *zip.File
-	off, data, end int64
-	valid          bool
-}
-
-func readZip(ctx context.Context, s CensusSource, m Member, p Policy, stats *RunStats) (r censusMemberResult) {
-	r = archiveResult(m)
-	defer func() {
-		if ctx.Err() != nil && !r.opened {
-			r.reason = "budget_exhausted"
-			r.unreadable = 0
-		}
-	}()
-	r.findings.memory = p.censusMemory
-	tail, e := rangeRead(ctx, s, m, max(0, m.Size-archiveTransportSlack), min(m.Size, archiveTransportSlack), stats)
-	if e != nil {
-		r.reason = "read_error"
-		r.unreadable = m.Size
-		return r
-	}
-	// EOCD must end exactly at the snapshot boundary, including its comment.
-	end := -1
-	for i := len(tail) - 22; i >= max(0, len(tail)-65557); i-- {
-		if bytes.Equal(tail[i:i+4], []byte("PK\x05\x06")) && i+22+int(binary.LittleEndian.Uint16(tail[i+20:])) == len(tail) {
-			end = i
-			break
-		}
-	}
-	if end < 0 {
-		r.unreadable = m.Size
-		return r
-	}
-	cdSize := int64(binary.LittleEndian.Uint32(tail[end+12:]))
-	cdOff := int64(binary.LittleEndian.Uint32(tail[end+16:]))
-	tailStart := m.Size - int64(len(tail))
-	if cdSize > archiveTransportSlack || cdOff < tailStart {
-		r.reason = "archive_over_cap"
-		r.unreadable = m.Size
-		return r
-	} // LOW-H: unopened, whole stored size unreadable.
-	if cdOff+cdSize > tailStart+int64(end) {
-		r.unreadable = m.Size
-		return r
-	}
-	zr, e := zip.NewReader(tailAt{tail, tailStart}, m.Size)
-	if e != nil {
-		r.unreadable = m.Size
-		return r
-	}
-	var compressed, expanded uint64
-	for _, f := range zr.File {
-		if ^uint64(0)-compressed < f.CompressedSize64 || ^uint64(0)-expanded < f.UncompressedSize64 {
-			r.reason = "archive_over_cap"
-			r.unreadable = m.Size
-			return r
-		}
-		compressed += f.CompressedSize64
-		expanded += f.UncompressedSize64
-	}
-	if compressed == 0 && expanded > 0 || compressed > 0 && expanded/compressed > uint64(p.ArchiveCaps.CompressionRatio) || compressed > 0 && expanded%compressed > 0 && expanded/compressed == uint64(p.ArchiveCaps.CompressionRatio) {
-		r.reason = "archive_over_cap"
-		r.unreadable = m.Size
-		return r
-	}
-	// zip.File exposes the data offset, but not its local header offset. The
-	// bounded central directory gives the offsets used by zip_entries directly.
-	offsets := make([]int64, 0, len(zr.File))
-	cd := tail[cdOff-tailStart : cdOff-tailStart+cdSize]
-	for len(cd) >= 46 && bytes.Equal(cd[:4], []byte("PK\x01\x02")) {
-		offsets = append(offsets, int64(binary.LittleEndian.Uint32(cd[42:])))
-		n := 46 + int(binary.LittleEndian.Uint16(cd[28:])) + int(binary.LittleEndian.Uint16(cd[30:])) + int(binary.LittleEndian.Uint16(cd[32:]))
-		if n > len(cd) {
-			break
-		}
-		cd = cd[n:]
-	}
-	if len(offsets) != len(zr.File) {
-		r.unreadable = m.Size
-		return r
-	}
-	xs := make([]zipExtent, len(zr.File))
-	for i, f := range zr.File {
-		off := offsets[i]
-		header, err := rangeRead(ctx, s, m, off, 30, stats)
-		if err != nil {
-			r.reason = "read_error"
-			r.unreadable = m.Size
-			return r
-		}
-		data := off + 30 + int64(binary.LittleEndian.Uint16(header[26:])) + int64(binary.LittleEndian.Uint16(header[28:]))
-		length := int64(f.CompressedSize64)
-		valid := bytes.Equal(header[:4], []byte("PK\x03\x04")) && binary.LittleEndian.Uint16(header[8:]) == f.Method && binary.LittleEndian.Uint16(header[6:]) == f.Flags && length >= 0 && data >= off && data <= cdOff && length <= cdOff-data
-		xs[i] = zipExtent{f, off, data, data + length, valid}
-	}
-	order := make([]int, len(xs))
-	for i := range order {
-		order[i] = i
-	}
-	sort.Slice(order, func(i, j int) bool { return xs[order[i]].off < xs[order[j]].off })
-	if len(order) > 0 {
-		furthest := order[0]
-		for _, b := range order[1:] {
-			if xs[furthest].end > xs[b].off {
-				xs[furthest].valid = false
-				xs[b].valid = false
-			}
-			if xs[b].end > xs[furthest].end {
-				furthest = b
-			}
-		}
-	}
-
-	r.opened = true
-	r.state = "partly_read"
-	r.reason = ""
-	committed := sha256.New()
-	var processed int64
-	complete := true
-	creditBad := func(n int64) {
-		r.unreadable += min(func() int64 {
-			if n < 0 {
-				return m.Size
-			}
-			return n
-		}(), m.Size-r.readable-r.unreadable)
-	}
-	for i, x := range xs {
-		f := x.file
-		if i >= p.ArchiveCaps.Entries {
-			complete = false
-			r.reason = "archive_over_cap"
-			r.reasons[r.reason]++
-			creditBad(int64(f.CompressedSize64))
-			continue
-		}
-		if f.UncompressedSize64 > uint64(p.ArchiveAllowanceBytes-processed) {
-			complete = false
-			r.reason = "budget_exhausted"
-			r.reasons[r.reason] += int64(len(xs) - i)
-			break
-		}
-		if ctx.Err() != nil {
-			complete = false
-			r.reason = "budget_exhausted"
-			r.reasons[r.reason] += int64(len(xs) - i)
-			break
-		}
-		reason := ""
-		if !x.valid {
-			reason = "archive_corrupt"
-		} else if f.Flags&1 != 0 {
-			reason = "archive_encrypted"
-		} else if f.Method != zip.Store && f.Method != zip.Deflate {
-			reason = "archive_corrupt"
-		}
-		if reason != "" {
-			complete = false
-			r.reason = reason
-			r.reasons[reason]++
-			creditBad(int64(f.CompressedSize64))
-			continue
-		}
-		// Stream a fixed extent; never allocate its declared compressed size.
-		stats.GETs.Add(1)
-		stream, err := s.OpenRange(ctx, m.Identity, x.off, x.end-x.off)
-		if err != nil {
-			complete = false
-			r.reason = "read_error"
-			r.reasons[r.reason]++
-			creditBad(int64(f.CompressedSize64))
-			break
-		}
-		stop := context.AfterFunc(ctx, func() { stream.Close() })
-		// Hash into a temporary extent spool. It is appended to the aggregate hash
-		// only after validation, so a corrupt entry never becomes a completed entry.
-		spool, err := newSpool()
-		if err != nil {
-			stop()
-			stream.Close()
-			r.reason = "read_error"
-			creditBad(int64(f.CompressedSize64))
-			complete = false
-			break
-		}
-		extent := io.TeeReader(io.LimitReader(stream, x.end-x.off), spool)
-		_, err = io.CopyN(io.Discard, extent, x.data-x.off)
-		br := bufio.NewReaderSize(io.LimitReader(extent, int64(f.CompressedSize64)), 4096)
-		var decoder io.ReadCloser = io.NopCloser(br)
-		if f.Method == zip.Deflate {
-			decoder = flate.NewReader(br)
-		}
-		scan := newFileInspection(f.Name)
-		crc := crc32.NewIEEE()
-		var n int64
-		if err == nil {
-			n, err = copyInspected(ctx, io.MultiWriter(scan, crc), io.LimitReader(decoder, int64(f.UncompressedSize64)+1))
-		}
-		decoder.Close()
-		// ByteReader prevents flate read-ahead hiding trailing compressed junk.
-		consumed := spool.n - int64(br.Buffered()) - (x.data - x.off)
-		if err == nil && (uint64(n) != f.UncompressedSize64 || consumed != int64(f.CompressedSize64) || crc.Sum32() != f.CRC32) {
-			err = zip.ErrChecksum
-		}
-		stop()
-		stream.Close()
-		processed += min(n, int64(f.UncompressedSize64))
-		r.processed = processed
-		if ctx.Err() != nil {
-			spool.close()
-			complete = false
-			r.reason = "budget_exhausted"
-			r.reasons[r.reason] += int64(len(xs) - i)
-			break
-		}
-		if err != nil {
-			spool.close()
-			complete = false
-			r.reason = "archive_corrupt"
-			var corrupt flate.CorruptInputError
-			if !errors.Is(err, zip.ErrChecksum) && !errors.As(err, &corrupt) {
-				r.reason = "read_error"
-			}
-			r.reasons[r.reason]++
-			creditBad(int64(f.CompressedSize64))
-			if r.reason == "read_error" {
-				break
-			}
-			continue
-		}
-		writeU64(committed, x.off)
-		writeU64(committed, x.end-x.off)
-		spool.copyPrefix(committed, spool.n)
-		spool.close()
-		r.readable += min(int64(f.CompressedSize64), m.Size-r.readable-r.unreadable)
-		r.storedRead += int64(f.CompressedSize64)
-		if !f.FileInfo().IsDir() {
-			r.entries++
-			r.entryBytes += n
-			finding := scan.finish()
-			if detectContent(scan.prefix, f.Name).Archive != "" {
-				r.reasons["nested_archive"]++
-			} else {
-				r.findings.addFile(finding)
-			}
-		}
-	}
-	r.commitment = MemberCommitment{"zip_entries", [32]byte(committed.Sum(nil))}
-	if complete {
-		// Completion is bound to every stored byte, including directory and headers.
-		stats.GETs.Add(1)
-		stream, err := s.OpenRange(ctx, m.Identity, 0, m.Size)
-		if err == nil {
-			h := sha256.New()
-			stop := context.AfterFunc(ctx, func() { stream.Close() })
-			n, e := copyInspected(ctx, h, io.LimitReader(stream, m.Size+1))
-			stop()
-			stream.Close()
-			if e == nil && n == m.Size {
-				r.commitment = MemberCommitment{"full", [32]byte(h.Sum(nil))}
-				r.state = "fully_read"
-				return r
-			}
-		}
-		r.reason = "read_error"
-		r.reasons[r.reason]++
-	}
-	return r
-}
-
 // decodedSpool holds at most one archive allowance on local temporary storage;
 // it is mode 0600, unlinked immediately, and closed on every exit path.
 type decodedSpool struct {
 	name string
-	f    *os.File
-	n    int64
-	w    *bufio.Writer
+	f    interface {
+		io.Writer
+		io.ReaderAt
+		io.Closer
+	}
+	n int64
+	w *bufio.Writer
+}
+
+var errLocalStorage = errors.New("census local storage failure")
+
+func storageError(e error) error {
+	if e == nil {
+		return nil
+	}
+	return fmt.Errorf("%w: %w", errLocalStorage, e)
 }
 
 func newSpool() (*decodedSpool, error) {
 	f, e := os.CreateTemp("", "aim-census-*")
 	if e != nil {
-		return nil, e
+		return nil, storageError(e)
 	}
 	name := f.Name()
 	if os.Remove(name) == nil {
@@ -359,14 +103,17 @@ func newSpool() (*decodedSpool, error) {
 func (s *decodedSpool) Write(b []byte) (int, error) {
 	n, e := s.w.Write(b)
 	s.n += int64(n)
-	return n, e
+	return n, storageError(e)
 }
 func (s *decodedSpool) copyPrefix(w io.Writer, n int64) error {
 	if e := s.w.Flush(); e != nil {
-		return e
+		return storageError(e)
 	}
-	_, e := io.Copy(w, io.NewSectionReader(s.f, 0, n))
-	return e
+	got, e := io.Copy(w, io.NewSectionReader(s.f, 0, n))
+	if e == nil && got != n {
+		e = io.ErrUnexpectedEOF
+	}
+	return storageError(e)
 }
 func (s *decodedSpool) close() {
 	s.f.Close()
@@ -382,11 +129,20 @@ func (s *decodedSpool) commit(n int64) (MemberCommitment, error) {
 	return MemberCommitment{"decoded_prefix", [32]byte(h.Sum(nil))}, e
 }
 
+type optionalInspection struct{ scan *fileInspection }
+
+func (w *optionalInspection) Write(b []byte) (int, error) {
+	if w.scan == nil {
+		return len(b), nil
+	}
+	return w.scan.Write(b)
+}
+
 func readTarGzip(ctx context.Context, s CensusSource, m Member, p Policy, stats *RunStats) censusMemberResult {
 	r := archiveResult(m)
 	r.findings.memory = p.censusMemory
-	r.commitment = decodedCommitment(nil)
 	stats.GETs.Add(1)
+	stats.RequestedBytes.Add(p.ArchiveAllowanceBytes + archiveTransportSlack)
 	stream, err := s.OpenRange(ctx, m.Identity, 0, p.ArchiveAllowanceBytes+archiveTransportSlack)
 	if err != nil {
 		r.reason = "read_error"
@@ -399,11 +155,14 @@ func readTarGzip(ctx context.Context, s CensusSource, m Member, p Policy, stats 
 	}
 	r.opened = true
 	r.state = "partly_read"
+	r.commitment = decodedCommitment(nil)
 	stop := context.AfterFunc(ctx, func() { stream.Close() })
 	defer stop()
 	defer stream.Close()
 	storedHash := sha256.New()
-	stored := &countingReader{r: io.TeeReader(io.LimitReader(stream, p.ArchiveAllowanceBytes+archiveTransportSlack), storedHash)}
+	plainScan := newFileInspection("." + m.Format)
+	plainSink := &optionalInspection{plainScan}
+	stored := &countingReader{r: io.TeeReader(io.LimitReader(&statsReader{stream, stats}, p.ArchiveAllowanceBytes+archiveTransportSlack), io.MultiWriter(storedHash, plainSink))}
 	failureReason := func(e error) string {
 		if ctx.Err() != nil {
 			return "budget_exhausted"
@@ -415,6 +174,9 @@ func readTarGzip(ctx context.Context, s CensusSource, m Member, p Policy, stats 
 	}
 	gz, err := newArchiveGzip(stored)
 	if err != nil {
+		if !bytes.HasPrefix(plainScan.prefix, []byte{0x1f, 0x8b}) && (stored.n == m.Size || errors.Is(err, gzip.ErrHeader)) {
+			return finishPlainCandidate(ctx, m, p, r, stored, storedHash, plainScan)
+		}
 		r.reason = failureReason(err)
 		if r.reason != "budget_exhausted" {
 			r.unreadable = m.Size
@@ -422,10 +184,41 @@ func readTarGzip(ctx context.Context, s CensusSource, m Member, p Policy, stats 
 		return r
 	}
 	defer gz.Close()
-	spool, err := newSpool()
+	// A candidate name is insufficient: confirm a tar header before opening
+	// interiors. A valid gzip of other data stays a stored-size plain member.
+	peek := bufio.NewReaderSize(gz, 512)
+	header, peekErr := peek.Peek(512)
+	if peekErr == nil || errors.Is(peekErr, io.EOF) {
+		if !inventory.IsTarHeader(header) {
+			return finishPlainCandidate(ctx, m, p, r, stored, storedHash, plainScan)
+		}
+	}
+	plainSink.scan = nil
+	// Disk is separately bounded at two allowances (128 MiB), independent of
+	// sixteen scan workers. Waiting does not change a member's byte selection.
+	if p.censusMemory != nil && p.censusMemory.spools != nil {
+		select {
+		case p.censusMemory.spools <- struct{}{}:
+			defer func() { <-p.censusMemory.spools }()
+		case <-ctx.Done():
+			r.reason = "budget_exhausted"
+			return r
+		}
+	}
+	reserved := stats.SpoolBytes.Add(p.ArchiveAllowanceBytes)
+	for old := stats.SpoolPeakBytes.Load(); reserved > old; old = stats.SpoolPeakBytes.Load() {
+		if stats.SpoolPeakBytes.CompareAndSwap(old, reserved) {
+			break
+		}
+	}
+	defer stats.SpoolBytes.Add(-p.ArchiveAllowanceBytes)
+	create := p.censusSpool
+	if create == nil {
+		create = newSpool
+	}
+	spool, err := create()
 	if err != nil {
-		r.reason = "read_error"
-		r.unreadable = m.Size
+		r.err = fmt.Errorf("%w: %w", ErrScannerFailure, storageError(err))
 		return r
 	}
 	defer spool.close()
@@ -435,7 +228,7 @@ func readTarGzip(ctx context.Context, s CensusSource, m Member, p Policy, stats 
 		limit = m.Size * p.ArchiveCaps.CompressionRatio
 		capStop = true
 	}
-	decoded := io.TeeReader(io.LimitReader(gz, limit), spool)
+	decoded := io.TeeReader(io.LimitReader(peek, limit), spool)
 	tr := tar.NewReader(decoded)
 	var lastComplete, pendingEnd int64
 	var pending *fileInspection
@@ -465,6 +258,10 @@ func readTarGzip(ctx context.Context, s CensusSource, m Member, p Policy, stats 
 			_, e = copyInspected(ctx, io.Discard, decoded)
 			if e == nil && spool.n < limit {
 				if stored.n == m.Size {
+					if e := spool.w.Flush(); e != nil {
+						r.err = fmt.Errorf("%w: %w", ErrScannerFailure, storageError(e))
+						return r
+					}
 					r.state = "fully_read"
 					r.reason = ""
 					r.readable = m.Size
@@ -484,6 +281,10 @@ func readTarGzip(ctx context.Context, s CensusSource, m Member, p Policy, stats 
 			}
 		}
 		if e != nil {
+			if errors.Is(e, errLocalStorage) {
+				r.err = fmt.Errorf("%w: %w", ErrScannerFailure, e)
+				return r
+			}
 			r.reason = failureReason(e)
 			if spool.n >= limit {
 				r.reason = "budget_exhausted"
@@ -500,6 +301,10 @@ func readTarGzip(ctx context.Context, s CensusSource, m Member, p Policy, stats 
 		scan := newFileInspection(h.Name)
 		_, e = copyInspected(ctx, scan, tr)
 		if e != nil {
+			if errors.Is(e, errLocalStorage) {
+				r.err = fmt.Errorf("%w: %w", ErrScannerFailure, e)
+				return r
+			}
 			r.reason = failureReason(e)
 			if spool.n >= limit {
 				r.reason = "budget_exhausted"
@@ -528,12 +333,39 @@ func readTarGzip(ctx context.Context, s CensusSource, m Member, p Policy, stats 
 	}
 	r.commitment, err = spool.commit(length)
 	if err != nil {
-		r.reason = "read_error"
+		r.err = fmt.Errorf("%w: %w", ErrScannerFailure, err)
+		return r
 	}
 	if r.reason == "archive_corrupt" || r.reason == "read_error" {
 		r.unreadable = m.Size
 	}
 	r.reasons[r.reason]++
+	return r
+}
+
+// Candidate names reserve an archive allowance before content is available.
+// If content proves plain, do not exceed that immutable reservation.
+func finishPlainCandidate(ctx context.Context, m Member, p Policy, r censusMemberResult, stored *countingReader, h hash.Hash, scan *fileInspection) censusMemberResult {
+	_, err := copyInspected(ctx, io.Discard, io.LimitReader(stored, max(0, p.ArchiveAllowanceBytes-stored.n)))
+	r.plain = true
+	r.state = "unread"
+	r.commitment = unreadCommitment(m)
+	r.processed = min(stored.n, p.ArchiveAllowanceBytes)
+	if ctx.Err() != nil || stored.n < m.Size && stored.n >= p.ArchiveAllowanceBytes {
+		r.reason = "budget_exhausted"
+		return r
+	}
+	if err != nil || stored.n != m.Size {
+		r.reason = "read_error"
+		r.unreadable = m.Size
+		return r
+	}
+	r.state = "fully_read"
+	r.reason = ""
+	r.commitment = MemberCommitment{"full", [32]byte(h.Sum(nil))}
+	r.readable = m.Size
+	r.storedRead = m.Size
+	r.findings.addFile(scan.finish())
 	return r
 }
 

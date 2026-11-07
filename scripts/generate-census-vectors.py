@@ -9,6 +9,7 @@ import struct
 import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
+ARCHIVE_FORMATS = json.loads((ROOT / "internal/inventory/archive_formats.json").read_text())
 
 def u64(n):
     return struct.pack('>Q', n)
@@ -24,7 +25,7 @@ def planned(seed, members, literals):
     result = []
     census = [m for m in members if m['format'] not in ('csv', 'tsv', 'jsonl', 'parquet')]
     for m in sorted(census, key=lambda m: (hmac.digest(seed, m['identity'].encode(), 'sha256'), m['identity'].encode())):
-        cost = literals['archive_allowance_bytes'] if m['format'] in ('zip', 'tar.gz') else m['size']
+        cost = literals['archive_allowance_bytes'] if m['format'].removeprefix('.').lower() in ARCHIVE_FORMATS else m['size']
         if cost <= remaining:
             result.append(m['identity'])
             remaining -= cost
@@ -41,8 +42,8 @@ def main():
     decoded = b'generated decoded prefix\x00' * 30
     bodies = {'a-table': b'n\n1\n2\n', 'b-full': b'plain\x00\xff\n', 'c-zip': zip_bytes, 'd-tar': decoded}
     members = []
-    for identity, fmt in [('a-table', 'csv'), ('b-full', 'txt'), ('c-zip', 'zip'), ('d-tar', 'tar.gz'), ('e-unread', 'txt'), ('é-未読', 'txt')]:
-        members.append({'identity': identity, 'size': len(bodies[identity]) if identity in bodies else 1_000_000_000,
+    for identity, fmt in [('a-table', 'csv'), ('b-full', 'txt'), ('c-zip', 'zip'), ('d-tar', 'tar.gz'), ('e-unread', 'txt'), ('f-gzip', 'gz'), ('g-tgz', 'tgz'), ('é-未読', 'txt')]:
+        members.append({'identity': identity, 'size': len(bodies[identity]) if identity in bodies else (57 if fmt in ('gz', 'tgz') else 1_000_000_000),
                         'etag': 'é-tag' if identity.startswith('é') else 'tag-' + identity,
                         'version_id': '版本-2' if identity.startswith('é') else '', 'format': fmt})
     seed = bytes(range(32))

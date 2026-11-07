@@ -2,8 +2,10 @@ package inventory
 
 import (
 	"bytes"
+	"compress/gzip"
 	"encoding/binary"
 	"encoding/json"
+	"io"
 	"path"
 	"strings"
 	"unicode/utf16"
@@ -13,8 +15,8 @@ import (
 // ContentType contains fixed labels only. Names are local tie breakers, never output.
 type ContentType struct{ Class, MediaType, Archive string }
 
-// DetectContent is the single content classifier shared by inventory and census.
-// The input is a bounded prefix; signed Format, rather than this result, selects tables.
+// DetectContent classifies census content from a bounded prefix. Signed Format
+// selects tables; the gateway runner retains its frozen Detect admission rules.
 func DetectContent(b []byte, name string) ContentType {
 	result := func(c, m string) ContentType { return ContentType{Class: c, MediaType: m} }
 	if len(b) == 0 {
@@ -39,7 +41,15 @@ func DetectContent(b []byte, name string) ContentType {
 		return ContentType{"other_binary", "application/zip", "zip"}
 	}
 	if bytes.HasPrefix(b, []byte{0x1f, 0x8b}) {
-		return ContentType{"other_binary", "application/gzip", "tar.gz"}
+		t := ContentType{"other_binary", "application/gzip", ""}
+		if gz, e := gzip.NewReader(bytes.NewReader(b)); e == nil {
+			var header [512]byte
+			if _, e = io.ReadFull(gz, header[:]); e == nil && IsTarHeader(header[:]) {
+				t.Archive = "tar.gz"
+			}
+			gz.Close()
+		}
+		return t
 	}
 	if bytes.HasPrefix(b, []byte("%PDF-")) {
 		return result("pdf", "application/pdf")

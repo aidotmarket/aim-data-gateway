@@ -34,6 +34,7 @@ type Source interface {
 	OpenAt(context.Context, string) (RandomAccess, error)
 }
 type Policy struct {
+	censusSpool                                                                 func() (*decodedSpool, error) // Local fault injection; never a signed policy input.
 	censusMemory                                                                *censusMemory
 	ScanMode, BindingMethod                                                     string
 	ContentReadBudgetBytes, PlannedProcessedBytes, ArchiveAllowanceBytes        int64
@@ -120,6 +121,7 @@ var (
 	ErrVerifierUpgradeRequired     = RefusalError("verifier_upgrade_required")
 	ErrInsufficientReadableContent = RefusalError("insufficient_readable_content")
 	ErrMemberCountExceeded         = RefusalError("member_count_exceeded")
+	ErrEmptyVersion                = RefusalError("empty_version")
 )
 
 func RefusalReason(err error) string {
