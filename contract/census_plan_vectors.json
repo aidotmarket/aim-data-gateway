@@ -1,0 +1,436 @@
+{
+  "commitment_forms": [
+    {
+      "bytes_hex": "706c61696e00ff0a",
+      "sha256": "d6ac26a3a385a49abd6549c48953e6bc9a76b622519695ea0c5aa7d3dd59fe17",
+      "tag": "full"
+    },
+    {
+      "bytes_hex": "504b03041400000000000000655de544c950100000001000000005000000612e74787467656e6572617465642066697273740a504b03041400000000000000655da89c430d110000001100000005000000622e74787467656e657261746564207365636f6e640a504b010214031400000000000000655de544c9501000000010000000050000000000000000000000800100000000612e747874504b010214031400000000000000655da89c430d1100000011000000050000000000000000000000800133000000622e747874504b0506000000000200020066000000670000000000",
+      "extents": [
+        {
+          "length": 51,
+          "offset": 0
+        }
+      ],
+      "sha256": "a1f87eb3f924161ca3e76d0e8222d84f2426a5e50ddff53477ecff642d1c226a",
+      "tag": "zip_entries"
+    },
+    {
+      "bytes_hex": "67656e657261746564206465636f646564207072656669780067656e657261746564206465636f646564207072656669780067656e657261746564206465636f646564207072656669780067656e657261746564206465636f646564207072656669780067656e657261746564206465636f646564207072656669780067656e657261746564206465636f646564207072656669780067656e657261746564206465636f646564207072656669780067656e657261746564206465636f646564207072656669780067656e657261746564206465636f646564207072656669780067656e657261746564206465636f646564207072656669780067656e657261746564206465636f646564207072656669780067656e657261746564206465636f646564207072656669780067656e657261746564206465636f646564207072656669780067656e657261746564206465636f646564207072656669780067656e657261746564206465636f646564207072656669780067656e657261746564206465636f646564207072656669780067656e657261746564206465636f646564207072656669780067656e657261746564206465636f646564207072656669780067656e657261746564206465636f646564207072656669780067656e657261746564206465636f646564207072656669780067656e657261746564206465636f646564207072656669780067656e657261746564206465636f646564207072656669780067656e657261746564206465636f646564207072656669780067656e657261746564206465636f646564207072656669780067656e657261746564206465636f646564207072656669780067656e657261746564206465636f646564207072656669780067656e657261746564206465636f646564207072656669780067656e657261746564206465636f646564207072656669780067656e657261746564206465636f646564207072656669780067656e657261746564206465636f6465642070726566697800",
+      "length": 513,
+      "sha256": "59743d9fc2566c1e2c000593fa2f1650c1f58a19218b5f43b2b86a13f8796a50",
+      "tag": "decoded_prefix"
+    }
+  ],
+  "content_binding": {
+    "commitments": {
+      "a-table": {
+        "sha256": "b08a11a12effc9d6330979a26f9cc9ed89e5cbb45bfbdbf97e2a78fdaf66cfe9",
+        "tag": "full"
+      },
+      "b-full": {
+        "sha256": "d6ac26a3a385a49abd6549c48953e6bc9a76b622519695ea0c5aa7d3dd59fe17",
+        "tag": "full"
+      },
+      "c-zip": {
+        "sha256": "a1f87eb3f924161ca3e76d0e8222d84f2426a5e50ddff53477ecff642d1c226a",
+        "tag": "zip_entries"
+      },
+      "d-tar": {
+        "sha256": "59743d9fc2566c1e2c000593fa2f1650c1f58a19218b5f43b2b86a13f8796a50",
+        "tag": "decoded_prefix"
+      },
+      "e-unread": {
+        "sha256": "55189293e894c863b6f13fd90f2407b2cb9a6a574c6b43e624438b5f4ba3dd42",
+        "tag": "unread"
+      },
+      "é-未読": {
+        "sha256": "0a752bbbaaf422299549f7adb9e43ed213e719d8bc1798e14e03bbfe4e671c3b",
+        "tag": "unread"
+      }
+    },
+    "content_sha256": "347357b3b9741b3583713f9f69be216ac293ec494121f8bed264f06022b611f5",
+    "members": [
+      {
+        "etag": "tag-a-table",
+        "format": "csv",
+        "identity": "a-table",
+        "size": 6,
+        "version_id": ""
+      },
+      {
+        "etag": "tag-b-full",
+        "format": "txt",
+        "identity": "b-full",
+        "size": 8,
+        "version_id": ""
+      },
+      {
+        "etag": "tag-c-zip",
+        "format": "zip",
+        "identity": "c-zip",
+        "size": 227,
+        "version_id": ""
+      },
+      {
+        "etag": "tag-d-tar",
+        "format": "tar.gz",
+        "identity": "d-tar",
+        "size": 750,
+        "version_id": ""
+      },
+      {
+        "etag": "tag-e-unread",
+        "format": "txt",
+        "identity": "e-unread",
+        "size": 1000000000,
+        "version_id": ""
+      },
+      {
+        "etag": "é-tag",
+        "format": "txt",
+        "identity": "é-未読",
+        "size": 1000000000,
+        "version_id": "版本-2"
+      }
+    ],
+    "preimage_hex": "0000000000000007612d7461626c650000000000000006b08a11a12effc9d6330979a26f9cc9ed89e5cbb45bfbdbf97e2a78fdaf66cfe90000000000000006622d66756c6c0000000000000008000000000000000466756c6c0000000000000020d6ac26a3a385a49abd6549c48953e6bc9a76b622519695ea0c5aa7d3dd59fe170000000000000005632d7a697000000000000000e3000000000000000b7a69705f656e74726965730000000000000020a1f87eb3f924161ca3e76d0e8222d84f2426a5e50ddff53477ecff642d1c226a0000000000000005642d74617200000000000002ee000000000000000e6465636f6465645f707265666978000000000000002059743d9fc2566c1e2c000593fa2f1650c1f58a19218b5f43b2b86a13f8796a500000000000000008652d756e72656164000000003b9aca000000000000000006756e72656164000000000000002055189293e894c863b6f13fd90f2407b2cb9a6a574c6b43e624438b5f4ba3dd420000000000000009c3a92de69caae8aaad000000003b9aca000000000000000006756e7265616400000000000000200a752bbbaaf422299549f7adb9e43ed213e719d8bc1798e14e03bbfe4e671c3b"
+  },
+  "contract": "content_census_v1/planned_read_commitment_v2",
+  "framing": "u64be byte lengths; table identity,size,digest; census identity,size,field(tag),field(digest); unread digest=sha256(size,field(etag),field(version_id))",
+  "plans": [
+    {
+      "literals": {
+        "archive_allowance_bytes": 67108864,
+        "planned_processed_bytes": 0
+      },
+      "members": [
+        {
+          "etag": "tag-a-table",
+          "format": "csv",
+          "identity": "a-table",
+          "size": 6,
+          "version_id": ""
+        },
+        {
+          "etag": "tag-b-full",
+          "format": "txt",
+          "identity": "b-full",
+          "size": 8,
+          "version_id": ""
+        },
+        {
+          "etag": "tag-c-zip",
+          "format": "zip",
+          "identity": "c-zip",
+          "size": 227,
+          "version_id": ""
+        },
+        {
+          "etag": "tag-d-tar",
+          "format": "tar.gz",
+          "identity": "d-tar",
+          "size": 750,
+          "version_id": ""
+        },
+        {
+          "etag": "tag-e-unread",
+          "format": "txt",
+          "identity": "e-unread",
+          "size": 1000000000,
+          "version_id": ""
+        },
+        {
+          "etag": "é-tag",
+          "format": "txt",
+          "identity": "é-未読",
+          "size": 1000000000,
+          "version_id": "版本-2"
+        }
+      ],
+      "planned": [],
+      "seed_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "unread_binding_sha256": "5cd06d808119ec7fa6965c64e3f966faaa658cbbe9f6f4e406a2c1e7a00c5553"
+    },
+    {
+      "literals": {
+        "archive_allowance_bytes": 67108864,
+        "planned_processed_bytes": 4
+      },
+      "members": [
+        {
+          "etag": "tag-a-table",
+          "format": "csv",
+          "identity": "a-table",
+          "size": 6,
+          "version_id": ""
+        },
+        {
+          "etag": "tag-b-full",
+          "format": "txt",
+          "identity": "b-full",
+          "size": 8,
+          "version_id": ""
+        },
+        {
+          "etag": "tag-c-zip",
+          "format": "zip",
+          "identity": "c-zip",
+          "size": 227,
+          "version_id": ""
+        },
+        {
+          "etag": "tag-d-tar",
+          "format": "tar.gz",
+          "identity": "d-tar",
+          "size": 750,
+          "version_id": ""
+        },
+        {
+          "etag": "tag-e-unread",
+          "format": "txt",
+          "identity": "e-unread",
+          "size": 1000000000,
+          "version_id": ""
+        },
+        {
+          "etag": "é-tag",
+          "format": "txt",
+          "identity": "é-未読",
+          "size": 1000000000,
+          "version_id": "版本-2"
+        }
+      ],
+      "planned": [],
+      "seed_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "unread_binding_sha256": "5cd06d808119ec7fa6965c64e3f966faaa658cbbe9f6f4e406a2c1e7a00c5553"
+    },
+    {
+      "literals": {
+        "archive_allowance_bytes": 67108864,
+        "planned_processed_bytes": 8
+      },
+      "members": [
+        {
+          "etag": "tag-a-table",
+          "format": "csv",
+          "identity": "a-table",
+          "size": 6,
+          "version_id": ""
+        },
+        {
+          "etag": "tag-b-full",
+          "format": "txt",
+          "identity": "b-full",
+          "size": 8,
+          "version_id": ""
+        },
+        {
+          "etag": "tag-c-zip",
+          "format": "zip",
+          "identity": "c-zip",
+          "size": 227,
+          "version_id": ""
+        },
+        {
+          "etag": "tag-d-tar",
+          "format": "tar.gz",
+          "identity": "d-tar",
+          "size": 750,
+          "version_id": ""
+        },
+        {
+          "etag": "tag-e-unread",
+          "format": "txt",
+          "identity": "e-unread",
+          "size": 1000000000,
+          "version_id": ""
+        },
+        {
+          "etag": "é-tag",
+          "format": "txt",
+          "identity": "é-未読",
+          "size": 1000000000,
+          "version_id": "版本-2"
+        }
+      ],
+      "planned": [
+        "b-full"
+      ],
+      "seed_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "unread_binding_sha256": "08c59ce742c8088123b79d8caab9b715c7ff58d76e76bec57615f3d7f1c0bba6"
+    },
+    {
+      "literals": {
+        "archive_allowance_bytes": 67108864,
+        "planned_processed_bytes": 67108864
+      },
+      "members": [
+        {
+          "etag": "tag-a-table",
+          "format": "csv",
+          "identity": "a-table",
+          "size": 6,
+          "version_id": ""
+        },
+        {
+          "etag": "tag-b-full",
+          "format": "txt",
+          "identity": "b-full",
+          "size": 8,
+          "version_id": ""
+        },
+        {
+          "etag": "tag-c-zip",
+          "format": "zip",
+          "identity": "c-zip",
+          "size": 227,
+          "version_id": ""
+        },
+        {
+          "etag": "tag-d-tar",
+          "format": "tar.gz",
+          "identity": "d-tar",
+          "size": 750,
+          "version_id": ""
+        },
+        {
+          "etag": "tag-e-unread",
+          "format": "txt",
+          "identity": "e-unread",
+          "size": 1000000000,
+          "version_id": ""
+        },
+        {
+          "etag": "é-tag",
+          "format": "txt",
+          "identity": "é-未読",
+          "size": 1000000000,
+          "version_id": "版本-2"
+        }
+      ],
+      "planned": [
+        "d-tar"
+      ],
+      "seed_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "unread_binding_sha256": "a3da16536942b53ead278f1bfe56492518c1f0937a3015c5bb5f8675ab353052"
+    },
+    {
+      "literals": {
+        "archive_allowance_bytes": 67108864,
+        "planned_processed_bytes": 134217736
+      },
+      "members": [
+        {
+          "etag": "tag-a-table",
+          "format": "csv",
+          "identity": "a-table",
+          "size": 6,
+          "version_id": ""
+        },
+        {
+          "etag": "tag-b-full",
+          "format": "txt",
+          "identity": "b-full",
+          "size": 8,
+          "version_id": ""
+        },
+        {
+          "etag": "tag-c-zip",
+          "format": "zip",
+          "identity": "c-zip",
+          "size": 227,
+          "version_id": ""
+        },
+        {
+          "etag": "tag-d-tar",
+          "format": "tar.gz",
+          "identity": "d-tar",
+          "size": 750,
+          "version_id": ""
+        },
+        {
+          "etag": "tag-e-unread",
+          "format": "txt",
+          "identity": "e-unread",
+          "size": 1000000000,
+          "version_id": ""
+        },
+        {
+          "etag": "é-tag",
+          "format": "txt",
+          "identity": "é-未読",
+          "size": 1000000000,
+          "version_id": "版本-2"
+        }
+      ],
+      "planned": [
+        "d-tar",
+        "b-full",
+        "c-zip"
+      ],
+      "seed_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "unread_binding_sha256": "840cd433317eea48596bb93bf7bfa90de239b1a7868d2eb0ea317d323bd977fc"
+    },
+    {
+      "literals": {
+        "archive_allowance_bytes": 67108864,
+        "planned_processed_bytes": 3000000000
+      },
+      "members": [
+        {
+          "etag": "tag-a-table",
+          "format": "csv",
+          "identity": "a-table",
+          "size": 6,
+          "version_id": ""
+        },
+        {
+          "etag": "tag-b-full",
+          "format": "txt",
+          "identity": "b-full",
+          "size": 8,
+          "version_id": ""
+        },
+        {
+          "etag": "tag-c-zip",
+          "format": "zip",
+          "identity": "c-zip",
+          "size": 227,
+          "version_id": ""
+        },
+        {
+          "etag": "tag-d-tar",
+          "format": "tar.gz",
+          "identity": "d-tar",
+          "size": 750,
+          "version_id": ""
+        },
+        {
+          "etag": "tag-e-unread",
+          "format": "txt",
+          "identity": "e-unread",
+          "size": 1000000000,
+          "version_id": ""
+        },
+        {
+          "etag": "é-tag",
+          "format": "txt",
+          "identity": "é-未読",
+          "size": 1000000000,
+          "version_id": "版本-2"
+        }
+      ],
+      "planned": [
+        "d-tar",
+        "é-未読",
+        "b-full",
+        "e-unread",
+        "c-zip"
+      ],
+      "seed_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "unread_binding_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    }
+  ]
+}

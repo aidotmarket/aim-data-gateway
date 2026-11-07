@@ -7,16 +7,18 @@ import (
 	"context"
 	"errors"
 	"io"
+	"io/fs"
 	"time"
 )
 
 type Member struct {
-	Identity      string
-	Size          int64
-	SHA256        [32]byte
-	DigestPresent bool   // Gateway digests remain required by default.
-	OrderingKey   []byte // Cloud identity bytes; nil selects the gateway contract.
-	Format        string // csv, tsv, jsonl, parquet; other formats are disclosed skips.
+	Identity        string
+	Size            int64
+	SHA256          [32]byte
+	DigestPresent   bool   // Gateway digests remain required by default.
+	OrderingKey     []byte // Cloud identity bytes; nil selects the gateway contract.
+	Format          string // The signed format selects tables versus census.
+	ETag, VersionID string // Unquoted provider metadata, bound under v2.
 }
 type RandomAccess interface {
 	io.ReaderAt
@@ -32,6 +34,12 @@ type Source interface {
 	OpenAt(context.Context, string) (RandomAccess, error)
 }
 type Policy struct {
+	censusMemory                                                                *censusMemory
+	ScanMode, BindingMethod                                                     string
+	ContentReadBudgetBytes, PlannedProcessedBytes, ArchiveAllowanceBytes        int64
+	ArchiveCaps                                                                 ArchiveCaps
+	PatternVersions                                                             []string
+	RunStats                                                                    *RunStats // Local only: actual GET and HEAD requests, never public facts.
 	Seed                                                                        [32]byte
 	CanonicalizationVersion, RowCountAlgorithmVersion, DistinctAlgorithmVersion string
 	HistogramVersion, NumericBucketVersion                                      string
@@ -56,6 +64,7 @@ type Policy struct {
 type Coverage struct {
 	Discovered int            `json:"objects_discovered"`
 	Scanned    int            `json:"objects_scanned"`
+	InCensus   int            `json:"objects_in_census,omitempty"`
 	Reasons    map[string]int `json:"objects_skipped_by_reason"`
 	Skipped    []Skip         `json:"skipped"`
 }
@@ -75,24 +84,59 @@ type Object struct {
 	RowMethod string   `json:"row_count_method"`
 }
 type Facts struct {
-	Coverage          Coverage `json:"coverage"`
-	Objects           []Object `json:"objects"`
-	FingerprintHash   string   `json:"fingerprint_hash"`
-	ContentSHA256     string   `json:"content_sha256"`
-	LocatorCommitment string   `json:"artifact_locator_commitment"`
+	ContentCensus       *ContentCensus `json:"content_census,omitempty"`
+	UnreadBindingSHA256 string         `json:"unread_binding_sha256,omitempty"`
+	memberDigests       map[string][32]byte
+	Coverage            Coverage `json:"coverage"`
+	Objects             []Object `json:"objects"`
+	FingerprintHash     string   `json:"fingerprint_hash"`
+	ContentSHA256       string   `json:"content_sha256"`
+	LocatorCommitment   string   `json:"artifact_locator_commitment"`
 }
 type ProbeResult struct {
-	ObjectsDiscovered       int
-	SizeClass               string
-	EstimatedMaxInputTokens int
-	SupportedCapabilities   []string
+	ObjectsDiscovered       int      `json:"objects_discovered"`
+	SizeClass               string   `json:"size_class"`
+	EstimatedMaxInputTokens int      `json:"estimated_max_input_tokens"`
+	SupportedCapabilities   []string `json:"supported_capabilities"`
+	SourceReachable         bool     `json:"source_reachable"`
+	RefusalReason           string   `json:"refusal_reason,omitempty"`
 }
 
+// RefusalError is stable across adapters; wrapping preserves errors.Is.
+type RefusalError string
+
+func (e RefusalError) Error() string { return string(e) }
+
 var (
-	ErrArtifactChanged = errors.New("artifact_changed") // caller terminates FAILED_VOIDED; no partial facts.
-	ErrUnsupported     = errors.New("unsupported_type")
-	ErrBudget          = errors.New("scanner_failure")
-	ErrTimeout         = errors.New("timeout")
+	ErrArtifactChanged = RefusalError("artifact_changed")
+	ErrUnsupported     = RefusalError("unsupported_type")
+	ErrSummaryBudget   = RefusalError("summary_budget_exceeded")
+	ErrResourceLimit   = RefusalError("resource_limit_exceeded")
+	// ErrBudget preserves direct comparisons in legacy adapters without ScanMode.
+	ErrBudget                      = ErrResourceLimit
+	ErrTimeout                     = RefusalError("timeout")
+	ErrPermissionDenied            = RefusalError("permission_denied")
+	ErrScannerFailure              = RefusalError("scanner_failure")
+	ErrVerifierUpgradeRequired     = RefusalError("verifier_upgrade_required")
+	ErrInsufficientReadableContent = RefusalError("insufficient_readable_content")
+	ErrMemberCountExceeded         = RefusalError("member_count_exceeded")
 )
+
+func RefusalReason(err error) string {
+	if err == nil {
+		return ""
+	}
+	var refusal RefusalError
+	if errors.As(err, &refusal) {
+		return refusal.Error()
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return ErrTimeout.Error()
+	}
+	if errors.Is(err, fs.ErrPermission) {
+		return ErrPermissionDenied.Error()
+	}
+	return ErrScannerFailure.Error()
+}
 
 const suppressed = "suppressed_low_occupancy"

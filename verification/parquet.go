@@ -30,13 +30,13 @@ type boundedAllocator struct {
 
 func (a boundedAllocator) Allocate(n int) []byte {
 	if e := a.b.reserve(int64(n)); e != nil {
-		panic(ErrBudget)
+		panic(ErrResourceLimit)
 	}
 	return a.inner.Allocate(n)
 }
 func (a boundedAllocator) Reallocate(n int, old []byte) []byte {
 	if e := a.b.reserve(int64(max(n-len(old), 0))); e != nil {
-		panic(ErrBudget)
+		panic(ErrResourceLimit)
 	}
 	v := a.inner.Reallocate(n, old)
 	a.b.used -= int64(max(len(old)-n, 0))
@@ -79,8 +79,8 @@ func parquetKind(c *schema.Column) (string, error) {
 func parquetObject(ctx context.Context, s Source, x *pinned, p Policy, b *budget) (o Object, err error) {
 	defer func() {
 		if r := recover(); r != nil {
-			if e, ok := r.(error); ok && errors.Is(e, ErrBudget) {
-				err = ErrBudget
+			if e, ok := r.(error); ok && errors.Is(e, ErrResourceLimit) {
+				err = ErrResourceLimit
 			} else {
 				err = ErrUnsupported
 			}
@@ -109,12 +109,12 @@ func parquetObject(ctx context.Context, s Source, x *pinned, p Policy, b *budget
 	}
 	footer := int64(binary.LittleEndian.Uint32(tail[:4]))
 	if string(tail[4:]) != "PAR1" || footer > 1<<20 || footer > r.Size()-12 {
-		return o, ErrBudget
+		return o, ErrResourceLimit
 	}
 	// Reserve codec workspace; Arrow caps page sizes before allocation/decompression.
 	pageLimit := min(int64(4<<20), (b.limit-b.used)/10)
 	if pageLimit < 64<<10 {
-		return o, ErrBudget
+		return o, ErrResourceLimit
 	}
 	if e = b.reserve(pageLimit * 6); e != nil {
 		return o, e
@@ -134,7 +134,7 @@ func parquetObject(ctx context.Context, s Source, x *pinned, p Policy, b *budget
 	zones := map[int]*time.Location{}
 	if encoded := pf.MetaData().KeyValueMetadata().FindValue("ARROW:schema"); encoded != nil {
 		if len(*encoded) > 1<<20 {
-			return o, ErrBudget
+			return o, ErrResourceLimit
 		}
 		data, e := base64.StdEncoding.DecodeString(*encoded)
 		if e != nil {
@@ -183,7 +183,7 @@ func parquetObject(ctx context.Context, s Source, x *pinned, p Policy, b *budget
 		group := pf.RowGroup(rg)
 		n := group.NumRows()
 		if n < 0 || n > math.MaxInt64/1000000-rows {
-			return o, ErrBudget
+			return o, ErrResourceLimit
 		}
 		rows += n
 		for i, a := range acc {
@@ -210,7 +210,7 @@ func parquetObject(ctx context.Context, s Source, x *pinned, p Policy, b *budget
 }
 func safeParquetError(e error) error {
 	if strings.HasPrefix(e.Error(), "parquet: ") && strings.Contains(e.Error(), "page size") && strings.Contains(e.Error(), "exceeds configured limit") {
-		return ErrBudget
+		return ErrResourceLimit
 	}
 	if errors.Is(e, ErrArtifactChanged) {
 		return ErrArtifactChanged

@@ -31,7 +31,7 @@ func DiscoverSchema(ctx context.Context, r RandomAccess, format string) (names [
 	defer stop()
 	defer func() {
 		if recover() != nil {
-			names, err = nil, ErrBudget
+			names, err = nil, ErrResourceLimit
 		}
 	}()
 	p := Policy{MaxColumns: 1000, MaxRecordBytes: 16 << 20, MaxScalarBytes: 16 << 20}
@@ -49,7 +49,7 @@ func DiscoverSchema(ctx context.Context, r RandomAccess, format string) (names [
 		}
 		footer := int64(binary.LittleEndian.Uint32(tail[:4]))
 		if string(tail[4:]) != "PAR1" || footer > 1<<20 || footer > r.Size()-12 {
-			return nil, ErrBudget
+			return nil, ErrResourceLimit
 		}
 		b := &budget{limit: 128 << 20}
 		props := parquet.NewReaderProperties(boundedAllocator{b, memory.NewGoAllocator()})
@@ -66,7 +66,7 @@ func DiscoverSchema(ctx context.Context, r RandomAccess, format string) (names [
 		for _, n := range ns {
 			if !seen[n] {
 				if len(names) >= p.MaxColumns {
-					return ErrBudget
+					return ErrResourceLimit
 				}
 				seen[n] = true
 				names = append(names, n)

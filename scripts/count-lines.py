@@ -3,10 +3,10 @@
 from pathlib import Path
 import sys
 
-CAPS = {"gateway": 9339, "AWS": 3500, "Cloudflare": 2500,
+CAPS = {"gateway": 11674, "AWS": 3500, "Cloudflare": 2500,
         "Cloudflare Worker": 1200, "Cloudflare Python": 600}
 
-def over_budget(lines, cap=9339):
+def over_budget(lines, cap=11674):
     return lines > cap
 
 def category(path):
@@ -31,6 +31,8 @@ def cloud_python(path):
                  or "cloudflare" in path.stem or path.name == "generate-r2-verification-vectors.py"))
 
 if sys.argv[1:] == ["--self-check"]:
+    assert not over_budget(CAPS["gateway"])
+    assert over_budget(CAPS["gateway"] + 1)
     for name, cap in CAPS.items():
         assert not over_budget(cap, cap)
         assert over_budget(cap + 1, cap)

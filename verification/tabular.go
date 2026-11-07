@@ -54,7 +54,7 @@ func (l *limitRecords) Read(p []byte) (int, error) {
 	for _, c := range p[:n] {
 		l.size++
 		if l.size > l.max {
-			return 0, ErrBudget
+			return 0, ErrResourceLimit
 		}
 		switch l.state {
 		case 0:
@@ -96,7 +96,7 @@ func walkText(ctx context.Context, r io.Reader, format string, p Policy, visit f
 			raw := sc.Bytes()
 			offset += int64(len(raw) + 1)
 			if len(raw) > p.MaxRecordBytes || !utf8.Valid(raw) {
-				return ErrBudget
+				return ErrResourceLimit
 			}
 			if len(bytes.TrimSpace(raw)) == 0 {
 				continue
@@ -151,7 +151,7 @@ func walkText(ctx context.Context, r io.Reader, format string, p Policy, visit f
 			if errors.Is(e, ErrArtifactChanged) || errors.Is(e, ErrTimeout) {
 				return e
 			}
-			return ErrBudget
+			return ErrResourceLimit
 		}
 		return nil
 	}
@@ -191,7 +191,7 @@ func walkText(ctx context.Context, r io.Reader, format string, p Policy, visit f
 			return textReadError(e)
 		}
 		if cr.InputOffset()-last > int64(p.MaxRecordBytes) {
-			return ErrBudget
+			return ErrResourceLimit
 		}
 		last = cr.InputOffset()
 		values := make([]cell, len(record))
@@ -210,8 +210,8 @@ func textReadError(e error) error {
 	if errors.Is(e, ErrArtifactChanged) {
 		return ErrArtifactChanged
 	}
-	if errors.Is(e, ErrBudget) {
-		return ErrBudget
+	if errors.Is(e, ErrResourceLimit) {
+		return ErrResourceLimit
 	}
 	if errors.Is(e, ErrTimeout) {
 		return ErrTimeout
@@ -433,7 +433,7 @@ func textObject(ctx context.Context, s Source, x *pinned, p Policy, b *budget) (
 		}
 		rows++
 		if rows > math.MaxInt64/1000000 {
-			return ErrBudget
+			return ErrResourceLimit
 		}
 		present := make([]bool, len(acc))
 		for j, n := range names {

@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
+	"errors"
 	"hash"
 	"io"
 	"math"
@@ -22,7 +23,7 @@ type budget struct{ used, limit, peak int64 }
 
 func (b *budget) reserve(n int64) error {
 	if n < 0 || n > b.limit-b.used {
-		return ErrBudget
+		return ErrResourceLimit
 	}
 	b.used += n
 	b.peak = max(b.peak, b.used)
@@ -68,10 +69,13 @@ func (p Policy) checked() (Policy, error) {
 	if p.Deadline == 0 {
 		p.Deadline = 30 * time.Minute
 	}
-	if p.MaxMemoryBytes < 1 || p.MaxMemoryBytes > 128<<20 || p.MaxRecordBytes < 1 || p.MaxRecordBytes > 16<<20 || p.MaxScalarBytes < 1 || p.MaxScalarBytes > 16<<20 || p.MaxColumns < 1 || p.MaxColumns > 1000 || p.MaxFactBytes < 1 || p.MaxFactBytes > 32768 || p.Deadline < 0 || p.Deadline > 30*time.Minute {
-		return p, ErrBudget
+	if p.MaxFactBytes < 1 || p.MaxFactBytes > 32768 {
+		return p, ErrSummaryBudget
 	}
-	return p, nil
+	if p.MaxMemoryBytes < 1 || p.MaxMemoryBytes > 128<<20 || p.MaxRecordBytes < 1 || p.MaxRecordBytes > 16<<20 || p.MaxScalarBytes < 1 || p.MaxScalarBytes > 16<<20 || p.MaxColumns < 1 || p.MaxColumns > 1000 || p.Deadline < 0 || p.Deadline > 30*time.Minute {
+		return p, ErrResourceLimit
+	}
+	return p, p.checkCensusPolicy()
 }
 func fileIDASCII(s string) bool {
 	return len(s) == 32 && hexASCII(s+s)
@@ -167,7 +171,7 @@ func prepare(ctx context.Context, s Source, p Policy, b *budget) ([]pinned, erro
 		}
 		// Resource refusal stops reading immediately; successful scans still
 		// verify every byte, and shape errors drain to detect mutation.
-		if e == ErrBudget {
+		if errors.Is(e, ErrResourceLimit) {
 			stop()
 			r.Close()
 			return nil, e
@@ -296,7 +300,28 @@ func openText(ctx context.Context, s Source, x *pinned) (io.ReadCloser, io.Reade
 	return r, v, nil
 }
 
-func Scan(ctx context.Context, s Source, p Policy) (Facts, error) {
+func Scan(ctx context.Context, s Source, p Policy) (out Facts, err error) {
+	defer func() {
+		if err != nil {
+			// Existing adapters omit ScanMode and still compare ErrBudget directly.
+			// Explicit v1/v2 policies and every Probe expose the split refusal codes.
+			if p.ScanMode == "" && errors.Is(err, ErrSummaryBudget) {
+				err = ErrBudget
+			} else {
+				err = RefusalError(RefusalReason(err))
+			}
+		}
+	}()
+	p, err = p.checked()
+	if err != nil {
+		return Facts{}, err
+	}
+	if p.ScanMode == ContentCensusV1 {
+		return scanCensus(ctx, s, p)
+	}
+	return scanTables(ctx, s, p)
+}
+func scanTables(ctx context.Context, s Source, p Policy) (Facts, error) {
 	p, e := p.checked()
 	if e != nil {
 		return Facts{}, e
@@ -316,12 +341,13 @@ func Scan(ctx context.Context, s Source, p Policy) (Facts, error) {
 	if e != nil {
 		return Facts{}, e
 	}
-	result := Facts{Coverage: Coverage{Discovered: len(xs), Reasons: map[string]int{}, Skipped: []Skip{}}, Objects: []Object{}}
+	result := Facts{memberDigests: map[string][32]byte{}, Coverage: Coverage{Discovered: len(xs), Reasons: map[string]int{}, Skipped: []Skip{}}, Objects: []Object{}}
 	content := sha256.New()
 	var frame [8]byte
 	for i := range xs {
 		x := &xs[i]
 		m := x.member
+		result.memberDigests[m.Identity] = m.SHA256
 		binary.BigEndian.PutUint64(frame[:], uint64(len(m.Identity)))
 		content.Write(frame[:])
 		content.Write([]byte(m.Identity))
@@ -334,7 +360,7 @@ func Scan(ctx context.Context, s Source, p Policy) (Facts, error) {
 		}
 		if !supported(m.Format) {
 			if (len(result.Coverage.Skipped)+1)*128 > p.MaxFactBytes {
-				return Facts{}, ErrBudget
+				return Facts{}, ErrSummaryBudget
 			}
 			r, reader, err := openText(ctx, s, x)
 			if err != nil {
@@ -370,12 +396,12 @@ func Scan(ctx context.Context, s Source, p Policy) (Facts, error) {
 		result.Coverage.Scanned++
 		raw, e := canonical(map[string]any{"coverage": result.Coverage, "objects": result.Objects, "schema_preview": preview(result.Objects)})
 		if e != nil || len(raw) > p.MaxFactBytes {
-			return Facts{}, ErrBudget
+			return Facts{}, ErrSummaryBudget
 		}
 	}
 	raw, e := canonical(map[string]any{"coverage": result.Coverage, "objects": result.Objects, "schema_preview": preview(result.Objects)})
 	if e != nil || len(raw) > p.MaxFactBytes {
-		return Facts{}, ErrBudget
+		return Facts{}, ErrSummaryBudget
 	}
 	sort.Slice(result.Objects, func(i, j int) bool { return result.Objects[i].ObjectID < result.Objects[j].ObjectID })
 	sort.Slice(result.Coverage.Skipped, func(i, j int) bool { return result.Coverage.Skipped[i].ObjectID < result.Coverage.Skipped[j].ObjectID })
@@ -406,8 +432,12 @@ func fingerprint(f Facts, p Policy) (string, error) {
 	h := sha256.Sum256(raw)
 	return hex.EncodeToString(h[:]), e
 }
-func Probe(ctx context.Context, s Source, p Policy) (ProbeResult, error) {
+func Probe(ctx context.Context, s Source, p Policy) (out ProbeResult, err error) {
+	defer func() { out.SourceReachable = err == nil; out.RefusalReason = RefusalReason(err) }()
 	// Full complete-or-refuse validation is free; it releases all local values.
+	if p.ScanMode == "" {
+		p.ScanMode = "table_v1"
+	}
 	f, e := Scan(ctx, s, p)
 	if e != nil {
 		return ProbeResult{}, e
@@ -418,12 +448,12 @@ func Probe(ctx context.Context, s Source, p Policy) (ProbeResult, error) {
 	}
 	tokens := (len(raw) + 2) / 3
 	if tokens > 8192 {
-		return ProbeResult{}, ErrBudget
+		return ProbeResult{}, ErrSummaryBudget
 	}
 	var size int64
 	for _, m := range s.Members() {
 		if m.Size > math.MaxInt64-size {
-			return ProbeResult{}, ErrBudget
+			return ProbeResult{}, ErrResourceLimit
 		}
 		size += m.Size
 	}
@@ -444,9 +474,12 @@ func Probe(ctx context.Context, s Source, p Policy) (ProbeResult, error) {
 	}
 	tokens = max(1, (bound+2)/3)
 	if tokens > 8192 {
-		return ProbeResult{}, ErrBudget
+		return ProbeResult{}, ErrSummaryBudget
 	}
-	return ProbeResult{len(f.Objects) + len(f.Coverage.Skipped), class, tokens, []string{"complete_traversal", "deterministic_object_order", "fixed_bucket_aggregates", "exact_or_declared_estimated_row_counts"}}, nil
+	if f.Coverage.InCensus > 0 {
+		tokens += CensusAdvisoryTokens
+	}
+	return ProbeResult{ObjectsDiscovered: f.Coverage.Discovered, SizeClass: class, EstimatedMaxInputTokens: tokens, SupportedCapabilities: []string{"complete_traversal", "deterministic_object_order", "fixed_bucket_aggregates", "exact_or_declared_estimated_row_counts"}}, nil
 }
 
 type aggregate struct {
@@ -471,7 +504,7 @@ func (a *aggregate) add(raw []byte, length int, number float64, valid bool, p Po
 		return nil
 	}
 	if len(raw) > p.MaxScalarBytes {
-		return ErrBudget
+		return ErrResourceLimit
 	}
 	if len(a.exact) < 10 {
 		if _, ok := a.exact[string(raw)]; !ok {
