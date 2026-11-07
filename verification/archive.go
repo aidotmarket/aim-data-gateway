@@ -41,7 +41,7 @@ func rangeRead(ctx context.Context, s CensusSource, m Member, off, n int64, stat
 	defer r.Close()
 	stop := context.AfterFunc(ctx, func() { r.Close() })
 	defer stop()
-	b, e := io.ReadAll(io.LimitReader(&statsReader{r, stats}, n))
+	b, e := io.ReadAll(io.LimitReader(&statsReader{r, stats}, n+1))
 	if ctx.Err() != nil {
 		return nil, ctx.Err()
 	}
@@ -141,6 +141,25 @@ func (w *optionalInspection) Write(b []byte) (int, error) {
 func readTarGzip(ctx context.Context, s CensusSource, m Member, p Policy, stats *RunStats) censusMemberResult {
 	r := archiveResult(m)
 	r.findings.memory = p.censusMemory
+	// Take the disk slot before opening a provider stream, including candidates
+	// whose content has not yet been confirmed as tar.
+	slotHeld := false
+	releaseSlot := func() {
+		if slotHeld {
+			<-p.censusMemory.spools
+			slotHeld = false
+		}
+	}
+	if p.censusMemory != nil && p.censusMemory.spools != nil {
+		select {
+		case p.censusMemory.spools <- struct{}{}:
+			slotHeld = true
+			defer releaseSlot()
+		case <-ctx.Done():
+			r.reason = "budget_exhausted"
+			return r
+		}
+	}
 	stats.GETs.Add(1)
 	stats.RequestedBytes.Add(p.ArchiveAllowanceBytes + archiveTransportSlack)
 	stream, err := s.OpenRange(ctx, m.Identity, 0, p.ArchiveAllowanceBytes+archiveTransportSlack)
@@ -175,6 +194,7 @@ func readTarGzip(ctx context.Context, s CensusSource, m Member, p Policy, stats 
 	gz, err := newArchiveGzip(stored)
 	if err != nil {
 		if !bytes.HasPrefix(plainScan.prefix, []byte{0x1f, 0x8b}) && (stored.n == m.Size || errors.Is(err, gzip.ErrHeader)) {
+			releaseSlot()
 			return finishPlainCandidate(ctx, m, p, r, stored, storedHash, plainScan)
 		}
 		r.reason = failureReason(err)
@@ -190,21 +210,11 @@ func readTarGzip(ctx context.Context, s CensusSource, m Member, p Policy, stats 
 	header, peekErr := peek.Peek(512)
 	if peekErr == nil || errors.Is(peekErr, io.EOF) {
 		if !inventory.IsTarHeader(header) {
+			releaseSlot()
 			return finishPlainCandidate(ctx, m, p, r, stored, storedHash, plainScan)
 		}
 	}
 	plainSink.scan = nil
-	// Disk is separately bounded at two allowances (128 MiB), independent of
-	// sixteen scan workers. Waiting does not change a member's byte selection.
-	if p.censusMemory != nil && p.censusMemory.spools != nil {
-		select {
-		case p.censusMemory.spools <- struct{}{}:
-			defer func() { <-p.censusMemory.spools }()
-		case <-ctx.Done():
-			r.reason = "budget_exhausted"
-			return r
-		}
-	}
 	reserved := stats.SpoolBytes.Add(p.ArchiveAllowanceBytes)
 	for old := stats.SpoolPeakBytes.Load(); reserved > old; old = stats.SpoolPeakBytes.Load() {
 		if stats.SpoolPeakBytes.CompareAndSwap(old, reserved) {

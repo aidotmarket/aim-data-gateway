@@ -7,7 +7,6 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"errors"
-	"reflect"
 	"testing"
 	"unsafe"
 )
@@ -109,7 +108,7 @@ func TestZipFullHashReservesBeforeAllocation(t *testing.T) {
 	}
 }
 
-func TestZipReorderedShortReadsAndMemoryRefusal(t *testing.T) {
+func TestZipReorderedShortReadsAndMemoryFallback(t *testing.T) {
 	b := reversedZip(t, 2, 8<<20)
 	want := MemberCommitment{"full", sha256.Sum256(b)}
 	for _, chunk := range []int{1, 65536} {
@@ -125,8 +124,8 @@ func TestZipReorderedShortReadsAndMemoryRefusal(t *testing.T) {
 				if r.err != nil || r.state != "fully_read" || r.commitment != want || stats.GETs.Load() != 3 {
 					t.Fatal("fragmentation changed digest or transport", chunk, r, stats.GETs.Load())
 				}
-			} else if !errors.Is(r.err, ErrResourceLimit) || r.commitment.Tag != "unread" || stats.GETs.Load() != 1 {
-				t.Fatal("expected refusal before extent allocation/GET or publication", chunk, r, stats.GETs.Load())
+			} else if r.err != nil || r.commitment.Tag != "zip_entries" || r.state != "partly_read" || r.reason != "read_error" || r.entries != 2 || r.readable != 16<<20 || stats.GETs.Load() != 3 || p.censusMemory.failed.Load() {
+				t.Fatal("expected entry credit after optional buffer exhaustion", chunk, r, stats.GETs.Load())
 			}
 			if p.censusMemory.used.Load() > 256*2 {
 				t.Fatal("extent reservation leaked", p.censusMemory.used.Load())
@@ -135,11 +134,11 @@ func TestZipReorderedShortReadsAndMemoryRefusal(t *testing.T) {
 	}
 }
 
-func TestZipReorderedScanRefusesWithoutFacts(t *testing.T) {
+func TestZipReorderedScanPublishesEntryFallback(t *testing.T) {
 	// Individually tiny extents still spend their entire allocated capacity.
 	s := censusFor(reversedZip(t, 4100, 1), "zip")
 	f, err := Scan(context.Background(), s, censusPolicy())
-	if !errors.Is(err, ErrResourceLimit) || !reflect.DeepEqual(f, Facts{}) {
-		t.Fatal("memory exhaustion published partial facts or binding", err, f)
+	if err != nil || f.ContentCensus == nil || f.ContentSHA256 == "" {
+		t.Fatal("optional full hash exhaustion refused the scan", err, f)
 	}
 }

@@ -171,6 +171,17 @@ func readZip(ctx context.Context, s CensusSource, m Member, p Policy, stats *Run
 			complete = false
 		}
 	}
+	dropFull := func() {
+		complete = false
+		full.release()
+		r.reason = "read_error"
+		r.reasons[r.reason]++
+	}
+	// Conservatively include local headers along with the prefix, gaps and
+	// descriptors. The central-directory tail has its own fixed transport cap.
+	if complete && cdOff-int64(compressed) > p.ArchiveAllowanceBytes {
+		dropFull()
+	}
 	creditBad := func(n uint64) { r.unreadable += int64(min(n, uint64(m.Size-r.readable-r.unreadable))) }
 	// A leading self-extracting prefix is fetched once, only for a full plan.
 	first := cdOff
@@ -180,13 +191,7 @@ func readZip(ctx context.Context, s CensusSource, m Member, p Policy, stats *Run
 	if complete && first > 0 {
 		e := hashZipPrefix(ctx, s, m, first, full.h, stats)
 		if e != nil {
-			r.reason = "read_error"
-			if ctx.Err() != nil {
-				r.reason = "budget_exhausted"
-			}
-			r.reasons[r.reason]++
-			r.commitment = MemberCommitment{"zip_entries", [32]byte(committed.Sum(nil))}
-			return
+			dropFull()
 		}
 		full.next = first
 	}
@@ -225,13 +230,18 @@ func readZip(ctx context.Context, s CensusSource, m Member, p Policy, stats *Run
 		}
 		if complete {
 			if e := full.start(x.off, x.bound-x.off); e != nil {
-				r.err = e
-				return
+				dropFull()
 			}
 		}
+		length := x.bound - x.off
+		if !complete {
+			// Local name/extra lengths are uint16. Request enough for any local
+			// header and the payload; never drain descriptors or gaps for hashing.
+			length = min(length, 30+2*65535+int64(f.CompressedSize64))
+		}
 		stats.GETs.Add(1)
-		stats.RequestedBytes.Add(x.bound - x.off)
-		stream, e := s.OpenRange(ctx, m.Identity, x.off, x.bound-x.off)
+		stats.RequestedBytes.Add(length)
+		stream, e := s.OpenRange(ctx, m.Identity, x.off, length)
 		if e != nil {
 			complete = false
 			r.reason = "read_error"
@@ -244,7 +254,7 @@ func readZip(ctx context.Context, s CensusSource, m Member, p Policy, stats *Run
 			break
 		}
 		stop := context.AfterFunc(ctx, func() { stream.Close() })
-		input := &countingReader{r: io.LimitReader(&statsReader{stream, stats}, x.bound-x.off)}
+		input := &countingReader{r: io.LimitReader(&statsReader{stream, stats}, length)}
 		var reader io.Reader = input
 		if complete {
 			reader = io.TeeReader(input, full)
@@ -396,7 +406,7 @@ func readZipEntry(ctx context.Context, reader io.Reader, x zipExtent, committed 
 
 // Full hashing follows physical offset order without another GET. A reordered
 // central directory buffers whole out-of-order extents, independent of reads.
-// Normal writers need no retained bytes. Exhaustion refuses, never publishes.
+// Normal writers need no retained bytes. Exhaustion drops only the full attempt.
 // Capacity is rounded to 32 KiB (whole allocator pages), plus 128 bytes per
 // node allocation (48 bytes on 64-bit targets, with headroom). Reserve before make;
 // no growing slices or maps retain uncharged capacity or bookkeeping.
@@ -422,7 +432,7 @@ func (h *zipFullHash) start(off, size int64) error {
 	}
 	capacity := (size + (32 << 10) - 1) &^ ((32 << 10) - 1)
 	charge := capacity + zipHashBookkeeping
-	if charge > h.limit-h.held || !h.memory.reserve(charge) {
+	if !h.reserve(charge) {
 		return ErrResourceLimit
 	}
 	h.held += charge
@@ -433,6 +443,26 @@ func (h *zipFullHash) start(off, size int64) error {
 	h.current = &zipHashBlock{off: off, data: make([]byte, 0, capacity), next: *link}
 	*link = h.current
 	return nil
+}
+
+// Full hashing is optional: unlike required census allocations, a failed
+// reservation must not latch the shared run-level memory failure flag.
+func (h *zipFullHash) reserve(n int64) bool {
+	if n > h.limit-h.held {
+		return false
+	}
+	if h.memory == nil {
+		return true
+	}
+	for {
+		v := h.memory.used.Load()
+		if n > h.memory.limit-v || h.memory.failed.Load() {
+			return false
+		}
+		if h.memory.used.CompareAndSwap(v, v+n) {
+			return true
+		}
+	}
 }
 
 func (h *zipFullHash) Write(b []byte) (int, error) {
