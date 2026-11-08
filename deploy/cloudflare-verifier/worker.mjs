@@ -1812,8 +1812,8 @@ function config(c) {
   identity(canonical(Object.fromEntries(releaseFields.split(" ").map((k) => [k, c[k]]))));
   const fields = "binary_sha256 bucket connection_id jurisdiction keys prefix release_id scanner_version worker_identity".split(" ");
   if (c.read_scope !== void 0) fields.push("read_scope");
-  if (![void 0, "keys", "prefix", "whole_bucket"].includes(c.read_scope) || /[*?\x00]/.test(c.prefix) || c.prefix.includes("${") || c.read_scope === "prefix" && !c.prefix || c.read_scope === "whole_bucket" && c.prefix !== "" || (c.read_scope === "prefix" || c.read_scope === "whole_bucket") && c.keys.length !== 0) refuse();
-  if (Object.keys(c).sort().join(" ") !== fields.sort().join(" ") || !/^[0-9a-f-]{36}$/.test(c.connection_id) || typeof c.bucket !== "string" || !c.bucket || /[/:*?\\\x00]/.test(c.bucket) || typeof c.prefix !== "string" || !Array.isArray(c.keys) || (c.read_scope === void 0 || c.read_scope === "keys") && c.keys.length === 0 || c.keys.length > 17033 || utf8.encode(deploymentConfigCanonical(c)).length > 1048576 || c.keys.some((k) => typeof k !== "string" || !k || /[*?\x00]/.test(k) || k.includes("${") || !k.startsWith(c.prefix)) || new Set(c.keys).size !== c.keys.length) refuse();
+  if (![void 0, "keys", "prefix", "whole_bucket"].includes(c.read_scope) || c.read_scope === "prefix" && (!c.prefix || /[*?\x00]/.test(c.prefix) || c.prefix.includes("${")) || c.read_scope === "whole_bucket" && c.prefix !== "" || (c.read_scope === "prefix" || c.read_scope === "whole_bucket") && c.keys.length !== 0) refuse();
+  if (Object.keys(c).sort().join(" ") !== fields.sort().join(" ") || !/^[0-9a-f-]{36}$/.test(c.connection_id) || typeof c.bucket !== "string" || !c.bucket || /[/:*?\\\x00]/.test(c.bucket) || typeof c.prefix !== "string" || !Array.isArray(c.keys) || (c.read_scope === void 0 || c.read_scope === "keys") && c.keys.length === 0 || c.keys.length > 17033 || utf8.encode(deploymentConfigCanonical(c)).length > 1048576 || c.keys.some((k) => typeof k !== "string" || !k || k.includes("\0") || !k.startsWith(c.prefix)) || new Set(c.keys).size !== c.keys.length) refuse();
   return c;
 }
 function permits(c, key) {

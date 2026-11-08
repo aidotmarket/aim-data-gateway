@@ -189,9 +189,14 @@ func TestCensusScopeModesAndScale(t *testing.T) {
 	for _, mode := range []string{"", "keys", "prefix", "whole_bucket"} {
 		c := testConfig()
 		c.ReadScope = mode
-		c.Keys = []string{"p/*"}
+		c.Prefix = "p/"
+		c.Keys = []string{"p/a?b.csv", "p/x*y.csv", "p/${literal}.csv"}
+		if (c.Validate() == nil) != (mode == "" || mode == "keys") {
+			t.Fatal("literal keys", mode)
+		}
+		c.Keys = []string{"p/a\x00b.csv"}
 		if c.Validate() == nil {
-			t.Fatal("wildcard key", mode)
+			t.Fatal("NUL key", mode)
 		}
 	}
 	objects := make([]Object, MaxMembers)
@@ -229,6 +234,23 @@ func TestCensusScopeModesAndScale(t *testing.T) {
 	c.Keys = keys
 	if c.Validate() == nil {
 		t.Fatal("fixture must exceed canonical keys-list limit")
+	}
+}
+
+func TestCensusLiteralKeysAndPrefixPatterns(t *testing.T) {
+	for _, mode := range []string{"", "keys", "prefix"} {
+		for _, prefix := range []string{"p/*", "p/?", "p/${", "p/\x00"} {
+			c := testConfig()
+			c.ReadScope, c.Prefix = mode, prefix
+			c.Keys = []string{prefix + "/file.csv"}
+			if mode == "prefix" {
+				c.Keys = []string{}
+			}
+			want := mode != "prefix" && !strings.ContainsRune(prefix, 0)
+			if (c.Validate() == nil) != want {
+				t.Fatalf("mode=%q prefix=%q: %v", mode, prefix, c.Validate())
+			}
+		}
 	}
 }
 

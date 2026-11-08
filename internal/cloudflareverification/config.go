@@ -34,16 +34,13 @@ func (c Config) Validate() error {
 	if !uuid.MatchString(c.Connection) || c.Bucket == "" || strings.ContainsAny(c.Bucket, "/:*?\\\x00") || c.Jurisdiction != "default" || !identifier.MatchString(c.Version) || !identifier.MatchString(c.Release) || !hex64.MatchString(c.Binary) || !hex64.MatchString(c.Worker.SHA256) || (c.Worker.Mode != "bundle" && c.Worker.Mode != "source_tree_lockfile") || len(c.Keys) > MaxMembers {
 		return ErrRefused
 	}
-	if strings.ContainsAny(c.Prefix, "*?\x00") || strings.Contains(c.Prefix, "${") {
-		return ErrRefused
-	}
 	switch c.ReadScope {
 	case "", "keys":
 		if len(c.Keys) == 0 {
 			return ErrRefused
 		}
 	case "prefix":
-		if c.Prefix == "" || len(c.Keys) != 0 {
+		if c.Prefix == "" || strings.ContainsAny(c.Prefix, "*?\x00") || strings.Contains(c.Prefix, "${") || len(c.Keys) != 0 {
 			return ErrRefused
 		}
 	case "whole_bucket":
@@ -61,7 +58,7 @@ func (c Config) Validate() error {
 	}
 	seen := map[string]bool{}
 	for _, k := range c.Keys {
-		if k == "" || strings.ContainsAny(k, "*?\x00") || strings.Contains(k, "${") || !strings.HasPrefix(k, c.Prefix) || seen[k] {
+		if k == "" || strings.ContainsRune(k, 0) || !strings.HasPrefix(k, c.Prefix) || seen[k] {
 			return ErrRefused
 		}
 		seen[k] = true

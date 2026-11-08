@@ -12,18 +12,31 @@ const at=1791290000;
 const install=()=>({BOOTSTRAP_WAKE_SECRET:"s".repeat(43),BOOTSTRAP_INSTALL:canonical({intent_id:"11111111-1111-1111-1111-111111111111",expires_at:now()+600,registration_expires_at:now()+1800})});
 const config={connection_id:"11111111-1111-1111-1111-111111111111",bucket:"synthetic",prefix:"p/",jurisdiction:"default",keys:["p/data.csv"],release_id:"cloudflare-verifier-v0.1.0",scanner_version:"0.1.0",binary_sha256:"b".repeat(64),worker_identity:{mode:"bundle",sha256:"c".repeat(64)}};
 describe("signed census read scope",()=>{
-  it("requires explicit prefix or bucket mode and refuses wildcards in every mode",()=>{
+  it("requires explicit prefix or bucket mode and keeps enumerated keys literal",()=>{
     const base=config as Config;
     for(const read_scope of [undefined,"keys","prefix","whole_bucket"] as const){
       const c={...base,read_scope,keys:read_scope==="prefix" || read_scope==="whole_bucket"?[]:base.keys,prefix:read_scope==="whole_bucket"?"":base.prefix};
       if(read_scope===undefined)delete c.read_scope;
       expect(validateConfig(c)).toEqual(c);
       expect(()=>validateConfig({...c,prefix:"*"})).toThrow();
-      expect(()=>validateConfig({...c,keys:["p/*"]})).toThrow();
+      const literal={...c,keys:["p/a?b.csv","p/x*y.csv","p/${literal}.csv"]};
+      if(read_scope===undefined || read_scope==="keys")expect(validateConfig(literal)).toEqual(literal);
+      else expect(()=>validateConfig(literal)).toThrow();
+      expect(()=>validateConfig({...c,keys:["p/a\0b.csv"]})).toThrow();
     }
     expect(()=>validateConfig({...base,keys:[]})).toThrow();
     expect(()=>validateConfig({...base,keys:[],prefix:"",read_scope:"prefix"})).toThrow();
     expect(()=>validateConfig({...base,keys:[],read_scope:"unknown"} as unknown as Config)).toThrow();
+  });
+  it("refuses patterns only in prefix mode and preserves literal keys-mode prefixes",()=>{
+    for(const read_scope of [undefined,"keys","prefix"] as const){
+      for(const prefix of ["p/*","p/?","p/${","p/\0"]){
+        const c={...config,read_scope,prefix,keys:read_scope==="prefix"?[]:[prefix+"/file.csv"]} as Config;
+        if(read_scope===undefined)delete c.read_scope;
+        if(read_scope==="prefix" || prefix.includes("\0"))expect(()=>validateConfig(c)).toThrow();
+        else expect(validateConfig(c)).toEqual(c);
+      }
+    }
   });
   it("keeps 17033 signed snapshot members outside the canonical setup scope",()=>{
     const c={...config,read_scope:"prefix",prefix:"data",keys:[]} as Config;
