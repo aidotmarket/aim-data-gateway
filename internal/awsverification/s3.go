@@ -235,15 +235,16 @@ func (r *reader) ReadAt(dst []byte, off int64) (int, error) {
 	return done, nil
 }
 
-// Census ranges use exact stored extents; the caller limits body consumption.
+// Census ranges stop at the pinned object size; the caller limits consumption.
 func (s *Source) OpenRange(ctx context.Context, id string, off, n int64) (io.ReadCloser, error) {
 	r, o, err := s.request(ctx, id)
 	if err != nil {
 		return nil, err
 	}
-	if off < 0 || n < 0 || off > o.Size || n > o.Size-off {
+	if off < 0 || n < 0 || off > o.Size {
 		return nil, verification.ErrArtifactChanged
 	}
+	n = min(n, o.Size-off)
 	if n == 0 {
 		return io.NopCloser(strings.NewReader("")), nil
 	}
