@@ -7,7 +7,7 @@ type Env = Omit<RuntimeEnv,"VERIFIER"> & { VERIFIER: DurableObjectNamespace<Clou
 
 export type Identity = {mode: "bundle" | "source_tree_lockfile"; sha256: string};
 export type ReleaseIdentity = {release_id:string;scanner_version:string;binary_sha256:string;worker_identity:Identity;jurisdiction:"default"};
-export type Config = ReleaseIdentity & {connection_id:string;bucket:string;prefix:string;keys:string[];registration_token?:string;deployment_config_sha256?:string};
+export type Config = ReleaseIdentity & {connection_id:string;bucket:string;prefix:string;keys:string[];read_scope?:"keys"|"prefix"|"whole_bucket";registration_token?:string;deployment_config_sha256?:string};
 type Secret = {Private:string;Commitment:number[];Runner:string;Receipt:string;Version:string;Digest:string;Connection:string;Release:string;Worker:Identity;Registration:string;Nonce:string;Ack:string;Pins:unknown[]};
 type Prepared = {job:Job;snapshot:string;objects:Member[];rotation?:boolean;secret?:Secret};
 const releaseFields="binary_sha256 jurisdiction release_id scanner_version worker_identity";
@@ -18,8 +18,17 @@ export function identity(raw:string):ReleaseIdentity {
 }
 export function config(c:Config):Config {
   identity(canonical(Object.fromEntries(releaseFields.split(" ").map(k=>[k,c[k as keyof Config]]))));
-  if(Object.keys(c).sort().join(" ")!=="binary_sha256 bucket connection_id jurisdiction keys prefix release_id scanner_version worker_identity" || !/^[0-9a-f-]{36}$/.test(c.connection_id) || typeof c.bucket!=="string" || !c.bucket || /[/:*?\\\x00]/.test(c.bucket) || typeof c.prefix!=="string" || !Array.isArray(c.keys) || c.keys.length===0 || c.keys.length>17033 || utf8.encode(deploymentConfigCanonical(c)).length>1048576 || c.keys.some(k=>typeof k!=="string" || !k || k.includes("\0") || !k.startsWith(c.prefix)) || new Set(c.keys).size!==c.keys.length)refuse();
+  const fields="binary_sha256 bucket connection_id jurisdiction keys prefix release_id scanner_version worker_identity".split(" ");
+  if(c.read_scope!==undefined)fields.push("read_scope");
+  if(![undefined,"keys","prefix","whole_bucket"].includes(c.read_scope) || (c.read_scope==="prefix" && (!c.prefix || /[*?\x00]/.test(c.prefix) || c.prefix.includes("${"))) || (c.read_scope==="whole_bucket" && c.prefix!=="") || ((c.read_scope==="prefix" || c.read_scope==="whole_bucket") && c.keys.length!==0))refuse();
+  if(Object.keys(c).sort().join(" ")!==fields.sort().join(" ") || !/^[0-9a-f-]{36}$/.test(c.connection_id) || typeof c.bucket!=="string" || !c.bucket || /[/:*?\\\x00]/.test(c.bucket) || typeof c.prefix!=="string" || !Array.isArray(c.keys) || ((c.read_scope===undefined || c.read_scope==="keys") && c.keys.length===0) || c.keys.length>17033 || utf8.encode(deploymentConfigCanonical(c)).length>1048576 || c.keys.some(k=>typeof k!=="string" || !k || k.includes("\0") || !k.startsWith(c.prefix)) || new Set(c.keys).size!==c.keys.length)refuse();
   return c;
+}
+export function permits(c:Config,key:string):boolean {
+  if(!key || key.includes("\0"))return false;
+  if(c.read_scope==="whole_bucket")return true;
+  if(c.read_scope==="prefix")return !!c.prefix && key.startsWith(c.prefix.replace(/\/+$/,"")+"/");
+  return c.keys.includes(key) && key.startsWith(c.prefix);
 }
 function matches(c:Config,i:ReleaseIdentity):boolean {
   return releaseFields.split(" ").every(k=>canonical(c[k as keyof Config])===canonical(i[k as keyof ReleaseIdentity]));
@@ -87,7 +96,7 @@ export class CloudflareVerifier extends Container<Env> {
     const p=JSON.parse(new TextDecoder().decode(unb64(parts[0])));
     if(await capability(wrap,p)!==token || p.connection!==c.connection_id || p.spec!==r.hash || p.id!==this.ctx.id.toString() || p.start!==r.start || now()>p.exp || now()>r.start+780)refuse();
     const index=Number(u.pathname.slice(8)),m=r.objects[index];
-    if(!m || !c.keys.includes(m.Key) || !m.Key.startsWith(c.prefix))refuse();
+    if(!m || !permits(c,m.Key))refuse();
     let range:{offset:number;length:number}|undefined;
     const header=request.headers.get("Range");
     if(header){

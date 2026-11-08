@@ -1,12 +1,14 @@
 package cloudflareverification
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
+	"math"
 	"path"
 	"strings"
 	"unicode/utf8"
@@ -115,30 +117,57 @@ func WorstReportSize(members int) int {
 	return 955734 + 171 + 67*members - 1
 }
 
-func AdmitSize(objects []Object) error {
-	if len(objects) == 0 || len(objects) > MaxMembers || WorstReportSize(len(objects)) > MaxReport {
+func AdmitSize(objects []Object, planned ...int64) error {
+	if len(objects) == 0 {
+		return verification.ErrEmptyVersion
+	}
+	if len(objects) > MaxMembers {
+		return verification.ErrMemberCountExceeded
+	}
+	if WorstReportSize(len(objects)) > MaxReport {
 		return ErrRefused
 	}
-	var t, p int64
+	var t, p, census int64
 	for _, o := range objects {
-		if o.Size < 0 || o.Size > CF_VERIFY_TEXT_MAX_BYTES {
+		if o.Size < 0 {
 			return ErrRefused
 		}
 		switch o.Format {
 		case "csv", "tsv", "jsonl":
+			if o.Size > CF_VERIFY_TEXT_MAX_BYTES-t {
+				return ErrRefused
+			}
 			t += o.Size
 		case "parquet":
+			if o.Size > CF_VERIFY_PARQUET_MAX_BYTES-p {
+				return ErrRefused
+			}
 			p += o.Size
 		default:
-			return ErrRefused
+			if o.Size > math.MaxInt64-census {
+				return verification.ErrResourceLimit
+			}
+			census += o.Size
 		}
 		if t > CF_VERIFY_TEXT_MAX_BYTES || p > CF_VERIFY_PARQUET_MAX_BYTES {
 			return ErrRefused
 		}
 	}
-	// Exact rational inequalities; checked totals keep these products in int64.
+	if census > math.MaxInt64-t-p {
+		return verification.ErrResourceLimit
+	}
 	if 7*t+40*p > 28_000_000_000 || 3*t+20*p > int64(CF_VERIFY_ESTIMATE_MAX_SECONDS-CF_VERIFY_OVERHEAD_SECONDS)*24_000_000 {
 		return ErrRefused
+	}
+	if len(planned) > 1 {
+		return ErrRefused
+	}
+	if len(planned) == 1 {
+		if planned[0] < 0 || planned[0] > censusR1BudgetBytes {
+			return verification.ErrResourceLimit
+		}
+		// C3's §3.6 estimator lowers this signed allowance using R1's rates;
+		// the adapter enforces it exactly. Full census stored size is not a read cost.
 	}
 	return nil
 }
@@ -156,6 +185,12 @@ func validateObjects(bucket string, objects []Object) error {
 		ext := strings.TrimPrefix(strings.ToLower(path.Ext(o.Key)), ".")
 		if ext == "ndjson" {
 			ext = "jsonl"
+		}
+		if strings.HasSuffix(strings.ToLower(o.Key), ".tar.gz") {
+			ext = "tar.gz"
+		}
+		if ext == "" {
+			ext = "other"
 		}
 		if err != nil || strings.ContainsAny(o.ETag, "\"\r\n") || o.Format != ext || previous >= id {
 			return verification.ErrArtifactChanged
@@ -186,7 +221,7 @@ func NewSource(bridge Bridge, bucket string, objects []Object) (*Source, error) 
 	for i, o := range objects {
 		id, _ := Identity(o.Key, o.ETag)
 		s.objects[id], s.indices[id] = o, i
-		s.members = append(s.members, verification.Member{Identity: id, OrderingKey: []byte(id), Size: o.Size, Format: o.Format, SHA256: o.SHA256, DigestPresent: o.DigestPresent})
+		s.members = append(s.members, verification.Member{Identity: id, OrderingKey: []byte(id), Size: o.Size, Format: o.Format, ETag: o.ETag, SHA256: o.SHA256, DigestPresent: o.DigestPresent})
 	}
 	return s, nil
 }
@@ -230,4 +265,31 @@ func (s *Source) OpenAt(ctx context.Context, id string) (verification.RandomAcce
 		return nil, err
 	}
 	return &reader{ctx: ctx, bridge: s.bridge, request: r, size: o.Size, capacity: min(int64(CF_VERIFY_PARQUET_READ_AHEAD_BYTES), o.Size)}, nil
+}
+
+// OpenRange clamps the census transport allowance to the pinned object,
+// preserving one GET without the Parquet cache's read-ahead.
+func (s *Source) OpenRange(ctx context.Context, id string, off, n int64) (io.ReadCloser, error) {
+	r, o, err := s.request(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if off < 0 || n < 0 || off > o.Size {
+		return nil, verification.ErrArtifactChanged
+	}
+	n = min(n, o.Size-off)
+	if n == 0 {
+		return io.NopCloser(bytes.NewReader(nil)), nil
+	}
+	r.Range = &Range{Offset: off, Length: n}
+	body, err := get(ctx, s.bridge, r, o.Size)
+	if err != nil {
+		return nil, err
+	}
+	return &fullReader{ctx: ctx, body: body, remaining: n}, nil
+}
+
+func (s *Source) Head(ctx context.Context, id string) (verification.Member, error) {
+	_, o, err := s.request(ctx, id)
+	return verification.Member{Identity: id, Size: o.Size, ETag: o.ETag}, err
 }

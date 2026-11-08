@@ -1810,8 +1810,17 @@ function identity(raw) {
 }
 function config(c) {
   identity(canonical(Object.fromEntries(releaseFields.split(" ").map((k) => [k, c[k]]))));
-  if (Object.keys(c).sort().join(" ") !== "binary_sha256 bucket connection_id jurisdiction keys prefix release_id scanner_version worker_identity" || !/^[0-9a-f-]{36}$/.test(c.connection_id) || typeof c.bucket !== "string" || !c.bucket || /[/:*?\\\x00]/.test(c.bucket) || typeof c.prefix !== "string" || !Array.isArray(c.keys) || c.keys.length === 0 || c.keys.length > 17033 || utf8.encode(deploymentConfigCanonical(c)).length > 1048576 || c.keys.some((k) => typeof k !== "string" || !k || k.includes("\0") || !k.startsWith(c.prefix)) || new Set(c.keys).size !== c.keys.length) refuse();
+  const fields = "binary_sha256 bucket connection_id jurisdiction keys prefix release_id scanner_version worker_identity".split(" ");
+  if (c.read_scope !== void 0) fields.push("read_scope");
+  if (![void 0, "keys", "prefix", "whole_bucket"].includes(c.read_scope) || c.read_scope === "prefix" && (!c.prefix || /[*?\x00]/.test(c.prefix) || c.prefix.includes("${")) || c.read_scope === "whole_bucket" && c.prefix !== "" || (c.read_scope === "prefix" || c.read_scope === "whole_bucket") && c.keys.length !== 0) refuse();
+  if (Object.keys(c).sort().join(" ") !== fields.sort().join(" ") || !/^[0-9a-f-]{36}$/.test(c.connection_id) || typeof c.bucket !== "string" || !c.bucket || /[/:*?\\\x00]/.test(c.bucket) || typeof c.prefix !== "string" || !Array.isArray(c.keys) || (c.read_scope === void 0 || c.read_scope === "keys") && c.keys.length === 0 || c.keys.length > 17033 || utf8.encode(deploymentConfigCanonical(c)).length > 1048576 || c.keys.some((k) => typeof k !== "string" || !k || k.includes("\0") || !k.startsWith(c.prefix)) || new Set(c.keys).size !== c.keys.length) refuse();
   return c;
+}
+function permits(c, key) {
+  if (!key || key.includes("\0")) return false;
+  if (c.read_scope === "whole_bucket") return true;
+  if (c.read_scope === "prefix") return !!c.prefix && key.startsWith(c.prefix.replace(/\/+$/, "") + "/");
+  return c.keys.includes(key) && key.startsWith(c.prefix);
 }
 function matches(c, i) {
   return releaseFields.split(" ").every((k) => canonical(c[k]) === canonical(i[k]));
@@ -1883,7 +1892,7 @@ var CloudflareVerifier = class extends Container {
     const p = JSON.parse(new TextDecoder().decode(unb64(parts[0])));
     if (await capability(wrap, p) !== token || p.connection !== c.connection_id || p.spec !== r.hash || p.id !== this.ctx.id.toString() || p.start !== r.start || now() > p.exp || now() > r.start + 780) refuse();
     const index = Number(u.pathname.slice(8)), m = r.objects[index];
-    if (!m || !c.keys.includes(m.Key) || !m.Key.startsWith(c.prefix)) refuse();
+    if (!m || !permits(c, m.Key)) refuse();
     let range;
     const header = request.headers.get("Range");
     if (header) {
@@ -2180,5 +2189,6 @@ export {
   ContainerProxy,
   config,
   worker_default as default,
-  identity
+  identity,
+  permits
 };

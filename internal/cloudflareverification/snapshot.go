@@ -3,6 +3,7 @@ package cloudflareverification
 import (
 	"crypto/ed25519"
 	"github.com/aidotmarket/aim-data-gateway/internal/wire"
+	core "github.com/aidotmarket/aim-data-gateway/verification"
 )
 
 func Snapshot(token string, keys map[string]ed25519.PublicKey, j wire.ScanJob, c Config) ([]Object, error) {
@@ -25,9 +26,15 @@ func Snapshot(token string, keys map[string]ed25519.PublicKey, j wire.ScanJob, c
 		return nil, e
 	}
 	for _, o := range objects {
+		if !censusJob(j) && !tableFormat(o.Format) {
+			return nil, core.ErrVerifierUpgradeRequired
+		}
 		if !c.permits(o.Key) {
 			return nil, ErrRefused
 		}
+	}
+	if censusJob(j) {
+		return objects, AdmitSize(objects, plannedBytes(j))
 	}
 	return objects, nil
 }

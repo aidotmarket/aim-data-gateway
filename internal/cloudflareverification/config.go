@@ -21,6 +21,7 @@ type Config struct {
 	Bucket       string         `json:"bucket"`
 	Prefix       string         `json:"prefix"`
 	Jurisdiction string         `json:"jurisdiction"`
+	ReadScope    string         `json:"read_scope,omitempty"`
 	Keys         []string       `json:"keys"`
 	Token        string         `json:"registration_token,omitempty"`
 	Version      string         `json:"scanner_version"`
@@ -30,7 +31,23 @@ type Config struct {
 }
 
 func (c Config) Validate() error {
-	if !uuid.MatchString(c.Connection) || c.Bucket == "" || strings.ContainsAny(c.Bucket, "/:*?\\\x00") || c.Jurisdiction != "default" || !identifier.MatchString(c.Version) || !identifier.MatchString(c.Release) || !hex64.MatchString(c.Binary) || !hex64.MatchString(c.Worker.SHA256) || (c.Worker.Mode != "bundle" && c.Worker.Mode != "source_tree_lockfile") || len(c.Keys) == 0 || len(c.Keys) > MaxMembers {
+	if !uuid.MatchString(c.Connection) || c.Bucket == "" || strings.ContainsAny(c.Bucket, "/:*?\\\x00") || c.Jurisdiction != "default" || !identifier.MatchString(c.Version) || !identifier.MatchString(c.Release) || !hex64.MatchString(c.Binary) || !hex64.MatchString(c.Worker.SHA256) || (c.Worker.Mode != "bundle" && c.Worker.Mode != "source_tree_lockfile") || len(c.Keys) > MaxMembers {
+		return ErrRefused
+	}
+	switch c.ReadScope {
+	case "", "keys":
+		if len(c.Keys) == 0 {
+			return ErrRefused
+		}
+	case "prefix":
+		if c.Prefix == "" || strings.ContainsAny(c.Prefix, "*?\x00") || strings.Contains(c.Prefix, "${") || len(c.Keys) != 0 {
+			return ErrRefused
+		}
+	case "whole_bucket":
+		if c.Prefix != "" || len(c.Keys) != 0 {
+			return ErrRefused
+		}
+	default:
 		return ErrRefused
 	}
 	scope := c
@@ -49,6 +66,15 @@ func (c Config) Validate() error {
 	return nil
 }
 func (c Config) permits(key string) bool {
+	if key == "" || strings.ContainsRune(key, 0) {
+		return false
+	}
+	if c.ReadScope == "whole_bucket" {
+		return true
+	}
+	if c.ReadScope == "prefix" {
+		return c.Prefix != "" && strings.HasPrefix(key, strings.TrimRight(c.Prefix, "/")+"/")
+	}
 	for _, k := range c.Keys {
 		if k == key {
 			return true
