@@ -43,8 +43,14 @@ func Snapshot(token string, keys map[string]ed25519.PublicKey, j wire.ScanJob, c
 		}
 	}
 	a, ok := m["members"].([]any)
-	if !ok || len(a) == 0 || len(a) > MaxMembers {
+	if !ok {
 		return nil, ErrRefused
+	}
+	if len(a) == 0 {
+		return nil, core.ErrEmptyVersion
+	}
+	if len(a) > MaxMembers {
+		return nil, core.ErrMemberCountExceeded
 	}
 	objects := make([]Object, 0, len(a))
 	for _, v := range a {
@@ -79,8 +85,17 @@ func Snapshot(token string, keys map[string]ed25519.PublicKey, j wire.ScanJob, c
 		if ext == "ndjson" {
 			ext = "jsonl"
 		}
+		if strings.HasSuffix(strings.ToLower(o.Key), ".tar.gz") {
+			ext = "tar.gz"
+		}
+		if ext == "" {
+			ext = "other"
+		}
 		if o.Format != ext {
 			return nil, ErrRefused
+		}
+		if !censusJob(j) && !tableFormat(o.Format) {
+			return nil, core.ErrVerifierUpgradeRequired
 		}
 		objects = append(objects, Object{
 			Key:       o.Key,
@@ -89,6 +104,9 @@ func Snapshot(token string, keys map[string]ed25519.PublicKey, j wire.ScanJob, c
 			Size:      o.Size,
 			Format:    o.Format,
 		})
+	}
+	if censusJob(j) {
+		return objects, AdmitSize(objects, plannedBytes(j))
 	}
 	return objects, AdmitSize(objects)
 }

@@ -8,12 +8,14 @@ import (
 	"io"
 	"strings"
 
+	core "github.com/aidotmarket/aim-data-gateway/verification"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	d "github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/secretsmanager"
 	sm "github.com/aws/aws-sdk-go-v2/service/secretsmanager/types"
+	"github.com/aws/smithy-go"
 )
 
 type S3API interface {
@@ -37,7 +39,7 @@ func (s S3Client) Head(ctx context.Context, r Request) (Head, error) {
 	}
 	o, e := s.Client.HeadObject(ctx, i)
 	if e != nil {
-		return Head{}, ErrRefused
+		return Head{}, storageRefusal(e)
 	}
 	if string(o.ServerSideEncryption) == "aws:kms" || string(o.ServerSideEncryption) == "aws:kms:dsse" {
 		if s.KMS == "" || aws.ToString(o.SSEKMSKeyId) != s.KMS {
@@ -61,7 +63,7 @@ func (s S3Client) Get(ctx context.Context, r Request) (io.ReadCloser, error) {
 	}
 	o, e := s.Client.GetObject(ctx, i)
 	if e != nil {
-		return nil, ErrRefused
+		return nil, storageRefusal(e)
 	}
 	return o.Body, nil
 }
@@ -150,4 +152,20 @@ func (s Secrets) Save(ctx context.Context, v *Secret) error {
 	}
 	v.StateVersion = next.StateVersion
 	return nil
+}
+
+func storageRefusal(err error) error {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return err
+	}
+	var api smithy.APIError
+	if errors.As(err, &api) {
+		switch api.ErrorCode() {
+		case "AccessDenied", "Forbidden", "403":
+			return core.ErrPermissionDenied
+		case "PreconditionFailed", "NoSuchKey", "NoSuchVersion", "NotFound", "404", "412":
+			return core.ErrArtifactChanged
+		}
+	}
+	return core.ErrScannerFailure
 }

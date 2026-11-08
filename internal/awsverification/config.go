@@ -3,9 +3,11 @@ package awsverification
 import (
 	"encoding/json"
 	"errors"
+	"math"
 	"strings"
 
 	"github.com/aidotmarket/aim-data-gateway/internal/wire"
+	core "github.com/aidotmarket/aim-data-gateway/verification"
 )
 
 const (
@@ -23,6 +25,7 @@ const (
 	EnvConnection                        = "AIM_AWS_CONNECTION_ID"
 	EnvBucket                            = "AIM_AWS_BUCKET"
 	EnvRegion                            = "AIM_AWS_BUCKET_REGION"
+	EnvReadScope                         = "AIM_AWS_READ_SCOPE_MODE"
 	EnvScope                             = "AIM_AWS_READ_SCOPE"
 	EnvSecret                            = "AIM_AWS_SECRET_ID"
 	EnvTable                             = "AIM_AWS_LEDGER_TABLE"
@@ -43,6 +46,7 @@ type Scope struct {
 }
 type Config struct {
 	Connection, Bucket, Region, Secret, Table, Token, Version, Digest, LogGroup, KMS string
+	ReadScope                                                                        string
 	Scope                                                                            Scope
 }
 
@@ -58,6 +62,7 @@ func ParseConfig(get func(string) string) (Config, error) {
 		Digest:     get(EnvDigest),
 		LogGroup:   get(EnvLogGroup),
 		KMS:        get(EnvKMS),
+		ReadScope:  get(EnvReadScope),
 	}
 	if json.Unmarshal([]byte(get(EnvScope)), &c.Scope) != nil {
 		return c, ErrRefused
@@ -78,24 +83,33 @@ func ParseConfig(get func(string) string) (Config, error) {
 	if !strings.Contains(" eu-north-1 eu-west-1 eu-central-1 us-east-1 us-west-2 ", " "+c.Region+" ") {
 		return c, ErrRefused
 	}
-	if len(c.Scope.Keys)+len(c.Scope.Prefixes) == 0 || len(c.Scope.Keys)+len(c.Scope.Prefixes) > 50 {
+	if c.ReadScope != "" && c.ReadScope != "prefix" && c.ReadScope != "whole_bucket" {
+		return c, ErrRefused
+	}
+	if c.ReadScope != "whole_bucket" && len(c.Scope.Keys)+len(c.Scope.Prefixes) == 0 || len(c.Scope.Keys)+len(c.Scope.Prefixes) > 50 {
+		return c, ErrRefused
+	}
+	if c.ReadScope == "whole_bucket" && (len(c.Scope.Keys) != 0 || len(c.Scope.Prefixes) > 1 || len(c.Scope.Prefixes) == 1 && c.Scope.Prefixes[0] != "") {
 		return c, ErrRefused
 	}
 	for _, s := range append(append([]string{}, c.Scope.Keys...), c.Scope.Prefixes...) {
-		if s == "" || strings.Contains(s, "${") || strings.ContainsAny(s, "*?\x00") {
+		if s == "" && c.ReadScope != "whole_bucket" || strings.Contains(s, "${") || strings.ContainsAny(s, "*?\x00") {
 			return c, ErrRefused
 		}
 	}
 	return c, nil
 }
 func (c Config) permits(key string) bool {
+	if c.ReadScope == "whole_bucket" {
+		return key != "" && !strings.ContainsRune(key, 0)
+	}
 	for _, k := range c.Scope.Keys {
 		if key == k {
 			return true
 		}
 	}
 	for _, p := range c.Scope.Prefixes {
-		if strings.HasPrefix(key, p) {
+		if p != "" && strings.HasPrefix(key, strings.TrimRight(p, "/")+"/") {
 			return true
 		}
 	}
@@ -103,29 +117,57 @@ func (c Config) permits(key string) bool {
 }
 
 // Integer units make the shared mixed budget and throughput inequalities exact.
-func AdmitSize(objects []Object) error {
-	if len(objects) == 0 || len(objects) > MaxMembers || WorstReportSize(len(objects)) > MaxReport {
+func AdmitSize(objects []Object, planned ...int64) error {
+	if len(objects) == 0 {
+		return core.ErrEmptyVersion
+	}
+	if len(objects) > MaxMembers {
+		return core.ErrMemberCountExceeded
+	}
+	if WorstReportSize(len(objects)) > MaxReport {
 		return ErrRefused
 	}
-	var t, p int64
+	var t, p, census int64
 	for _, o := range objects {
-		if o.Size < 0 || o.Size > AWS_VERIFY_TEXT_MAX_BYTES {
+		if o.Size < 0 {
 			return ErrRefused
 		}
 		switch o.Format {
 		case "csv", "tsv", "jsonl":
+			if o.Size > AWS_VERIFY_TEXT_MAX_BYTES-t {
+				return ErrRefused
+			}
 			t += o.Size
 		case "parquet":
+			if o.Size > AWS_VERIFY_PARQUET_MAX_BYTES-p {
+				return ErrRefused
+			}
 			p += o.Size
 		default:
-			return ErrRefused
+			if o.Size > math.MaxInt64-census {
+				return core.ErrResourceLimit
+			}
+			census += o.Size
 		}
 		if t > AWS_VERIFY_TEXT_MAX_BYTES || p > AWS_VERIFY_PARQUET_MAX_BYTES {
 			return ErrRefused
 		}
 	}
+	if census > math.MaxInt64-t-p {
+		return core.ErrResourceLimit
+	}
 	if t+6*p > AWS_VERIFY_TEXT_MAX_BYTES || 9*t+50*p > int64(AWS_VERIFY_ESTIMATE_MAX_SECONDS-AWS_VERIFY_OVERHEAD_SECONDS)*90_000_000 {
 		return ErrRefused
+	}
+	if len(planned) > 1 {
+		return ErrRefused
+	}
+	if len(planned) == 1 {
+		if planned[0] < 0 || planned[0] > censusR1BudgetBytes {
+			return core.ErrResourceLimit
+		}
+		// C3's §3.6 estimator lowers this signed allowance using R1's rates;
+		// the adapter enforces it exactly. Full census stored size is not a read cost.
 	}
 	return nil
 }

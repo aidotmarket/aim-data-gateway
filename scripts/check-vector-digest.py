@@ -4,9 +4,9 @@ from hashlib import sha256
 from pathlib import Path
 import sys
 
-MANIFEST_SHA256 = "d7dc9231e8a5b883e95781791848c6e81e08295ad47e65fed1dc84780525e61f"
+MANIFEST_SHA256 = "afcb279310e725e3803d859805b05843f71d4474333b4572c0d8ea8f4de0c965"
 
-paths = sorted(Path("contract/vectors").rglob("*.json"))
+paths = sorted([*Path("contract/vectors").rglob("*.json"), Path("contract/census_plan_vectors.json")])
 actual = "".join(f"{sha256(p.read_bytes()).hexdigest()}  {p.as_posix()}\n" for p in paths)
 pin = Path("contract/VECTORS.sha256")
 if sys.argv[1:] == ["--update"]:

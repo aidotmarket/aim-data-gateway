@@ -103,10 +103,11 @@ func NewSource(client S3, bucket string, objects []Object) (*Source, error) {
 		}
 		s.objects[id] = o
 		s.members = append(s.members, verification.Member{
-			Identity:      id,
-			OrderingKey:   []byte(id),
-			Size:          o.Size,
-			Format:        o.Format,
+			Identity:    id,
+			OrderingKey: []byte(id),
+			Size:        o.Size,
+			Format:      o.Format,
+			ETag:        o.ETag, VersionID: o.VersionID,
 			SHA256:        o.SHA256,
 			DigestPresent: o.DigestPresent,
 		})
@@ -120,7 +121,7 @@ func (s *Source) Members() []verification.Member {
 	}
 	return out
 }
-func (s *Source) request(ctx context.Context, id string) (Request, Object, error) {
+func (s *Source) request(ctx context.Context, id string, exactMetadata ...bool) (Request, Object, error) {
 	o, ok := s.objects[id]
 	if !ok {
 		return Request{}, o, verification.ErrArtifactChanged
@@ -135,7 +136,10 @@ func (s *Source) request(ctx context.Context, id string) (Request, Object, error
 		r.IfMatch = "\"" + o.ETag + "\""
 	}
 	h, err := s.client.Head(ctx, r)
-	if err != nil || h.Size != o.Size || o.VersionID != "" && h.VersionID != o.VersionID || o.VersionID == "" && h.ETag != o.ETag {
+	if err != nil {
+		return r, o, err
+	}
+	if h.Size != o.Size || o.VersionID != "" && h.VersionID != o.VersionID || (o.VersionID == "" || len(exactMetadata) > 0) && h.ETag != o.ETag {
 		return r, o, verification.ErrArtifactChanged
 	}
 	return r, o, nil
@@ -229,4 +233,52 @@ func (r *reader) ReadAt(dst []byte, off int64) (int, error) {
 		return done, io.EOF
 	}
 	return done, nil
+}
+
+// Census ranges stop at the pinned object size; the caller limits consumption.
+func (s *Source) OpenRange(ctx context.Context, id string, off, n int64) (io.ReadCloser, error) {
+	r, o, err := s.request(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if off < 0 || n < 0 || off > o.Size {
+		return nil, verification.ErrArtifactChanged
+	}
+	n = min(n, o.Size-off)
+	if n == 0 {
+		return io.NopCloser(strings.NewReader("")), nil
+	}
+	r.Start, r.End = off, off+n-1
+	return s.client.Get(ctx, r)
+}
+func (s *Source) Head(ctx context.Context, id string) (verification.Member, error) {
+	_, o, err := s.request(ctx, id, true)
+	return verification.Member{Identity: id, Size: o.Size, ETag: o.ETag, VersionID: o.VersionID}, err
+}
+
+func headMembers(ctx context.Context, s *Source) error {
+	members := s.Members()
+	errs := make([]error, len(members))
+	jobs := make(chan int)
+	var wg sync.WaitGroup
+	for worker := 0; worker < min(16, len(members)); worker++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := range jobs {
+				_, errs[i] = s.Head(ctx, members[i].Identity)
+			}
+		}()
+	}
+	for i := range members {
+		jobs <- i
+	}
+	close(jobs)
+	wg.Wait()
+	for _, err := range errs {
+		if err != nil {
+			return err
+		}
+	}
+	return ctx.Err()
 }

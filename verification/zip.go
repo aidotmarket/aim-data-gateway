@@ -22,8 +22,6 @@ type zipExtent struct {
 	valid      bool
 }
 
-// Selection is immutable after the central directory is parsed. Failed entries
-// spend their declared bytes too; decoded bytes never admit another entry.
 type zipPlan struct {
 	extents  []zipExtent
 	selected int
@@ -61,8 +59,7 @@ func planZip(files []*zip.File, offsets []int64, cdOff int64, p Policy) zipPlan 
 		if j+1 < len(order) {
 			x.bound = offsets[order[j+1]]
 		}
-		// Even the smallest possible local header must fit. Mark both sides of
-		// a provable overlap before execution, including encrypted neighbours.
+		// Even the smallest possible local header must fit. Mark both sides of a provable overlap before execution, including encrypted neighbours.
 		if x.file.CompressedSize64 > uint64(max(0, x.bound-x.off-30)) || x.bound-x.off < 30 {
 			x.valid = false
 			if j+1 < len(order) {
@@ -73,6 +70,73 @@ func planZip(files []*zip.File, offsets []int64, cdOff int64, p Policy) zipPlan 
 	return plan
 }
 
+type ZipPreflight struct {
+	Reason     string
+	CDOffset   int64
+	Reader     *zip.Reader
+	offsets    []int64
+	compressed uint64
+}
+
+// PreflightZip shares directory/ratio/LOW-H decisions between free and paid reads; tail is the final <=1 MiB.
+func PreflightZip(tail []byte, size int64, p Policy) (out ZipPreflight) {
+	out.Reason = "archive_corrupt"
+	if size < 0 || int64(len(tail)) != min(size, archiveTransportSlack) {
+		return
+	}
+	end := -1
+	for i := len(tail) - 22; i >= max(0, len(tail)-65557); i-- {
+		if bytes.Equal(tail[i:i+4], []byte("PK\x05\x06")) && i+22+int(binary.LittleEndian.Uint16(tail[i+20:])) == len(tail) {
+			end = i
+			break
+		}
+	}
+	if end < 0 {
+		out.Reason = "not_zip"
+		return
+	}
+	cdSize, cdOff := int64(binary.LittleEndian.Uint32(tail[end+12:])), int64(binary.LittleEndian.Uint32(tail[end+16:]))
+	tailStart := size - int64(len(tail))
+	if cdSize > archiveTransportSlack || cdOff < tailStart {
+		out.Reason = "archive_over_cap"
+		return
+	}
+	if cdOff+cdSize > tailStart+int64(end) {
+		return
+	}
+	zr, err := zip.NewReader(tailAt{tail, tailStart}, size)
+	if err != nil {
+		return
+	}
+	var compressed, expanded uint64
+	for _, f := range zr.File {
+		if ^uint64(0)-compressed < f.CompressedSize64 || ^uint64(0)-expanded < f.UncompressedSize64 {
+			out.Reason = "archive_over_cap"
+			return
+		}
+		compressed += f.CompressedSize64
+		expanded += f.UncompressedSize64
+	}
+	ratio := uint64(p.ArchiveCaps.CompressionRatio)
+	if compressed == 0 && expanded > 0 || compressed > 0 && (expanded/compressed > ratio || expanded/compressed == ratio && expanded%compressed > 0) {
+		out.Reason = "archive_over_cap"
+		return
+	}
+	offsets := make([]int64, 0, len(zr.File))
+	cd := tail[cdOff-tailStart : cdOff-tailStart+cdSize]
+	for len(cd) >= 46 && bytes.Equal(cd[:4], []byte("PK\x01\x02")) {
+		offsets = append(offsets, int64(binary.LittleEndian.Uint32(cd[42:])))
+		n := 46 + int(binary.LittleEndian.Uint16(cd[28:])) + int(binary.LittleEndian.Uint16(cd[30:])) + int(binary.LittleEndian.Uint16(cd[32:]))
+		if n > len(cd) {
+			break
+		}
+		cd = cd[n:]
+	}
+	if len(offsets) != len(zr.File) {
+		return
+	}
+	return ZipPreflight{Reader: zr, offsets: offsets, CDOffset: cdOff, compressed: compressed}
+}
 func readZip(ctx context.Context, s CensusSource, m Member, p Policy, stats *RunStats) (r censusMemberResult) {
 	r = archiveResult(m)
 	defer func() {
@@ -88,14 +152,8 @@ func readZip(ctx context.Context, s CensusSource, m Member, p Policy, stats *Run
 		r.unreadable = m.Size
 		return
 	}
-	end := -1
-	for i := len(tail) - 22; i >= max(0, len(tail)-65557); i-- {
-		if bytes.Equal(tail[i:i+4], []byte("PK\x05\x06")) && i+22+int(binary.LittleEndian.Uint16(tail[i+20:])) == len(tail) {
-			end = i
-			break
-		}
-	}
-	if end < 0 {
+	pre := PreflightZip(tail, m.Size, p)
+	if pre.Reason == "not_zip" {
 		prefix := tail
 		if m.Size > int64(len(tail)) {
 			prefix, err = rangeRead(ctx, s, m, 0, min(m.Size, 4), stats)
@@ -111,53 +169,12 @@ func readZip(ctx context.Context, s CensusSource, m Member, p Policy, stats *Run
 		r.unreadable = m.Size
 		return
 	}
-	cdSize, cdOff := int64(binary.LittleEndian.Uint32(tail[end+12:])), int64(binary.LittleEndian.Uint32(tail[end+16:]))
-	tailStart := m.Size - int64(len(tail))
-	if cdSize > archiveTransportSlack || cdOff < tailStart {
-		r.reason = "archive_over_cap"
-		r.unreadable = m.Size
+	if pre.Reason != "" {
+		r.reason, r.unreadable = pre.Reason, m.Size
 		return
 	}
-	if cdOff+cdSize > tailStart+int64(end) {
-		r.unreadable = m.Size
-		return
-	}
-	zr, err := zip.NewReader(tailAt{tail, tailStart}, m.Size)
-	if err != nil {
-		r.unreadable = m.Size
-		return
-	}
-	var compressed, expanded uint64
-	for _, f := range zr.File {
-		if ^uint64(0)-compressed < f.CompressedSize64 || ^uint64(0)-expanded < f.UncompressedSize64 {
-			r.reason = "archive_over_cap"
-			r.unreadable = m.Size
-			return
-		}
-		compressed += f.CompressedSize64
-		expanded += f.UncompressedSize64
-	}
-	ratio := uint64(p.ArchiveCaps.CompressionRatio)
-	if compressed == 0 && expanded > 0 || compressed > 0 && (expanded/compressed > ratio || expanded/compressed == ratio && expanded%compressed > 0) {
-		r.reason = "archive_over_cap"
-		r.unreadable = m.Size
-		return
-	}
-	offsets := make([]int64, 0, len(zr.File))
-	cd := tail[cdOff-tailStart : cdOff-tailStart+cdSize]
-	for len(cd) >= 46 && bytes.Equal(cd[:4], []byte("PK\x01\x02")) {
-		offsets = append(offsets, int64(binary.LittleEndian.Uint32(cd[42:])))
-		n := 46 + int(binary.LittleEndian.Uint16(cd[28:])) + int(binary.LittleEndian.Uint16(cd[30:])) + int(binary.LittleEndian.Uint16(cd[32:]))
-		if n > len(cd) {
-			break
-		}
-		cd = cd[n:]
-	}
-	if len(offsets) != len(zr.File) {
-		r.unreadable = m.Size
-		return
-	}
-	plan := planZip(zr.File, offsets, cdOff, p)
+	cdOff, tailStart := pre.CDOffset, m.Size-int64(len(tail))
+	plan := planZip(pre.Reader.File, pre.offsets, cdOff, p)
 	stats.PlannedBytes.Add(plan.planned)
 	r.opened = true
 	r.state = "partly_read"
@@ -181,13 +198,10 @@ func readZip(ctx context.Context, s CensusSource, m Member, p Policy, stats *Run
 			r.reasons[r.reason]++
 		}
 	}
-	// Conservatively include local headers along with the prefix, gaps and
-	// descriptors. The central-directory tail has its own fixed transport cap.
-	if complete && cdOff-int64(compressed) > p.ArchiveAllowanceBytes {
+	if complete && cdOff-int64(pre.compressed) > p.ArchiveAllowanceBytes {
 		dropFull()
 	}
 	creditBad := func(n uint64) { r.unreadable += int64(min(n, uint64(m.Size-r.readable-r.unreadable))) }
-	// A leading self-extracting prefix is fetched once, only for a full plan.
 	first := cdOff
 	for _, x := range plan.extents {
 		first = min(first, x.off)
@@ -241,8 +255,7 @@ func readZip(ctx context.Context, s CensusSource, m Member, p Policy, stats *Run
 		}
 		length := x.bound - x.off
 		if !complete {
-			// Local name/extra lengths are uint16. Request enough for any local
-			// header and the payload; never drain descriptors or gaps for hashing.
+			// Local name/extra lengths are uint16. Request enough for any local header and the payload; never drain descriptors or gaps for hashing.
 			length = min(length, 30+2*65535+int64(f.CompressedSize64))
 		}
 		stats.GETs.Add(1)
@@ -324,7 +337,6 @@ func readZip(ctx context.Context, s CensusSource, m Member, p Policy, stats *Run
 	}
 	return
 }
-
 func readPlainZipCandidate(ctx context.Context, s CensusSource, m Member, p Policy, r censusMemberResult, tail []byte, stats *RunStats) censusMemberResult {
 	var reader io.Reader = bytes.NewReader(tail)
 	if int64(len(tail)) != m.Size {
@@ -350,7 +362,6 @@ func readPlainZipCandidate(ctx context.Context, s CensusSource, m Member, p Poli
 	stored := &countingReader{r: io.TeeReader(io.LimitReader(reader, p.ArchiveAllowanceBytes), scan)}
 	return finishPlainCandidate(ctx, m, p, r, stored, scan.h, scan)
 }
-
 func hashZipPrefix(ctx context.Context, s CensusSource, m Member, n int64, h hash.Hash, stats *RunStats) error {
 	stats.GETs.Add(1)
 	stats.RequestedBytes.Add(n)
@@ -367,7 +378,6 @@ func hashZipPrefix(ctx context.Context, s CensusSource, m Member, n int64, h has
 	}
 	return e
 }
-
 func readZipEntry(ctx context.Context, reader io.Reader, x zipExtent, committed hash.Hash) (int64, *fileInspection, error) {
 	f := x.file
 	scan := newFileInspection(f.Name)
@@ -380,8 +390,7 @@ func readZipEntry(ctx context.Context, reader io.Reader, x zipExtent, committed 
 	if !bytes.Equal(header[:4], []byte("PK\x03\x04")) || data > x.bound || length > x.bound-data {
 		return 0, scan, zip.ErrFormat
 	}
-	// Descriptor flags may legitimately differ locally. Non-placeholder local
-	// CRC/sizes must agree; decoding, extent consumption and CRC decide credit.
+	// Descriptor flags may legitimately differ locally. Non-placeholder local CRC/sizes must agree; decoding, extent consumption and CRC decide credit.
 	for _, v := range []struct {
 		got  uint32
 		want uint64
@@ -412,12 +421,7 @@ func readZipEntry(ctx context.Context, reader io.Reader, x zipExtent, committed 
 	return n, scan, e
 }
 
-// Full hashing follows physical offset order without another GET. A reordered
-// central directory buffers whole out-of-order extents, independent of reads.
-// Normal writers need no retained bytes. Exhaustion drops only the full attempt.
-// Capacity is rounded to 32 KiB (whole allocator pages), plus 128 bytes per
-// node allocation (48 bytes on 64-bit targets, with headroom). Reserve before make;
-// no growing slices or maps retain uncharged capacity or bookkeeping.
+// Full hashes stream physical order, buffering reordered extents. Reserve before make: 32 KiB allocator pages + 128 B/node; exhaustion drops only the full attempt.
 const zipHashBookkeeping = int64(128)
 
 type zipHashBlock struct {
@@ -425,7 +429,6 @@ type zipHashBlock struct {
 	data []byte
 	next *zipHashBlock
 }
-
 type zipFullHash struct {
 	h                      hash.Hash
 	next, off, held, limit int64
@@ -453,8 +456,7 @@ func (h *zipFullHash) start(off, size int64) error {
 	return nil
 }
 
-// Full hashing is optional: unlike required census allocations, a failed
-// reservation must not latch the shared run-level memory failure flag.
+// Full hashing is optional: unlike required census allocations, a failed reservation must not latch the shared run-level memory failure flag.
 func (h *zipFullHash) reserve(n int64) bool {
 	if n > h.limit-h.held {
 		return false
@@ -462,7 +464,6 @@ func (h *zipFullHash) reserve(n int64) bool {
 	if h.memory == nil {
 		return true
 	}
-	// Leave required census reservations a fixed floor of shared headroom.
 	headroom := max(int64(8<<20), h.memory.limit/8)
 	for {
 		v := h.memory.used.Load()
@@ -474,7 +475,6 @@ func (h *zipFullHash) reserve(n int64) bool {
 		}
 	}
 }
-
 func (h *zipFullHash) Write(b []byte) (int, error) {
 	n := len(b)
 	if h.off == h.next {
