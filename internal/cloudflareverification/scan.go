@@ -3,9 +3,9 @@ package cloudflareverification
 import (
 	"context"
 	"encoding/hex"
-	"errors"
 	"github.com/aidotmarket/aim-data-gateway/internal/wire"
 	core "github.com/aidotmarket/aim-data-gateway/verification"
+	"sync"
 	"time"
 )
 
@@ -66,6 +66,13 @@ func scanPolicy(j wire.ScanJob, c *collectedCommitments) core.Policy {
 		Deadline:       CF_VERIFY_DEADLINE_SECONDS * time.Second,
 		Commitments:    c,
 	}
+	if censusJob(j) {
+		p.ScanMode, p.BindingMethod = core.ContentCensusV1, "planned_read_commitment_v2"
+		p.ContentReadBudgetBytes, p.ArchiveAllowanceBytes = censusR1BudgetBytes, censusR1ArchiveAllowanceBytes
+		p.PlannedProcessedBytes = plannedBytes(j)
+		p.ArchiveCaps = core.ArchiveCaps{UncompressedBytes: 256 << 20, Entries: 10000, CompressionRatio: 1000}
+		p.PatternVersions = []string{"email_v1", "phone_e164_or_separated_v1", "credential_v1", "licence_families_v1", "simhash64_5shingle_v1"}
+	}
 	b, _ := hex.DecodeString(j.Text("deterministic_seed"))
 	copy(p.Seed[:], b)
 	return p
@@ -75,19 +82,23 @@ func (h Handler) scan(ctx context.Context, s *Secret, j wire.ScanJob, src *Sourc
 	c := &collectedCommitments{Commitments: Commitments{Bucket: h.Config.Bucket, ManifestHash: j.Text("manifest_hash"), Key: s.Commitment}, Digests: map[string]string{}}
 	// HEAD all members before fact inspection, after consent/audit acknowledgment.
 	var e error
-	for _, m := range src.Members() {
-		_, _, e = src.request(ctx, m.Identity)
-		if e != nil {
-			break
+	if censusJob(j) {
+		e = headMembers(ctx, src)
+	} else {
+		for _, m := range src.Members() {
+			_, _, e = src.request(ctx, m.Identity)
+			if e != nil {
+				break
+			}
 		}
 	}
 	variant := j.Envelope.Variant
 	var document map[string]any
 	var digests []string
 	if variant == "probe" {
-		var result core.ProbeResult
+		var result probeResult
 		if e == nil {
-			result, e = core.Probe(ctx, src, scanPolicy(j, c))
+			result, e = probe(ctx, src, scanPolicy(j, c))
 		}
 		class := "large"
 		var total int64
@@ -129,6 +140,20 @@ func (h Handler) scan(ctx context.Context, s *Secret, j wire.ScanJob, src *Sourc
 				"preview_requested":          j.Preview(),
 			},
 		}
+		if censusJob(j) {
+			for _, m := range src.Members() {
+				if !tableFormat(m.Format) {
+					if result.CensusPreflight == nil {
+						result.CensusPreflight = &censusPreflight{}
+					}
+					document["probe"].(map[string]any)["census_preflight"] = result.CensusPreflight
+					break
+				}
+			}
+		}
+		if e != nil {
+			document["probe"].(map[string]any)["refusal_reason"] = errorCode(e)
+		}
 	} else {
 		var f core.Facts
 		if e == nil {
@@ -144,6 +169,9 @@ func (h Handler) scan(ctx context.Context, s *Secret, j wire.ScanJob, src *Sourc
 			document = report(j, f, started, h.now())
 			digests = make([]string, 0, len(src.Members()))
 			for _, m := range src.Members() {
+				if censusJob(j) {
+					break
+				}
 				digest := c.Digests[m.Identity]
 				if !hex64.MatchString(digest) {
 					return nil, ErrRefused
@@ -154,18 +182,7 @@ func (h Handler) scan(ctx context.Context, s *Secret, j wire.ScanJob, src *Sourc
 	}
 	return encodeReport(s, j, variant, document, digests)
 }
-func errorCode(e error) string {
-	switch {
-	case errors.Is(e, core.ErrArtifactChanged):
-		return "artifact_changed"
-	case errors.Is(e, core.ErrTimeout), errors.Is(e, context.DeadlineExceeded):
-		return "timeout"
-	case errors.Is(e, core.ErrUnsupported):
-		return "unsupported_type"
-	default:
-		return "scanner_failure"
-	}
-}
+func errorCode(e error) string { return core.RefusalReason(e) }
 func encodeReport(s *Secret, j wire.ScanJob, variant string, d map[string]any, digests []string) ([]byte, error) {
 	if e := signReceipt(d, s.Private, variant); e != nil {
 		return nil, e
@@ -175,7 +192,7 @@ func encodeReport(s *Secret, j wire.ScanJob, variant string, d map[string]any, d
 		return nil, ErrRefused
 	}
 	b := reportBody(j, variant, raw)
-	if variant == "scan" {
+	if variant == "scan" && !censusJob(j) {
 		if len(digests) == 0 || len(digests) > MaxMembers {
 			return nil, ErrRefused
 		}
@@ -186,4 +203,31 @@ func encodeReport(s *Secret, j wire.ScanJob, variant string, d map[string]any, d
 		return nil, ErrRefused
 	}
 	return raw, nil
+}
+
+func headMembers(ctx context.Context, s *Source) error {
+	members := s.Members()
+	errs := make([]error, len(members))
+	jobs := make(chan int)
+	var wg sync.WaitGroup
+	for worker := 0; worker < min(16, len(members)); worker++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := range jobs {
+				_, errs[i] = s.Head(ctx, members[i].Identity)
+			}
+		}()
+	}
+	for i := range members {
+		jobs <- i
+	}
+	close(jobs)
+	wg.Wait()
+	for _, err := range errs {
+		if err != nil {
+			return err
+		}
+	}
+	return ctx.Err()
 }

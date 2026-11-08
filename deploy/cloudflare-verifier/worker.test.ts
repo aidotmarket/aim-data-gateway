@@ -1,7 +1,7 @@
 import deploymentVector from "../../contract/vectors/verification/deployment_config/unicode.json";
 import { env, runInDurableObject } from "cloudflare:test";
 import { beforeAll, afterAll, describe, it, expect, vi } from "vitest";
-import worker, { CloudflareVerifier, ContainerProxy, identity } from "./worker.ts";
+import worker, { CloudflareVerifier, ContainerProxy, identity, config as validateConfig, permits, type Config } from "./worker.ts";
 import { Container } from "@cloudflare/containers";
 import { Ledger, RETENTION, type Job } from "./state";
 import { encrypt, decrypt, random, sha, now, canonical, deploymentConfigCanonical, b64, utf8 } from "./crypto";
@@ -11,6 +11,33 @@ afterAll(()=>{vi.unstubAllGlobals();});
 const at=1791290000;
 const install=()=>({BOOTSTRAP_WAKE_SECRET:"s".repeat(43),BOOTSTRAP_INSTALL:canonical({intent_id:"11111111-1111-1111-1111-111111111111",expires_at:now()+600,registration_expires_at:now()+1800})});
 const config={connection_id:"11111111-1111-1111-1111-111111111111",bucket:"synthetic",prefix:"p/",jurisdiction:"default",keys:["p/data.csv"],release_id:"cloudflare-verifier-v0.1.0",scanner_version:"0.1.0",binary_sha256:"b".repeat(64),worker_identity:{mode:"bundle",sha256:"c".repeat(64)}};
+describe("signed census read scope",()=>{
+  it("requires explicit prefix or bucket mode and refuses wildcards in every mode",()=>{
+    const base=config as Config;
+    for(const read_scope of [undefined,"keys","prefix","whole_bucket"] as const){
+      const c={...base,read_scope,keys:read_scope==="prefix" || read_scope==="whole_bucket"?[]:base.keys,prefix:read_scope==="whole_bucket"?"":base.prefix};
+      if(read_scope===undefined)delete c.read_scope;
+      expect(validateConfig(c)).toEqual(c);
+      expect(()=>validateConfig({...c,prefix:"*"})).toThrow();
+      expect(()=>validateConfig({...c,keys:["p/*"]})).toThrow();
+    }
+    expect(()=>validateConfig({...base,keys:[]})).toThrow();
+    expect(()=>validateConfig({...base,keys:[],prefix:"",read_scope:"prefix"})).toThrow();
+    expect(()=>validateConfig({...base,keys:[],read_scope:"unknown"} as unknown as Config)).toThrow();
+  });
+  it("keeps 17033 signed snapshot members outside the canonical setup scope",()=>{
+    const c={...config,read_scope:"prefix",prefix:"data",keys:[]} as Config;
+    expect(validateConfig(c)).toEqual(c);
+    const keys=Array.from({length:17033},(_,i)=>`data/${String(i).padStart(5,"0")}/${"x".repeat(50)}.txt`);
+    expect(utf8.encode(deploymentConfigCanonical({...c,read_scope:"keys",keys})).length).toBeGreaterThan(1048576);
+    expect(utf8.encode(deploymentConfigCanonical(c)).length).toBeLessThan(1048576);
+    expect(keys.every(k=>permits(c,k))).toBe(true);
+    expect(permits(c,"database/file")).toBe(false);
+    expect(permits(c,"data")).toBe(false);
+    expect(permits({...c,read_scope:"whole_bucket",prefix:""},"any/file")).toBe(true);
+    expect(permits({...c,read_scope:"whole_bucket",prefix:""},"")).toBe(false);
+  });
+});
 const shipped={release_id:config.release_id,scanner_version:config.scanner_version,binary_sha256:config.binary_sha256,worker_identity:config.worker_identity,jurisdiction:"default"};
 const routing=(stub:unknown)=>({idFromName:vi.fn((name:string)=>{expect(name).toBe("aim-verifier");return "fixed";}),get:vi.fn((id:string)=>{expect(id).toBe("fixed");return stub;})});
 function job(n:number):Job {return {Token:"authentic-signed-test-"+n,Envelope:{iid:"iid-"+n,spec_hash:"a".repeat(64),variant:"scan"},Payload:{spec_id:"spec-"+n,nonce:"nonce-"+n,owner_authorization_id:"authorization-"+n,listing_id:"listing",expires_at_utc:new Date((at+86400)*1000).toISOString(),accepted_at_utc:new Date(at*1000).toISOString()}};}

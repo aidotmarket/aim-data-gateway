@@ -96,7 +96,7 @@ func TestAdmissionBoundaries(t *testing.T) {
 			t.Fatal("over bound")
 		}
 	}
-	for _, objects := range [][]Object{{{Format: "zip", Size: 1}}, {{Format: "csv", Size: -1}}, {{Format: "csv", Size: 1 << 62}}, {{Format: "csv", Size: 4_000_000_001}}} {
+	for _, objects := range [][]Object{{{Format: "csv", Size: -1}}, {{Format: "csv", Size: 1 << 62}}, {{Format: "csv", Size: 4_000_000_001}}} {
 		if AdmitSize(objects) == nil {
 			t.Fatal(objects)
 		}
