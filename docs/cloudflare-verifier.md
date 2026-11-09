@@ -15,6 +15,67 @@ Authority: runbooks Amendment A merged at `10f75e45`,
 key rotation and ISRG transport are mirrored without importing AWS/Lambda SDKs.
 The gateway dependency graph and shared scanner are unchanged.
 
+## OAuth distribution oauth-install-r2 (S1915 release-to-installer)
+
+`oauth-install-r2` builds binary/scanner `0.2.0`, including the C4 census wiring,
+from the tagged gateway commit's own source. The distribution table in
+`scripts/cloudflare-verifier-release.py` owns version, source policy, expected
+binary digest (or none yet), image pin (or reproducible build), and exact Go
+toolchain. Unknown distribution/version pairs refuse. A later
+`oauth-install-r3` / `0.2.1` requires only a new table row. Unstamped source builds
+identify themselves as `dev`; release builds stamp both identity fields.
+
+The catalog contract is the previous 14 fields plus `container_image`:
+`docker.io/aidotmarket/aim-cloudflare-verifier@sha256:<manifest digest>`.
+It equals the exported `wrangler.jsonc` container image exactly.
+`config_sha256` remains the SHA-256 of that exported configuration's bytes,
+including deployment identity, disabled cron and bootstrap metadata placeholder.
+The backend installer/callback must read both values from the selected catalog;
+catalog activation and rollback are separate backend operations.
+
+For a local candidate, first commit the source: both independent binary builds
+extract fresh archives of HEAD, so uncommitted edits are excluded. Use Go 1.27.3
+first on PATH, Docker Buildx and the locked npm dependencies:
+
+```sh
+GOTOOLCHAIN=local go version
+go mod download
+npm ci --prefix deploy/cloudflare-verifier
+docker buildx create --name cf-release-r2 --driver docker-container \
+  --driver-opt image=moby/buildkit:v0.33.0@sha256:6c2fa84a6b61ccd72899dde4239f8d5717f05f9a8ca6f3cad185fb1a95a94de3 \
+  --bootstrap
+BUILDX_BUILDER=cf-release-r2 python3 scripts/cloudflare-verifier-release.py \
+  --distribution oauth-install-r2 --output /absolute/candidate/path
+```
+
+The version defaults to the table value; an explicit `--version` must match it.
+The binary uses the same offline, exact-local-toolchain, separate-cache and
+linker rules as r1. Its digest is recorded in `build.json`, rather than compared
+with r1's committed executable. The Worker also bundles twice. Do not replace
+the committed r1 binary to build r2. `--verify-committed` remains available for
+an explicit binary/bundle comparison, but r2 does not require it.
+
+The verifier image follows the existing scratch-image procedure below, using
+only the Dockerfile and the newly built executable (0755). The script builds
+two clean linux/amd64 OCI images with provenance/SBOM embedding disabled, OCI
+media types, timestamp rewriting, and `SOURCE_DATE_EPOCH` from the binary's
+source commit. Both manifest digests must agree. The builder pin matches the
+gateway release workflow; the general `release-image.sh` / `push-release-image.sh`
+target the gateway image and must not be used directly for this verifier.
+`image.oci.tar` retains the first build for the release scan.
+
+The tag workflow accepts `cloudflare-verifier-oauth-install-r*`, resolves the
+distribution/version/toolchain from the table, and rejects unrecognized tags.
+Manual dispatch takes a distribution and only builds/uploads candidate artifacts.
+For an authorized tag release, the publication job scans the binary, exported
+template and OCI image, signs the artifacts, rebuilds/pushes the same scratch
+image and checks the pushed digest before creating the GitHub release. Docker
+Hub publication assumes repository secrets `DOCKERHUB_USERNAME` and
+`DOCKERHUB_TOKEN` with push access to `aidotmarket/aim-cloudflare-verifier`.
+A push mismatch blocks artifact publication. This change does not itself tag,
+publish, create the public template repository, activate a catalog or prove a
+real seller install. Follow the runbook's separately authorized release steps.
+
 ## OAuth distribution oauth-install-r1 (S1807 I3, S1810 Amendment A5)
 
 This separately cataloged distribution adds one-use bootstrap and bounded polling.
@@ -26,9 +87,14 @@ The OAuth binary is `cloudflare-verifier-v0.1.2`, scanner `0.1.2`, SHA-256
 The Container image is pinned to
 `docker.io/aidotmarket/aim-cloudflare-verifier@sha256:194576cdeea50798511acebb0ebd294841ffb1a1553c91f7e134c38c8813f087`.
 The new Worker hash selects a new binary/Worker allowlist pair; the old pair remains.
-Use the unchanged strict catalog entry in `CLOUDFLARE_OAUTH_INSTALL_RELEASE_CATALOG`
+Use the strict catalog entry in `CLOUDFLARE_OAUTH_INSTALL_RELEASE_CATALOG`
 (default `{}`, refusing new setup), selected internally only for installer intents.
 Backend catalog selection/activation belongs to the installer backend chunks.
+For identical export inputs, a regenerated r1 catalog is the prior catalog plus
+the single `container_image` field set to `APPROVED_IMAGE` above. The existing
+14 fields, frozen binary source, approved binary and approved image checks are
+unchanged. HEAD-dependent template content and commit time still affect a new
+export; do not replace published r1 artifacts or signatures with a new candidate.
 
 Installer metadata supplies `REGISTRATION_TOKEN` and `BOOTSTRAP_WAKE_SECRET` as
 `secret_text`, plus `BOOTSTRAP_INSTALL` as a nonsecret canonical JSON string:
@@ -65,6 +131,10 @@ python3 scripts/cloudflare-verifier-release.py \
 ```
 
 Optionally set `COMMAND_PROXY` to wrap commands invoked by the release script.
+On a fresh module cache, prefetch dependencies from `BINARY_SOURCE`'s own
+`go.mod`/`go.sum` before the offline build (the workflow does this separately
+from HEAD's dependencies). Archive those two files into a temporary directory
+and run `GOTOOLCHAIN=local go mod download` there with Go 1.27.2.
 
 `BINARY_SOURCE=2b1e4692bda7516e27a55f5cc4219e3305f1929e` is the immutable
 source for both compilation and the exported source archive. Each local/CI build
@@ -228,7 +298,8 @@ backstop. Empty polls use Worker/DO only, after first-start bootstrap.
 
 ## Build and release
 
-The generic non-distribution binary release path is retired for now; a future binary release needs a script/workflow change.
+The generic non-distribution binary release path is retired. Use a distribution
+from the table and the matching procedure above.
 
 Install exact lockfile dependencies in `deploy/cloudflare-verifier` with
 `npm ci`, then run `npm run types`, `npm test` and `npm run build`.
@@ -238,15 +309,15 @@ Go checks: `go test ./internal/cloudflareverification ./cmd/aim-cloudflare-verif
 focused race tests, gateway/AWS/shared scanner regressions, vector digests,
 module/line budgets and `git diff --check`.
 
-At the original release source tag, run `python3 scripts/cloudflare-verifier-release.py --version X.Y.Z`, replacing `X.Y.Z` with the intended build version. The script embeds that version in the binary and release identity; `0.1.0` was the first-release example, not a default for current source. To reproduce a published release, use that release's exact source tag and recorded toolchain rather than current main.
+At the original release source tag, run the distribution command above. The
+script embeds the table version in the binary and release identity. To reproduce
+a published release, use its exact source tag and recorded toolchain.
 It compiles twice with separate caches, CGO disabled, linux/amd64, trimpath,
 empty build ID and embedded release/version. It bundles twice with the locked
 esbuild/SDK and compares bytes. Go build is offline (`GOPROXY=off`); fetch
 dependencies beforehand. `--verify-committed` also compares the tracked binary
-and bundle. After a source change, copy `dist/cloudflare-verifier/worker.mjs`
-and `dist/cloudflare-verifier/aim-cloudflare-verifier` into
-`deploy/cloudflare-verifier/`, then rerun the release command with
-`--verify-committed` before committing those artifacts. The binary computes its executable SHA-256 at runtime. Worker
+and bundle (mandatory for r1, optional for r2). Keep the tracked r1 executable
+unchanged. The binary computes its executable SHA-256 at runtime. Worker
 identity is deployment metadata, never embedded in its own hashed module.
 
 The export includes a deterministic local release-template commit/tree,

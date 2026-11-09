@@ -23,11 +23,39 @@ IDENTITY = "https://github.com/aidotmarket/aim-data-gateway/.github/workflows/cl
 APPROVED_IMAGE = "docker.io/aidotmarket/aim-cloudflare-verifier@sha256:194576cdeea50798511acebb0ebd294841ffb1a1553c91f7e134c38c8813f087"
 BINARY_SOURCE = "2b1e4692bda7516e27a55f5cc4219e3305f1929e"  # v0.1.2 source, Go 1.27.2
 APPROVED_BINARY = "305f12ed690b29891398dd39ebf3aa84d7fcda8d4bcb58703fe30e1085c15488"
+IMAGE_REPO = "docker.io/aidotmarket/aim-cloudflare-verifier"
+DISTRIBUTIONS = {
+    "oauth-install-r1": {"version": "0.1.2", "source": BINARY_SOURCE,
+                         "binary": APPROVED_BINARY, "image": APPROVED_IMAGE, "go": "1.27.2"},
+    "oauth-install-r2": {"version": "0.2.0", "source": "HEAD",
+                         "binary": None, "image": None, "go": "1.27.3"},
+}
+
+
+def distribution_spec(version, distribution):
+    spec = DISTRIBUTIONS.get(distribution)
+    if spec is None or version != spec["version"]:
+        raise ValueError("unknown distribution/version pair")
+    return spec
+
+
+def workflow_release(tag=None, distribution=None):
+    if tag is not None:
+        distribution = tag.removeprefix("cloudflare-verifier-")
+        if tag != "cloudflare-verifier-" + distribution:
+            raise ValueError("invalid distribution tag")
+    spec = distribution_spec(DISTRIBUTIONS.get(distribution, {}).get("version"), distribution)
+    return {"distribution": distribution, "version": spec["version"], "go": spec["go"], "source": spec["source"],
+            "build_image": str(spec["image"] is None).lower()}
+
+
+def linker_flags(version):
+    return f"-ldflags=-s -w -buildid= -X main.releaseID=cloudflare-verifier-v{version} -X main.scannerVersion={version}"
 
 
 def release_tag(version, distribution=None):
-    if distribution and (distribution != "oauth-install-r1" or version != "0.1.2"):
-        raise ValueError("oauth-install-r1 requires the approved 0.1.2 binary")
+    if distribution:
+        distribution_spec(version, distribution)
     return "cloudflare-verifier-" + distribution if distribution else "cloudflare-verifier-v" + version
 
 
@@ -52,8 +80,9 @@ def canonical(value):
 
 def build(version, output, verify_committed=False, distribution=None):
     release_tag(version, distribution)
-    if run("go", "version", env={**os.environ, "GOTOOLCHAIN": "local"}).split()[2] != "go1.27.2":
-        raise ValueError("use repository-pinned Go 1.27.2")
+    spec = distribution_spec(version, distribution) if distribution else {"go": "1.27.2"}
+    if run("go", "version", env={**os.environ, "GOTOOLCHAIN": "local"}).split()[2] != "go" + spec["go"]:
+        raise ValueError("use repository-pinned Go " + spec["go"])
     output.mkdir(parents=True, exist_ok=True)
     binaries, bundles = [], []
     with tempfile.TemporaryDirectory(prefix="cloudflare-verifier-build-") as temp:
@@ -69,14 +98,14 @@ def build(version, output, verify_committed=False, distribution=None):
                 source = directory / "source"
                 source.mkdir()
                 archive = directory / "source.tar"
-                run("git", "archive", "--format=tar", "--output=" + str(archive), BINARY_SOURCE)
+                run("git", "archive", "--format=tar", "--output=" + str(archive), spec["source"])
                 with tarfile.open(archive) as inputs:
                     inputs.extractall(source, filter="data")
             run("go", "build", "-mod=readonly", "-trimpath", "-buildvcs=false",
-                f"-ldflags=-s -w -buildid= -X main.releaseID=cloudflare-verifier-v{version} -X main.scannerVersion={version}",
+                linker_flags(version),
                 "-o", binary, "./cmd/aim-cloudflare-verifier", env=env, cwd=source)
-            if distribution:
-                if digest(binary) != APPROVED_BINARY:
+            if distribution and spec["binary"]:
+                if digest(binary) != spec["binary"]:
                     raise ValueError("rebuilt binary differs from approved binary")
                 if binary.read_bytes() != (TEMPLATE / "aim-cloudflare-verifier").read_bytes():
                     raise ValueError("committed binary differs from rebuilt binary")
@@ -102,22 +131,27 @@ def build(version, output, verify_committed=False, distribution=None):
               "worker_identity": {"mode": "bundle", "sha256": digest(output / "worker.mjs")},
               "bundle_sha256": digest(output / "worker.mjs"),
               "source_commit": run("git", "rev-parse", "HEAD"),
-              "compiled_modules": run("go", "version", "-m", output / "aim-cloudflare-verifier").splitlines(),
-              "go_version": run("go", "version"),
+              "compiled_modules": run("go", "version", "-m", output / "aim-cloudflare-verifier", env={**os.environ, "GOTOOLCHAIN": "local"}).splitlines(),
+              "go_version": run("go", "version", env={**os.environ, "GOTOOLCHAIN": "local"}),
               "worker_lockfile_sha256": digest(TEMPLATE / "package-lock.json")}
     if distribution:
-        if record["binary_sha256"] != APPROVED_BINARY:
+        if spec["binary"] and record["binary_sha256"] != spec["binary"]:
             raise ValueError("OAuth binary differs from approved image binary")
-        record.update(distribution_revision=distribution, approved_image=APPROVED_IMAGE, binary_source_commit=BINARY_SOURCE)
+        record.update(distribution_revision=distribution, approved_image=spec["image"],
+                      binary_source_commit=record["source_commit"] if spec["source"] == "HEAD" else spec["source"])
     (output / "build.json").write_text(json.dumps(record, indent=2) + "\n")
-    print("frozen_binary_pin_and_bundle_reproducibility=PASS" if distribution else "binary_bundle_reproducibility=PASS", flush=True)
+    print("frozen_binary_pin_and_bundle_reproducibility=PASS" if spec.get("binary") else "binary_bundle_reproducibility=PASS", flush=True)
     return record
 
 
 def verify_built(record, output, version, distribution=None):
     release_tag(version, distribution)
-    if distribution and (record.get("distribution_revision") != distribution or record.get("approved_image") != APPROVED_IMAGE or record.get("binary_source_commit") != BINARY_SOURCE or record["binary_sha256"] != APPROVED_BINARY):
-        raise ValueError("OAuth release pins changed")
+    if distribution:
+        spec = distribution_spec(version, distribution)
+        if (record.get("distribution_revision") != distribution or record.get("approved_image") != spec["image"]
+                or record.get("binary_source_commit") != (record["source_commit"] if spec["source"] == "HEAD" else spec["source"])
+                or (spec["binary"] and record["binary_sha256"] != spec["binary"])):
+            raise ValueError("OAuth release pins changed")
     if (record["source_commit"] != run("git", "rev-parse", "HEAD")
             or record["release_id"] != "cloudflare-verifier-v" + version
             or record["scanner_version"] != version
@@ -126,6 +160,48 @@ def verify_built(record, output, version, distribution=None):
             or record["bundle_sha256"] != digest(output / "worker.mjs")
             or record["worker_lockfile_sha256"] != digest(TEMPLATE / "package-lock.json")):
         raise ValueError("release inputs changed")
+
+
+def container_image(record):
+    spec = distribution_spec(record["scanner_version"], record["distribution_revision"])
+    image = spec["image"] or record.get("container_image", "")
+    if not re.fullmatch(re.escape(IMAGE_REPO) + r"@sha256:[0-9a-f]{64}", image):
+        raise ValueError("release needs an exact verifier container image digest")
+    return image
+
+
+def build_image(record, output, push=False):
+    spec = distribution_spec(record["scanner_version"], record["distribution_revision"])
+    if spec["image"]:
+        return  # Frozen distributions retain their already approved image.
+    verify_built(record, output, spec["version"], record["distribution_revision"])
+    epoch = run("git", "show", "-s", "--format=%ct", record["binary_source_commit"])
+    with tempfile.TemporaryDirectory(prefix="cloudflare-verifier-image-") as temp:
+        context = Path(temp) / "context"
+        context.mkdir()
+        shutil.copyfile(TEMPLATE / "Dockerfile", context / "Dockerfile")
+        shutil.copyfile(output / "aim-cloudflare-verifier", context / "aim-cloudflare-verifier")
+        (context / "aim-cloudflare-verifier").chmod(0o755)
+        digests = []
+        for n in ((1,) if push else (1, 2)):
+            metadata, archive = Path(temp) / f"{n}.json", Path(temp) / f"{n}.oci.tar"
+            target = (f"type=image,name={IMAGE_REPO}:v{spec['version']},push=true,unpack=false" if push else
+                      f"type=oci,dest={archive},name={IMAGE_REPO}:v{spec['version']}")
+            run("docker", "buildx", "build", "--no-cache", "--platform", "linux/amd64",
+                "--provenance=false", "--sbom=false", "--build-arg", "SOURCE_DATE_EPOCH=" + epoch,
+                "--output", target + ",rewrite-timestamp=true,oci-mediatypes=true",
+                "--metadata-file", metadata, context)
+            value = json.loads(metadata.read_text())["containerimage.digest"]
+            if not re.fullmatch(r"sha256:[0-9a-f]{64}", value):
+                raise ValueError("invalid image build digest")
+            digests.append(value)
+            if not push and n == 1:
+                shutil.copyfile(archive, output / "image.oci.tar")
+        if len(set(digests)) != 1 or (push and container_image(record) != IMAGE_REPO + "@" + digests[0]):
+            raise ValueError("image reproducibility/push digest mismatch")
+    record["container_image"] = IMAGE_REPO + "@" + digests[0]
+    (output / "build.json").write_text(json.dumps(record, indent=2) + "\n")
+    print("container_image=" + record["container_image"], flush=True)
 
 
 def source_archive(path):
@@ -169,7 +245,7 @@ def export(record, output):
     distribution = record.get("distribution_revision")
     tag = release_tag(record["scanner_version"], distribution)
     if distribution:
-        config["containers"][0]["image"] = APPROVED_IMAGE
+        config["containers"][0]["image"] = container_image(record)
         config["triggers"]["crons"] = []  # Installer enables only after readback.
         config["vars"]["BOOTSTRAP_INSTALL"] = "{}"  # Per-intent metadata; never a credential.
         (tree / ".dev.vars.example").write_text('REGISTRATION_TOKEN=""\nBOOTSTRAP_WAKE_SECRET=""\n')
@@ -178,7 +254,7 @@ def export(record, output):
         (tree / "package.json").write_text(json.dumps(package, indent=2) + "\n")
     (tree / "wrangler.jsonc").write_text(json.dumps(config, indent=2) + "\n")
     if distribution:
-        run("git", "archive", "--format=tar", "--output=" + str(tree / "source.tar"), BINARY_SOURCE, "--",
+        run("git", "archive", "--format=tar", "--output=" + str(tree / "source.tar"), record["binary_source_commit"], "--",
             "go.mod", "go.sum", "LICENSE", "cmd/aim-cloudflare-verifier", "internal/cloudflareverification",
             "verification", "internal/wire", "internal/config", "internal/ids", "internal/inventory")
     else:
@@ -204,6 +280,7 @@ def export(record, output):
                "deploy_button_url": "https://deploy.workers.cloudflare.com/?url=" + quote(repo, safe=""),
                "binary_url": raw + "/aim-cloudflare-verifier", "bundle_url": raw + "/worker.mjs",
                "bundle_sha256": record["bundle_sha256"], "config_sha256": digest(tree / "wrangler.jsonc"),
+               "container_image": config["containers"][0]["image"],
                "signature_url": artifact + "/catalog.json.sigstore.json",
                "sbom_url": artifact + "/cloudflare-verifier.spdx.json"}
     (output / "catalog.json").write_bytes(canonical({"default": catalog}) + b"\n")
@@ -231,6 +308,8 @@ def sign(output, version, distribution=None):
     files = manifest(output / "template")
     if (entry["template_tree_sha256"] != hashlib.sha256(canonical(files)).hexdigest()
             or entry["config_sha256"] != digest(output / "template/wrangler.jsonc")
+            or entry["container_image"] != container_image(record)
+            or entry["container_image"] != json.loads((output / "template/wrangler.jsonc").read_text())["containers"][0]["image"]
             or entry["binary_sha256"] != record["binary_sha256"]
             or entry["worker_identity"] != record["worker_identity"]):
         raise ValueError("catalog/template bytes changed")
@@ -238,11 +317,16 @@ def sign(output, version, distribution=None):
     run("grype", "sbom:" + str(output / "cloudflare-verifier.spdx.json"), "--only-fixed", "--fail-on", "high")
     run("syft", "dir:" + str(output / "template"), "-o", "spdx-json=" + str(output / "cloudflare-worker.spdx.json"))
     run("grype", "sbom:" + str(output / "cloudflare-worker.spdx.json"), "--only-fixed", "--fail-on", "high")
+    image_sbom = []
+    if distribution and DISTRIBUTIONS[distribution]["image"] is None:
+        image_sbom = [output / "cloudflare-container.spdx.json"]
+        run("syft", "oci-archive:" + str(output / "image.oci.tar"), "-o", "spdx-json=" + str(image_sbom[0]))
+        run("grype", "sbom:" + str(image_sbom[0]), "--only-fixed", "--fail-on", "high")
     digests = {name: digest(output / name) for name in ("aim-cloudflare-verifier", "worker.mjs", "template.tar", "template.git.bundle", "catalog.json", "build.json")}
     (output / "digests.json").write_bytes(canonical(digests) + b"\n")
     paths = [output / name for name in ("aim-cloudflare-verifier", "worker.mjs", "catalog.json",
              "template.tar", "template.git.bundle", "template-manifest.json", "cloudflare-verifier.spdx.json", "cloudflare-worker.spdx.json", "build.json", "digests.json")]
-    paths += [output / "template/wrangler.jsonc"]
+    paths += [output / "template/wrangler.jsonc"] + image_sbom
     for path in paths:
         bundle = output / (path.name + ".sigstore.json")
         run("cosign", "sign-blob", "--yes", "--bundle", bundle, path)
@@ -252,16 +336,18 @@ def sign(output, version, distribution=None):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--version", required=True)
-    parser.add_argument("--distribution", required=True, choices=["oauth-install-r1"])
+    parser.add_argument("--version", help="Must match the distribution table; omitted means table version")
+    parser.add_argument("--distribution", required=True, choices=DISTRIBUTIONS)
     parser.add_argument("--output", type=Path, default=ROOT / "dist/cloudflare-verifier")
     parser.add_argument("--verify-committed", action="store_true")
     parser.add_argument("--sign", action="store_true")
     args = parser.parse_args()
+    args.version = args.version or DISTRIBUTIONS[args.distribution]["version"]
     if not re.fullmatch(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?", args.version):
         parser.error("version must be semver")
     output = args.output.resolve()
-    record = build(args.version, output, args.verify_committed, args.distribution)
+    record = build(args.version, output, args.verify_committed or bool(DISTRIBUTIONS[args.distribution]["binary"]), args.distribution)
+    build_image(record, output)
     export(record, output)
     if args.sign:
         sign(output, args.version, args.distribution)
