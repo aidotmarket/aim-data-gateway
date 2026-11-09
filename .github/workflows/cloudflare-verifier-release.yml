@@ -1,12 +1,12 @@
 name: Cloudflare verifier release
 on:
   push:
-    tags: ['cloudflare-verifier-oauth-install-r1']
+    tags: ['cloudflare-verifier-oauth-install-r*']
   workflow_dispatch:
     inputs:
-      version:
-        description: 'Embedded binary version (OAuth requires 0.1.2; no publication)'
-        default: '0.1.2'
+      distribution:
+        description: 'Distribution in scripts/cloudflare-verifier-release.py (no publication)'
+        default: 'oauth-install-r2'
         required: true
         type: string
 permissions:
@@ -14,23 +14,46 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
+    outputs:
+      build_image: ${{ steps.release.outputs.build_image }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+      - name: Resolve tag or manual distribution from the release table
+        id: release
+        env:
+          RELEASE_TAG: ${{ github.event_name == 'push' && github.ref_name || '' }}
+          BUILD_DISTRIBUTION: ${{ inputs.distribution }}
+        run: |
+          python3 - <<'PY'
+          import importlib.util, os
+          spec = importlib.util.spec_from_file_location('release', 'scripts/cloudflare-verifier-release.py')
+          release = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(release)
+          selected = release.workflow_release(os.environ['RELEASE_TAG'] or None, os.environ['BUILD_DISTRIBUTION'])
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              for key, value in selected.items():
+                  output.write(f'{key}={value}\n')
+          PY
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: '1.27.2'
+          go-version-file: go.mod
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: '24'
           cache: npm
           cache-dependency-path: deploy/cloudflare-verifier/package-lock.json
       - name: Fetch pinned dependencies before offline checks
+        env:
+          BINARY_SOURCE_REF: ${{ steps.release.outputs.source }}
         run: |
-          # Fetch HEAD dependencies for checks below; release builds use BINARY_SOURCE.
-          # Any uncached dependency from source divergence fails closed with GOPROXY=off.
+          # Checks use HEAD; binary builds use the table source, which may have older dependencies.
           go mod download
+          release_dependencies="$(mktemp -d)"
+          trap 'rm -rf "$release_dependencies"' EXIT
+          git archive "$BINARY_SOURCE_REF" go.mod go.sum | tar -x -C "$release_dependencies"
+          (cd "$release_dependencies" && GOTOOLCHAIN=local go mod download)
           npm ci --prefix deploy/cloudflare-verifier
       - name: Offline adapter, shared contract and Worker storage checks
         env:
@@ -44,19 +67,26 @@ jobs:
           python3 scripts/check-vector-digest.py
           python3 scripts/check-module-budget.py
           python3 scripts/count-lines.py
+          python3 -m unittest discover -s scripts -p test_cloudflare_verifier_release.py
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ steps.release.outputs.go }}
+      - name: Set up pinned image builder
+        if: steps.release.outputs.build_image == 'true'
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          driver: docker-container
+          driver-opts: image=moby/buildkit:v0.33.0@sha256:6c2fa84a6b61ccd72899dde4239f8d5717f05f9a8ca6f3cad185fb1a95a94de3
+          use: true
       - name: Build binary and bundle twice and export frozen template
         env:
-          RELEASE_TAG: ${{ github.ref_name }}
-          BUILD_VERSION: ${{ inputs.version }}
+          BUILD_DISTRIBUTION: ${{ steps.release.outputs.distribution }}
         run: |
           python3 - <<'PY'
           import os, subprocess
-          version = os.environ['BUILD_VERSION'] or '0.1.2'
-          subprocess.run(['python3', 'scripts/cloudflare-verifier-release.py', '--version', version,
-                          '--distribution', 'oauth-install-r1', '--verify-committed'], check=True)
+          subprocess.run(['python3', 'scripts/cloudflare-verifier-release.py',
+                          '--distribution', os.environ['BUILD_DISTRIBUTION']], check=True)
           PY
-      - name: Offline release template contract checks
-        run: python3 -m unittest discover -s scripts -p test_cloudflare_verifier_release.py
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: cloudflare-verifier-build
@@ -74,6 +104,13 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+      - name: Set up pinned image builder
+        if: needs.build.outputs.build_image == 'true'
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          driver: docker-container
+          driver-opts: image=moby/buildkit:v0.33.0@sha256:6c2fa84a6b61ccd72899dde4239f8d5717f05f9a8ca6f3cad185fb1a95a94de3
+          use: true
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: cloudflare-verifier-build
@@ -111,8 +148,24 @@ jobs:
           spec = importlib.util.spec_from_file_location('release', 'scripts/cloudflare-verifier-release.py')
           release = importlib.util.module_from_spec(spec)
           spec.loader.exec_module(release)
+          selected = release.workflow_release(os.environ['RELEASE_TAG'])
           release.sign(pathlib.Path('dist/cloudflare-verifier').resolve(),
-                       '0.1.2', 'oauth-install-r1')
+                       selected['version'], selected['distribution'])
+          PY
+      - name: Push verified verifier image and compare registry digest
+        if: needs.build.outputs.build_image == 'true'
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          printf '%s' "$DOCKERHUB_TOKEN" | docker login docker.io -u "$DOCKERHUB_USERNAME" --password-stdin
+          python3 - <<'PY'
+          import importlib.util, json, pathlib
+          spec = importlib.util.spec_from_file_location('release', 'scripts/cloudflare-verifier-release.py')
+          release = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(release)
+          output = pathlib.Path('dist/cloudflare-verifier').resolve()
+          release.build_image(json.loads((output / 'build.json').read_text()), output, push=True)
           PY
       - name: Publish artifacts in this repository only
         env:

@@ -16,8 +16,8 @@ import (
 )
 
 // The hash is computed from the executable, avoiding self-referential identity.
-var releaseID = "cloudflare-verifier-v0.1.0"
-var scannerVersion = "0.1.0"
+var releaseID = "dev"
+var scannerVersion = "dev"
 
 func executableHash() (string, error) {
 	path, e := os.Executable()
