@@ -25,7 +25,7 @@ func TestPlainTextTableFallback(t *testing.T) {
 			if got.Class != tc.class || got.MediaType != tc.media {
 				t.Fatalf("DetectContent = %+v; want %s, %s", got, tc.class, tc.media)
 			}
-			if got := DetectNamed([]byte(tc.body), tc.name); got != tc.scanMedia {
+			if got := DetectNamed([]byte(tc.body), tc.name, false); got != tc.scanMedia {
 				t.Fatalf("DetectNamed = %s; want %s", got, tc.scanMedia)
 			}
 		})

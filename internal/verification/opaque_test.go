@@ -264,13 +264,21 @@ func TestOneColumnTablePrefixBoundaries(t *testing.T) {
 					assertOneColumnRunner(t, ext, body, ext)
 				})
 			}
+			for tail := 1; tail < len(runeText); tail++ {
+				for _, size := range []int{len("value\n") + tail, 4096} {
+					body := "value\n" + strings.Repeat("a", size-len("value\n")-tail) + runeText[:tail]
+					t.Run(fmt.Sprintf("%s/reject-eof-%d-byte/tail-%d/size-%d", ext, len(runeText), tail, size), func(t *testing.T) {
+						assertOneColumnRunner(t, ext, body, "unsupported")
+					})
+				}
+			}
 		}
 		for _, blank := range []string{"\n", "\r\n"} {
 			t.Run(fmt.Sprintf("%s/blank-%q", ext, blank), func(t *testing.T) {
 				assertOneColumnRunner(t, ext, blank+"value\nv0\n", ext)
 			})
 		}
-		for _, body := range []string{"", "value\n\xff", "value\n\x80", "value\n\xe0\x80", "value\n\xed\xa0", "value\n\xf4\x90", "value\n\xf5", "value\n\xff\xc3"} {
+		for _, body := range []string{"", "\n", "\n\n", "\n\n\n", "\r\n", "\ufeff", "\ufeff\n", " \r\n\t\n", "value\n\xff", "value\n\x80", "value\n\xe0\x80", "value\n\xed\xa0", "value\n\xf4\x90", "value\n\xf5", "value\n\xff\xc3"} {
 			t.Run(fmt.Sprintf("%s/reject-%x", ext, body), func(t *testing.T) {
 				assertOneColumnRunner(t, ext, body, "unsupported")
 			})
@@ -298,12 +306,26 @@ func assertOneColumnRunner(t *testing.T, ext, body, format string) {
 	if got := src.Members(); len(got) != 1 || got[0].Format != format {
 		t.Fatalf("members = %+v; want %s", got, format)
 	}
+	if format == "unsupported" {
+		// Keep a valid table alongside the rejected member to prove scan continuity.
+		v := loadVector(t, "snapshot")
+		raw, err := wire.DecodeDocument(v.Input["payload_b64"].(string), wire.MaxSnapshot)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var companion wire.Snapshot
+		if err := json.Unmarshal(raw, &companion); err != nil {
+			t.Fatal(err)
+		}
+		src.snapshot.Members = append(src.snapshot.Members, companion.Members[1])
+		src.index = nil
+	}
 	facts, err := core.Scan(ctx, src, policy(j, f.r.Keys))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if format == "unsupported" {
-		if len(facts.Objects) != 0 || len(facts.Coverage.Skipped) != 1 {
+		if len(facts.Objects) != 1 || len(facts.Coverage.Skipped) != 1 || facts.Coverage.Skipped[0].Reason != "unsupported_type" || facts.Coverage.Reasons["unsupported_type"] != 1 {
 			t.Fatalf("unsupported scan = %+v", facts)
 		}
 		return
