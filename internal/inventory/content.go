@@ -16,8 +16,12 @@ import (
 type ContentType struct{ Class, MediaType, Archive string }
 
 // DetectContent classifies census content from a bounded prefix. Signed Format
-// selects tables; the gateway runner retains its frozen Detect admission rules.
+// selects tables; plain UTF-8 text uses CSV/TSV names as a final tie breaker.
 func DetectContent(b []byte, name string) ContentType {
+	return detectContent(b, name, true)
+}
+
+func detectContent(b []byte, name string, allowPlainTextTable bool) ContentType {
 	result := func(c, m string) ContentType { return ContentType{Class: c, MediaType: m} }
 	if len(b) == 0 {
 		return result("empty", "application/octet-stream")
@@ -32,7 +36,7 @@ func DetectContent(b []byte, name string) ContentType {
 			}
 			units = append(units, v)
 		}
-		return DetectContent([]byte(string(utf16.Decode(units))), name)
+		return detectContent([]byte(string(utf16.Decode(units))), name, false)
 	}
 	if bytes.HasPrefix(b, []byte("PAR1")) {
 		return result("other_binary", "application/vnd.apache.parquet")
@@ -105,6 +109,15 @@ func DetectContent(b []byte, name string) ContentType {
 	for _, prefix := range []string{"package ", "import ", "def ", "function ", "#include", "//", "#!/"} {
 		if strings.HasPrefix(s, prefix) {
 			return result("source_code", "text/plain")
+		}
+	}
+	// Only otherwise plain UTF-8 text may use the name to select a table.
+	if allowPlainTextTable && utf8.Valid(b) {
+		switch ext {
+		case ".csv":
+			return result("table_like_csv", "text/csv")
+		case ".tsv":
+			return result("table_like_tsv", "text/tab-separated-values")
 		}
 	}
 	return result("plain_text", "text/plain")

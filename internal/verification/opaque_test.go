@@ -220,3 +220,33 @@ func TestProbeRefusesSecondDetectionFailure(t *testing.T) {
 		t.Fatalf("late detection failure accepted: opens=%d %s", f.opens.Load(), raw)
 	}
 }
+
+func TestOneColumnTablePath(t *testing.T) {
+	for _, tc := range []struct{ ext, body, format string }{
+		{"csv", "value\nv0\nv0\n", "csv"},
+		{"TSV", "value\nv0\nv0\n", "tsv"},
+		{"txt", "value\nv0\nv0\n", "unsupported"},
+		{"csv", "value\n\x00\xff", "unsupported"},
+		{"csv", "PK\x03\x04zip", "unsupported"},
+	} {
+		t.Run(tc.ext+"/"+tc.format, func(t *testing.T) {
+			f := newRunner(t)
+			ctx := context.Background()
+			_, j, snapshot, _ := f.sourceJob(t, tc.ext, []byte(tc.body), "scan")
+			src := &source{runner: f.r, snapshot: snapshot, ctx: ctx}
+			if got := src.Members(); len(got) != 1 || got[0].Format != tc.format {
+				t.Fatalf("members = %+v; want %s", got, tc.format)
+			}
+			if tc.format == "unsupported" {
+				return
+			}
+			if affected, err := src.eligibility(ctx); err != nil || len(affected) != 0 {
+				t.Fatalf("eligibility = %v, %v", affected, err)
+			}
+			facts, err := core.Scan(ctx, src, policy(j, f.r.Keys))
+			if err != nil || len(facts.Objects) != 1 || facts.Objects[0].Rows != 2 || len(facts.Objects[0].Names) != 1 || len(facts.Coverage.Skipped) != 0 {
+				t.Fatalf("one-column scan = %+v, %v", facts, err)
+			}
+		})
+	}
+}

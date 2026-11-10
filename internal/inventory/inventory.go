@@ -251,12 +251,13 @@ func readFileContext(ctx context.Context, f *os.File) (Record, error) {
 	return r, nil
 }
 
-// Detect classifies the inventory prefix from content, independently of its name.
-func Detect(b []byte) string {
+// Detect classifies the inventory prefix from content. An optional source name
+// admits otherwise plain text as a one-column CSV or TSV table.
+func Detect(b []byte, name ...string) string {
 	if len(b) >= 4 && bytes.Equal(b[:4], []byte("PAR1")) {
 		return "application/vnd.apache.parquet"
 	}
-	// Text formats are recognized from content, never from names.
+	// Existing content rules take precedence over the optional name fallback.
 	s := strings.TrimPrefix(string(b), "\ufeff")
 	line, _, _ := strings.Cut(s, "\n")
 	line = strings.TrimSuffix(line, "\r")
@@ -271,6 +272,12 @@ func Detect(b []byte) string {
 	}
 	if strings.Contains(line, ",") {
 		return "text/csv"
+	}
+	if len(name) > 0 && DetectContent(b, "").Class == "plain_text" {
+		detected := DetectContent(b, name[0])
+		if detected.Class == "table_like_csv" || detected.Class == "table_like_tsv" {
+			return detected.MediaType
+		}
 	}
 	return "application/octet-stream"
 }
