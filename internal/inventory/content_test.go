@@ -6,9 +6,9 @@ func TestPlainTextTableFallback(t *testing.T) {
 	for _, tc := range []struct {
 		name, body, class, media, scanMedia string
 	}{
-		{"one.csv", "value\nv0\nv0\n", "table_like_csv", "text/csv", "text/csv"},
-		{"one.TsV", "value\nv0\nv0\n", "table_like_tsv", "text/tab-separated-values", "text/tab-separated-values"},
-		{"one.CSV", "value\nv0\n", "table_like_csv", "text/csv", "text/csv"},
+		{"one.csv", "value\nv0\nv0\n", "plain_text", "text/plain", "text/csv"},
+		{"one.TsV", "value\nv0\nv0\n", "plain_text", "text/plain", "text/tab-separated-values"},
+		{"one.CSV", "value\nv0\n", "plain_text", "text/plain", "text/csv"},
 		{"one.txt", "value\nv0\n", "plain_text", "text/plain", "application/octet-stream"},
 		{"binary.csv", "value\n\x00\xff", "other_binary", "application/octet-stream", "application/octet-stream"},
 		{"zip.csv", "PK\x03\x04zip", "other_binary", "application/zip", "application/octet-stream"},
@@ -25,8 +25,8 @@ func TestPlainTextTableFallback(t *testing.T) {
 			if got.Class != tc.class || got.MediaType != tc.media {
 				t.Fatalf("DetectContent = %+v; want %s, %s", got, tc.class, tc.media)
 			}
-			if got := Detect([]byte(tc.body), tc.name); got != tc.scanMedia {
-				t.Fatalf("Detect = %s; want %s", got, tc.scanMedia)
+			if got := DetectNamed([]byte(tc.body), tc.name); got != tc.scanMedia {
+				t.Fatalf("DetectNamed = %s; want %s", got, tc.scanMedia)
 			}
 		})
 	}

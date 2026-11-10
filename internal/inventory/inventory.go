@@ -11,10 +11,12 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/aidotmarket/aim-data-gateway/internal/config"
 	"github.com/aidotmarket/aim-data-gateway/internal/ids"
@@ -251,13 +253,11 @@ func readFileContext(ctx context.Context, f *os.File) (Record, error) {
 	return r, nil
 }
 
-// Detect classifies the inventory prefix from content. An optional source name
-// admits otherwise plain text as a one-column CSV or TSV table.
-func Detect(b []byte, name ...string) string {
+// Detect classifies the inventory prefix from content.
+func Detect(b []byte) string {
 	if len(b) >= 4 && bytes.Equal(b[:4], []byte("PAR1")) {
 		return "application/vnd.apache.parquet"
 	}
-	// Existing content rules take precedence over the optional name fallback.
 	s := strings.TrimPrefix(string(b), "\ufeff")
 	line, _, _ := strings.Cut(s, "\n")
 	line = strings.TrimSuffix(line, "\r")
@@ -273,14 +273,40 @@ func Detect(b []byte, name ...string) string {
 	if strings.Contains(line, ",") {
 		return "text/csv"
 	}
-	if len(name) > 0 && DetectContent(b, "").Class == "plain_text" {
-		detected := DetectContent(b, name[0])
-		if detected.Class == "table_like_csv" || detected.Class == "table_like_tsv" {
-			return detected.MediaType
-		}
+	return "application/octet-stream"
+}
+
+// DetectNamed adds a filename fallback for otherwise plain UTF-8 CSV/TSV text.
+// Census callers use DetectContent and do not opt into this runner-only rule.
+func DetectNamed(b []byte, name string) string {
+	if media := Detect(b); media != "application/octet-stream" {
+		return media
+	}
+	if len(b) == 0 || !validUTF8Prefix(b) || DetectContent(b, "").Class != "plain_text" {
+		return "application/octet-stream"
+	}
+	switch strings.ToLower(path.Ext(name)) {
+	case ".csv":
+		return "text/csv"
+	case ".tsv":
+		return "text/tab-separated-values"
 	}
 	return "application/octet-stream"
 }
+
+// validUTF8Prefix accepts a bounded prefix ending inside a valid rune, while
+// rejecting invalid bytes even at the end. FullRune reports invalid tails as full.
+func validUTF8Prefix(b []byte) bool {
+	for len(b) > 0 {
+		r, n := utf8.DecodeRune(b)
+		if r == utf8.RuneError && n == 1 {
+			return !utf8.FullRune(b)
+		}
+		b = b[n:]
+	}
+	return true
+}
+
 func utf8Text(b []byte) bool {
 	for _, x := range b {
 		if x == 0 {

@@ -5,9 +5,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -248,5 +250,65 @@ func TestOneColumnTablePath(t *testing.T) {
 				t.Fatalf("one-column scan = %+v, %v", facts, err)
 			}
 		})
+	}
+}
+
+// Exercise format selection and parsing through the gateway source, including
+// every possible split of each rune width and the adjacent complete alignment.
+func TestOneColumnTablePrefixBoundaries(t *testing.T) {
+	for _, ext := range []string{"csv", "tsv"} {
+		for _, runeText := range []string{"é", "山", "😀"} {
+			for tail := 1; tail <= len(runeText); tail++ {
+				body := "value\n" + strings.Repeat("a", 4096-len("value\n")-tail) + runeText + "suffix\n"
+				t.Run(fmt.Sprintf("%s/%d-byte/tail-%d", ext, len(runeText), tail), func(t *testing.T) {
+					assertOneColumnRunner(t, ext, body, ext)
+				})
+			}
+		}
+		for _, blank := range []string{"\n", "\r\n"} {
+			t.Run(fmt.Sprintf("%s/blank-%q", ext, blank), func(t *testing.T) {
+				assertOneColumnRunner(t, ext, blank+"value\nv0\n", ext)
+			})
+		}
+		for _, body := range []string{"", "value\n\xff", "value\n\x80", "value\n\xe0\x80", "value\n\xed\xa0", "value\n\xf4\x90", "value\n\xf5", "value\n\xff\xc3"} {
+			t.Run(fmt.Sprintf("%s/reject-%x", ext, body), func(t *testing.T) {
+				assertOneColumnRunner(t, ext, body, "unsupported")
+			})
+		}
+	}
+}
+
+// Recognized markdown, source and HTML headers deliberately precede the name fallback.
+func TestOneColumnRecognizedHeadersStayUnsupported(t *testing.T) {
+	for _, ext := range []string{"csv", "tsv"} {
+		for _, header := range []string{"# of items", "import id", "//host/path", "<5"} {
+			t.Run(ext+"/"+header, func(t *testing.T) {
+				assertOneColumnRunner(t, ext, header+"\nv0\n", "unsupported")
+			})
+		}
+	}
+}
+
+func assertOneColumnRunner(t *testing.T, ext, body, format string) {
+	t.Helper()
+	f := newRunner(t)
+	ctx := context.Background()
+	_, j, snapshot, _ := f.sourceJob(t, ext, []byte(body), "scan")
+	src := &source{runner: f.r, snapshot: snapshot, ctx: ctx}
+	if got := src.Members(); len(got) != 1 || got[0].Format != format {
+		t.Fatalf("members = %+v; want %s", got, format)
+	}
+	facts, err := core.Scan(ctx, src, policy(j, f.r.Keys))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if format == "unsupported" {
+		if len(facts.Objects) != 0 || len(facts.Coverage.Skipped) != 1 {
+			t.Fatalf("unsupported scan = %+v", facts)
+		}
+		return
+	}
+	if len(facts.Objects) != 1 || facts.Objects[0].Rows != 1 || len(facts.Objects[0].Names) != 1 || len(facts.Coverage.Skipped) != 0 {
+		t.Fatalf("one-column scan = %+v", facts)
 	}
 }

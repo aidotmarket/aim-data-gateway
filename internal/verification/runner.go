@@ -700,7 +700,7 @@ func contentFormat(ctx context.Context, f *os.File) (string, error) {
 	kind := map[string]string{
 		"text/csv": "csv", "text/tab-separated-values": "tsv",
 		"application/x-ndjson": "jsonl", "application/vnd.apache.parquet": "parquet",
-	}[inventory.Detect(first[:n], f.Name())]
+	}[inventory.DetectNamed(first[:n], f.Name())]
 	if kind == "" {
 		kind = "unsupported"
 	}

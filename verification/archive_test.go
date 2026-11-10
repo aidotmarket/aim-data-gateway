@@ -694,3 +694,48 @@ func TestGzipOptionalHeadersAndMultistream(t *testing.T) {
 		t.Fatal(r)
 	}
 }
+
+// Filename table admission is gateway-only: archive census facts retain the
+// content-derived plain_text class even for entries named x.csv or x.tsv.
+func TestArchivePlainTextTableNamesKeepCensusClass(t *testing.T) {
+	for _, format := range []string{"zip", "tar.gz"} {
+		for _, name := range []string{"x.csv", "x.tsv"} {
+			t.Run(format+"/"+name, func(t *testing.T) {
+				var b bytes.Buffer
+				body := []byte("value\nv0\n")
+				if format == "zip" {
+					w := zip.NewWriter(&b)
+					entry, err := w.Create(name)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if _, err = entry.Write(body); err != nil {
+						t.Fatal(err)
+					}
+					if err = w.Close(); err != nil {
+						t.Fatal(err)
+					}
+				} else {
+					gz := gzip.NewWriter(&b)
+					w := tar.NewWriter(gz)
+					if err := w.WriteHeader(&tar.Header{Name: name, Mode: 0600, Size: int64(len(body))}); err != nil {
+						t.Fatal(err)
+					}
+					if _, err := w.Write(body); err != nil {
+						t.Fatal(err)
+					}
+					if err := w.Close(); err != nil {
+						t.Fatal(err)
+					}
+					if err := gz.Close(); err != nil {
+						t.Fatal(err)
+					}
+				}
+				r := archiveRun(t, b.Bytes(), format, censusPolicy(), 3)
+				if r.state != "fully_read" || r.entries != 1 || r.findings.files != 1 || r.findings.classes["plain_text"] != 1 {
+					t.Fatalf("archive census = %+v", r)
+				}
+			})
+		}
+	}
+}
