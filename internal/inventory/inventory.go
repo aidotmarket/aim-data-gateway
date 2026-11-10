@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/aidotmarket/aim-data-gateway/internal/config"
 	"github.com/aidotmarket/aim-data-gateway/internal/ids"
@@ -148,10 +149,8 @@ func scan(ctx context.Context, c config.Config, k ids.Keys, limit int, previous 
 			id := ids.FileID(k, source.Name, rel)
 			old, ok := prior[id]
 			same := ok && old.Source == source.Name && old.RelativePath == rel && old.Phase1.SizeBytes == info.Size() && old.Mtime.Equal(info.ModTime().UTC())
-			var r Record
-			if same {
-				r = old
-			} else {
+			r := old
+			if !same {
 				f, e := rootHandle.Open(rel)
 				if e != nil {
 					return e
@@ -177,9 +176,8 @@ func scan(ctx context.Context, c config.Config, k ids.Keys, limit int, previous 
 			r.Phase1.FileID = id
 			r.Phase1.DisplayName = name
 			r.Phase1.ContentCommitment = ids.ContentCommitment(k, r.SHA256)
-			if ok {
-				r.Phase1.FirstSeenAt = old.Phase1.FirstSeenAt
-			} else {
+			r.Phase1.FirstSeenAt = old.Phase1.FirstSeenAt
+			if !ok {
 				r.Phase1.FirstSeenAt = now
 			}
 			if !same {
@@ -194,15 +192,12 @@ func scan(ctx context.Context, c config.Config, k ids.Keys, limit int, previous 
 			return nil, e
 		}
 	}
-	seen := make(map[string]bool, len(out))
 	for _, r := range out {
-		seen[r.Phase1.FileID] = true
+		delete(prior, r.Phase1.FileID)
 	}
 	var deleted []string
 	for id := range prior {
-		if !seen[id] {
-			deleted = append(deleted, id)
-		}
+		deleted = append(deleted, id)
 	}
 	sort.Strings(deleted)
 	for _, id := range deleted {
@@ -234,10 +229,7 @@ func readFileContext(ctx context.Context, f *os.File) (Record, error) {
 			full.Write(block[:n])
 			r.BlockHashes = append(r.BlockHashes, sha256.Sum256(block[:n]))
 			r.Phase1.SizeBytes += int64(n)
-			if len(first) < cap(first) {
-				take := min(n, cap(first)-len(first))
-				first = append(first, block[:take]...)
-			}
+			first = append(first, block[:min(n, cap(first)-len(first))]...)
 		}
 		if e == io.EOF || e == io.ErrUnexpectedEOF {
 			break
@@ -274,12 +266,23 @@ func Detect(b []byte) string {
 	}
 	return "application/octet-stream"
 }
-func utf8Text(b []byte) bool {
-	for _, x := range b {
-		if x == 0 {
-			return false
+
+// DetectNamed adds the runner's plain-text filename fallback; truncated permits an incomplete final rune.
+func DetectNamed(b []byte, name string, truncated bool) string {
+	media := Detect(b)
+	for i := len(b) - 1; truncated && i >= 0 && len(b)-i < utf8.UTFMax; i-- {
+		if utf8.RuneStart(b[i]) && !utf8.FullRune(b[i:]) {
+			b = b[:i]
+			break
 		}
 	}
-	return true
+	named := map[string]string{".csv": "text/csv", ".tsv": "text/tab-separated-values"}[strings.ToLower(filepath.Ext(name))]
+	text := strings.TrimSpace(strings.TrimPrefix(string(b), "\ufeff"))
+	if media == "application/octet-stream" && named != "" && utf8.Valid(b) && text != "" && DetectContent(b, "").Class == "plain_text" {
+		return named
+	}
+	return media
 }
+
+func utf8Text(b []byte) bool { return bytes.IndexByte(b, 0) < 0 }
 func SHAHex(r Record) string { return hex.EncodeToString(r.SHA256[:]) }

@@ -685,7 +685,7 @@ func (s *source) Members() []core.Member {
 }
 func contentFormat(ctx context.Context, f *os.File) (string, error) {
 	stop := context.AfterFunc(ctx, func() { f.Close() })
-	first := make([]byte, 4096)
+	first := make([]byte, 4097) // Read one extra byte to distinguish a bounded prefix from EOF.
 	n, e := io.ReadFull(f, first)
 	stop()
 	if ctx.Err() != nil {
@@ -697,14 +697,11 @@ func contentFormat(ctx context.Context, f *os.File) (string, error) {
 	if _, e = f.Seek(0, io.SeekStart); e != nil {
 		return "", e
 	}
-	kind := map[string]string{
-		"text/csv": "csv", "text/tab-separated-values": "tsv",
+	return map[string]string{
+		"application/octet-stream": "unsupported",
+		"text/csv":                 "csv", "text/tab-separated-values": "tsv",
 		"application/x-ndjson": "jsonl", "application/vnd.apache.parquet": "parquet",
-	}[inventory.Detect(first[:n])]
-	if kind == "" {
-		kind = "unsupported"
-	}
-	return kind, nil
+	}[inventory.DetectNamed(first[:min(n, 4096)], f.Name(), n > 4096)], nil
 }
 func (s *source) open(ctx context.Context, id string) (*os.File, error) {
 	if s.failed[id] {

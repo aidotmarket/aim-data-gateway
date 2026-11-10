@@ -5,9 +5,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -218,5 +220,117 @@ func TestProbeRefusesSecondDetectionFailure(t *testing.T) {
 	raw, _ := wire.DecodeDocument(body.Document, wire.MaxScanDocument)
 	if f.opens.Load() != 4 || body.Variant != "probe" || !bytes.Contains(raw, []byte(`"source_reachable":false`)) {
 		t.Fatalf("late detection failure accepted: opens=%d %s", f.opens.Load(), raw)
+	}
+}
+
+func TestOneColumnTablePath(t *testing.T) {
+	for _, tc := range []struct{ ext, body, format string }{
+		{"csv", "value\nv0\nv0\n", "csv"},
+		{"TSV", "value\nv0\nv0\n", "tsv"},
+		{"txt", "value\nv0\nv0\n", "unsupported"},
+		{"csv", "value\n\x00\xff", "unsupported"},
+		{"csv", "PK\x03\x04zip", "unsupported"},
+	} {
+		t.Run(tc.ext+"/"+tc.format, func(t *testing.T) {
+			f := newRunner(t)
+			ctx := context.Background()
+			_, j, snapshot, _ := f.sourceJob(t, tc.ext, []byte(tc.body), "scan")
+			src := &source{runner: f.r, snapshot: snapshot, ctx: ctx}
+			if got := src.Members(); len(got) != 1 || got[0].Format != tc.format {
+				t.Fatalf("members = %+v; want %s", got, tc.format)
+			}
+			if tc.format == "unsupported" {
+				return
+			}
+			if affected, err := src.eligibility(ctx); err != nil || len(affected) != 0 {
+				t.Fatalf("eligibility = %v, %v", affected, err)
+			}
+			facts, err := core.Scan(ctx, src, policy(j, f.r.Keys))
+			if err != nil || len(facts.Objects) != 1 || facts.Objects[0].Rows != 2 || len(facts.Objects[0].Names) != 1 || len(facts.Coverage.Skipped) != 0 {
+				t.Fatalf("one-column scan = %+v, %v", facts, err)
+			}
+		})
+	}
+}
+
+// Exercise format selection and parsing through the gateway source, including
+// every possible split of each rune width and the adjacent complete alignment.
+func TestOneColumnTablePrefixBoundaries(t *testing.T) {
+	for _, ext := range []string{"csv", "tsv"} {
+		for _, runeText := range []string{"é", "山", "😀"} {
+			for tail := 1; tail <= len(runeText); tail++ {
+				body := "value\n" + strings.Repeat("a", 4096-len("value\n")-tail) + runeText + "suffix\n"
+				t.Run(fmt.Sprintf("%s/%d-byte/tail-%d", ext, len(runeText), tail), func(t *testing.T) {
+					assertOneColumnRunner(t, ext, body, ext)
+				})
+			}
+			for tail := 1; tail < len(runeText); tail++ {
+				for _, size := range []int{len("value\n") + tail, 4096} {
+					body := "value\n" + strings.Repeat("a", size-len("value\n")-tail) + runeText[:tail]
+					t.Run(fmt.Sprintf("%s/reject-eof-%d-byte/tail-%d/size-%d", ext, len(runeText), tail, size), func(t *testing.T) {
+						assertOneColumnRunner(t, ext, body, "unsupported")
+					})
+				}
+			}
+		}
+		for _, blank := range []string{"\n", "\r\n"} {
+			t.Run(fmt.Sprintf("%s/blank-%q", ext, blank), func(t *testing.T) {
+				assertOneColumnRunner(t, ext, blank+"value\nv0\n", ext)
+			})
+		}
+		for _, body := range []string{"", "\n", "\n\n", "\n\n\n", "\r\n", "\ufeff", "\ufeff\n", " \r\n\t\n", "value\n\xff", "value\n\x80", "value\n\xe0\x80", "value\n\xed\xa0", "value\n\xf4\x90", "value\n\xf5", "value\n\xff\xc3"} {
+			t.Run(fmt.Sprintf("%s/reject-%x", ext, body), func(t *testing.T) {
+				assertOneColumnRunner(t, ext, body, "unsupported")
+			})
+		}
+	}
+}
+
+// Recognized markdown, source and HTML headers deliberately precede the name fallback.
+func TestOneColumnRecognizedHeadersStayUnsupported(t *testing.T) {
+	for _, ext := range []string{"csv", "tsv"} {
+		for _, header := range []string{"# of items", "import id", "//host/path", "<5"} {
+			t.Run(ext+"/"+header, func(t *testing.T) {
+				assertOneColumnRunner(t, ext, header+"\nv0\n", "unsupported")
+			})
+		}
+	}
+}
+
+func assertOneColumnRunner(t *testing.T, ext, body, format string) {
+	t.Helper()
+	f := newRunner(t)
+	ctx := context.Background()
+	_, j, snapshot, _ := f.sourceJob(t, ext, []byte(body), "scan")
+	src := &source{runner: f.r, snapshot: snapshot, ctx: ctx}
+	if got := src.Members(); len(got) != 1 || got[0].Format != format {
+		t.Fatalf("members = %+v; want %s", got, format)
+	}
+	if format == "unsupported" {
+		// Keep a valid table alongside the rejected member to prove scan continuity.
+		v := loadVector(t, "snapshot")
+		raw, err := wire.DecodeDocument(v.Input["payload_b64"].(string), wire.MaxSnapshot)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var companion wire.Snapshot
+		if err := json.Unmarshal(raw, &companion); err != nil {
+			t.Fatal(err)
+		}
+		src.snapshot.Members = append(src.snapshot.Members, companion.Members[1])
+		src.index = nil
+	}
+	facts, err := core.Scan(ctx, src, policy(j, f.r.Keys))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if format == "unsupported" {
+		if len(facts.Objects) != 1 || len(facts.Coverage.Skipped) != 1 || facts.Coverage.Skipped[0].Reason != "unsupported_type" || facts.Coverage.Reasons["unsupported_type"] != 1 {
+			t.Fatalf("unsupported scan = %+v", facts)
+		}
+		return
+	}
+	if len(facts.Objects) != 1 || facts.Objects[0].Rows != 1 || len(facts.Objects[0].Names) != 1 || len(facts.Coverage.Skipped) != 0 {
+		t.Fatalf("one-column scan = %+v", facts)
 	}
 }
