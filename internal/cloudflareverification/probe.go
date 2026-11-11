@@ -89,10 +89,6 @@ func probe(ctx context.Context, src *Source, p core.Policy) (out probeResult, er
 	}
 	close(jobs)
 	wg.Wait()
-	planned := map[string]bool{}
-	for _, id := range core.PlannedReadSet(p.Seed, census, p) {
-		planned[id] = true
-	}
 	var total int64
 	for i, r := range results {
 		if r.err != nil {
@@ -102,9 +98,6 @@ func probe(ctx context.Context, src *Source, p core.Policy) (out probeResult, er
 			return out, core.ErrResourceLimit
 		}
 		total += census[i].Size
-		if !planned[census[i].Identity] {
-			r.ArchiveGetRequests = 0
-		}
 		sums := []*int64{&totals.KnownProcessedBytes, &totals.KnownReadableStoredBytes, &totals.UnknownExpansionContainers, &totals.UnknownExpansionStoredBytes, &totals.ZipEntries, &totals.ArchiveGetRequests}
 		values := []int64{r.KnownProcessedBytes, r.KnownReadableStoredBytes, r.UnknownExpansionContainers, r.UnknownExpansionStoredBytes, r.ZipEntries, r.ArchiveGetRequests}
 		for j, n := range values {

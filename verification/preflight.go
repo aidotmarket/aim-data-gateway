@@ -11,7 +11,7 @@ import (
 type CensusPreflight struct {
 	FloorResult         string `json:"floor_result"`
 	AdmissionResult     string `json:"admission_result"`
-	ArchiveRequestsBand string `json:"archive_requests_band"`
+	ArchiveRequestsBand string `json:"archive_requests_band,omitempty"`
 }
 
 func (p *CensusPreflight) UnmarshalJSON(b []byte) error {
@@ -28,7 +28,12 @@ func (p *CensusPreflight) UnmarshalJSON(b []byte) error {
 	if v.FloorResult != "meets_floor" && v.FloorResult != "meets_floor_unknown_expansion" && v.FloorResult != "below_floor" || v.AdmissionResult != "within_bounds" && v.AdmissionResult != "over_bound" {
 		return ErrUnsupported
 	}
-	valid := v.ArchiveRequestsBand == "over_bound"
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(b, &fields); err != nil {
+		return err
+	}
+	_, present := fields["archive_requests_band"]
+	valid := !present && v.AdmissionResult == "over_bound"
 	for _, n := range []int64{0, 1, 10, 100, 1000, 2000, 4000, 8000, 16000, 32000, 64000, 128000, 256000, 512000} {
 		if archiveRequestsBand(n) == v.ArchiveRequestsBand {
 			valid = true
@@ -49,7 +54,7 @@ func archiveRequestsBand(n int64) string {
 			return fmt.Sprintf("%d-%d", lo, lo*2-1)
 		}
 	}
-	return "over_bound"
+	return ""
 }
 
 // NewCensusPreflight uses a ceiling comparison to avoid multiplying stored bytes.
@@ -67,7 +72,7 @@ func NewCensusPreflight(total, known, unknown, members, possible, requests int64
 	}
 	// Compare before multiplication; all counts originate in bounded snapshots/directories.
 	available := MaxMemoryBytes - 16*(4<<20)
-	if members > available/1024 || possible > (available-members*1024)/384 {
+	if requests >= 1024000 || members > available/1024 || possible > (available-members*1024)/384 {
 		p.AdmissionResult = "over_bound"
 	}
 	return p
