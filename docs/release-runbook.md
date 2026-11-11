@@ -6,6 +6,8 @@ not push an image or create a release.
 
 From this change, the next AWS verifier release (built with `go-version-file: go.mod`) carries new binary hashes because of Go 1.27.3; the Cloudflare reproducible rebuild of v0.1.2 stays on Go 1.27.2; coordinate any verifier catalog or allowlist change with Vulcan first.
 
+Releases from this change build with Go 1.27.4 and therefore carry new binary hashes.
+
 Before a release, dispatch `release.yml` from the intended workflow ref with
 `tag` set to an existing tag. The workflow file comes from the dispatch ref;
 checkout and the build source come from the tag. Wait for the image job to

@@ -17,7 +17,7 @@ class ReleaseTests(unittest.TestCase):
     def test_distribution_table_and_workflow_mapping(self):
         for distribution, version, source, toolchain in [
                 ("oauth-install-r1", "0.1.2", release.BINARY_SOURCE, "1.27.2"),
-                ("oauth-install-r2", "0.2.0", "HEAD", "1.27.3")]:
+                ("oauth-install-r2", "0.2.0", "HEAD", "1.27.4")]:
             tag = "cloudflare-verifier-" + distribution
             self.assertEqual(release.release_tag(version, distribution), tag)
             self.assertEqual(release.distribution_spec(version, distribution)["source"], source)
@@ -77,7 +77,7 @@ class ReleaseTests(unittest.TestCase):
                         Path(args[args.index("-o") + 1]).write_bytes(b"changed" if mismatch and len(builds) == 2 else b"r2")
                         return ""
                     if args[:2] == ("go", "version"):
-                        return "go version go1.27.3 linux/amd64"
+                        return "go version go1.27.4 linux/amd64"
                     if str(args[0]).endswith("esbuild"):
                         Path(args[-1].removeprefix("--outfile=")).write_bytes(b"bundle")
                         return ""
