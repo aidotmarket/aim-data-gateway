@@ -262,7 +262,7 @@ func (r *censusRaw) finish() *ContentCensus {
 	states := exactPartition(map[string]int64{"fully_read": r.fully, "partly_read": r.partly, "unread": r.unread}, r.members)
 	c.Inventory = CensusInventory{r.members, r.stored, partition(r.extensions, r.members), partition(r.sizes, r.members), r.archives}
 	c.CoverageContent = CensusCoverage{states, r.members, r.storedRead, r.stored, r.processed, r.fully != r.members, "hmac_seed_byte_budget_v1", exactPartition(r.reasons, r.members), r.unreadable > 0 && r.readable < (r.readable+r.unreadable+9)/10}
-	c.Interiors = CensusInteriors{findingState(r.opened), r.opened, r.opened, r.partial, countBand(r.entries), sizeBucket(r.entryBytes), partition(r.interiorReasons, r.opened)}
+	c.Interiors = CensusInteriors{findingState(r.opened), r.opened, r.opened, r.partial, countBand(r.entries), sizeBucket(r.entryBytes), CensusPartition{}}
 	if r.opened < 10 || lowMap(r.interiorReasons) {
 		c.Interiors.UnreadByReason = CensusPartition{State: suppressed, Population: r.opened}
 	} else {

@@ -46,17 +46,12 @@ var licencePatterns = []struct {
 func hexDigest(h [32]byte) string { return hex.EncodeToString(h[:]) }
 
 type fileFinding struct {
-	nearEligible            bool
 	class, encoding, script string
 	size                    int64
-	digest                  [32]byte
-	simhash                 uint64
 	hits                    [3]int64
 	licences                map[string]bool
 }
 type fileInspection struct {
-	tokenHash                        hash.Hash
-	shingleCounts                    map[uint64]int64
 	textSize                         int64
 	decided, wideUTF16, littleEndian bool
 	start, wideTail                  []byte
@@ -66,66 +61,20 @@ type fileInspection struct {
 	phoneLineSize, phoneEnd, phonePending int64
 	phoneExcluded                         bool
 
-	name                string
-	h                   hash.Hash
-	size, patternEnd    int64
-	prefix, tail, token []byte
-	utfTail             []byte
-	scripts             [5]int64
-	hits                [3]int64
-	licences            map[string]bool
-	shingle             [5]uint64
-	tokens              int
-	votes               [64]int64
+	name             string
+	h                hash.Hash
+	size, patternEnd int64
+	prefix, tail     []byte
+	utfTail          []byte
+	scripts          [5]int64
+	hits             [3]int64
+	licences         map[string]bool
 }
 
 func newFileInspection(name string) *fileInspection {
 	return &fileInspection{name: name, h: sha256.New(), licences: map[string]bool{}}
 }
 func (f *fileInspection) digest() [32]byte { return [32]byte(f.h.Sum(nil)) }
-func (f *fileInspection) flushToken() {
-	if len(f.token) == 0 && f.tokenHash == nil {
-		return
-	}
-	h := sha256.Sum256(f.token)
-	if f.tokenHash != nil {
-		f.tokenHash.Write(f.token)
-		h = [32]byte(f.tokenHash.Sum(nil))
-		f.tokenHash = nil
-	}
-	f.shingle[f.tokens%5] = binary.BigEndian.Uint64(h[:])
-	f.tokens++
-	f.token = f.token[:0]
-	if f.tokens < 5 {
-		return
-	}
-	var frame [40]byte
-	for i := 0; i < 5; i++ {
-		binary.BigEndian.PutUint64(frame[i*8:], f.shingle[(f.tokens-5+i)%5])
-	}
-	digest := sha256.Sum256(frame[:])
-	v := binary.BigEndian.Uint64(digest[:])
-	if f.shingleCounts == nil {
-		f.shingleCounts = make(map[uint64]int64)
-	}
-	f.shingleCounts[v]++
-	if len(f.shingleCounts) >= 16384 {
-		f.flushShingles()
-	}
-
-}
-func (f *fileInspection) flushShingles() {
-	for v, n := range f.shingleCounts {
-		for i := range f.votes {
-			if v&(1<<i) != 0 {
-				f.votes[i] += n
-			} else {
-				f.votes[i] -= n
-			}
-		}
-	}
-	clear(f.shingleCounts)
-}
 func hexByte(b byte) bool {
 	return b >= '0' && b <= '9' || b >= 'a' && b <= 'f' || b >= 'A' && b <= 'F'
 }
@@ -288,18 +237,6 @@ func (f *fileInspection) writeText(b []byte) {
 			}
 			f.scripts[i]++
 		}
-		if unicode.IsLetter(r) || unicode.IsDigit(r) {
-			if len(f.token) >= 256 {
-				if f.tokenHash == nil {
-					f.tokenHash = sha256.New()
-				}
-				f.tokenHash.Write(f.token)
-				f.token = f.token[:0]
-			}
-			f.token = utf8.AppendRune(f.token, unicode.ToLower(r))
-		} else {
-			f.flushToken()
-		}
 	}
 }
 func (f *fileInspection) finish() fileFinding {
@@ -315,8 +252,6 @@ func (f *fileInspection) finish() fileFinding {
 	}
 	f.feedPhone(nil, true)
 	f.patterns(f.tail, int(f.patternEnd-(f.textSize-int64(len(f.tail)))), len(f.tail))
-	f.flushToken()
-	f.flushShingles()
 	d := detectContent(f.prefix, f.name)
 	encoding := "utf8"
 	switch {
@@ -342,13 +277,7 @@ func (f *fileInspection) finish() fileFinding {
 			script = []string{"latin", "cyrillic", "cjk", "arabic", "other"}[i]
 		}
 	}
-	var sim uint64
-	for i, n := range f.votes {
-		if n > 0 {
-			sim |= 1 << i
-		}
-	}
-	return fileFinding{f.size >= 256 && f.tokens >= 5, d.Class, encoding, script, f.size, f.digest(), sim, f.hits, f.licences}
+	return fileFinding{d.Class, encoding, script, f.size, f.hits, f.licences}
 }
 func copyInspected(ctx context.Context, w io.Writer, r io.Reader) (int64, error) {
 	var total int64

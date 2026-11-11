@@ -1,7 +1,6 @@
 package verification
 
 import (
-	"bytes"
 	"fmt"
 	"reflect"
 	"strings"
@@ -64,12 +63,7 @@ func TestFrozenLicenceFamilies(t *testing.T) {
 		}
 	}
 }
-func TestDuplicateEncodingAndScripts(t *testing.T) {
-	a := inspectChunks(bytes.Repeat([]byte("one two three four five six "), 20), "x", 3)
-	b := inspectChunks(bytes.Repeat([]byte("one\n two\t three four  five six "), 20), "x", 7)
-	if a.digest == b.digest || a.simhash != b.simhash {
-		t.Fatal("normalisation", a.simhash, b.simhash)
-	}
+func TestEncodingAndScripts(t *testing.T) {
 	for _, tc := range []struct{ s, encoding, script string }{{"hello", "utf8", "latin"}, {"\ufeffhello", "utf8_bom", "latin"}, {"\xff\xfeh\x00i\x00", "utf16", "latin"}, {"Привет", "utf8", "cyrillic"}, {"你好", "utf8", "cjk"}, {"مرحبا", "utf8", "arabic"}, {"\x00\x01", "binary", "non_text"}} {
 		f := inspectChunks([]byte(tc.s), "x", 1)
 		if f.encoding != tc.encoding || f.script != tc.script {

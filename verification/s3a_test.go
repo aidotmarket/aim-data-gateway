@@ -68,10 +68,14 @@ func s3aPlain(body string) s3aFile {
 }
 func s3aZip(t *testing.T, bodies ...string) s3aFile {
 	t.Helper()
+	return s3aZipMethod(t, zip.Deflate, bodies...)
+}
+func s3aZipMethod(t *testing.T, method uint16, bodies ...string) s3aFile {
+	t.Helper()
 	var b bytes.Buffer
 	z := zip.NewWriter(&b)
 	for i, s := range bodies {
-		w, e := z.CreateHeader(&zip.FileHeader{Name: fmt.Sprintf("e%d.txt", i), Method: zip.Deflate})
+		w, e := z.CreateHeader(&zip.FileHeader{Name: fmt.Sprintf("e%d.txt", i), Method: method})
 		if e != nil {
 			t.Fatal(e)
 		}
@@ -212,8 +216,8 @@ func TestS3ADifferentialPairs(t *testing.T) {
 	}
 	for _, n := range []int{0, 8, 98, 197} {
 		a, b := s3aRepeat(n, "plain text"), s3aRepeat(n, "plain text")
-		a = append(a, s3aZip(t, "alpha"))
-		b = append(b, s3aZip(t, "alpha", "bravo"))
+		a = append(a, s3aZipMethod(t, zip.Store, "alpha"))
+		b = append(b, s3aZipMethod(t, zip.Store, "alpha", "bravo"))
 		if n == 197 {
 			for range 9 {
 				a = append(a, s3aZip(t, "text"))
@@ -231,7 +235,13 @@ func TestS3ADifferentialPairs(t *testing.T) {
 		add(fmt.Sprintf("single_entry_bytes_%d_empty_zips", empty), a, b)
 	}
 	add("archive_credential", []s3aFile{s3aZip(t, credential)}, []s3aFile{s3aZip(t, strings.Repeat("x", len(credential)))})
-	a, b := s3aRepeat(10, email), s3aRepeat(10, "bravo@example.org")
+	a, b := s3aRepeat(20, "neutral text"), s3aRepeat(20, "neutral text")
+	for i := range 12 {
+		b[i] = s3aPlain(email)
+		if i < 11 {
+			a[i] = s3aPlain(email)
+		}
+	}
 	add("email_pair", a, b)
 	a, b = s3aRepeat(11, email), s3aRepeat(11, email)
 	b[0] = s3aPlain("bravo@example.org")
@@ -239,6 +249,7 @@ func TestS3ADifferentialPairs(t *testing.T) {
 	a, b = s3aRepeat(10, "neutral text"), s3aRepeat(10, "neutral text")
 	a[0] = s3aPlain(credential)
 	b[0] = s3aPlain(s3aCredential("ASIA"))
+	b[1] = s3aPlain(credential)
 	add("planted_credential", a, b)
 	a, b = s3aRepeat(10, strings.Repeat(email+" ", 10)), s3aRepeat(10, strings.Repeat(email+" ", 11))
 	add("ten_files_ten_matches", a, b)

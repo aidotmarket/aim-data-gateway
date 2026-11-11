@@ -87,9 +87,8 @@ func randomBlock(n int) []byte {
 	return b
 }
 
-// Boundary fixtures need transport entropy, not millions of incidental words
-// and simhash shingles. Keep a broad byte alphabet but exclude ASCII letters
-// and digits; detector correctness has separate planted-text fixtures.
+// Boundary fixtures need transport entropy. Keep a broad byte alphabet but
+// exclude ASCII letters and digits; detector correctness has separate fixtures.
 func archiveNoise(n int) []byte {
 	var alphabet []byte
 	for i := 0; i < 256; i++ {

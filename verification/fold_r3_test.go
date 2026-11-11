@@ -232,7 +232,7 @@ func TestZipReorderedRequiredReservationsKeepHeadroom(t *testing.T) {
 		if gets == 4 {
 			done := make(chan struct{})
 			go func() {
-				other.addFile(fileFinding{digest: sha256.Sum256([]byte("concurrent")), nearEligible: true})
+				other.addFile(fileFinding{})
 				close(done)
 			}()
 			<-done
