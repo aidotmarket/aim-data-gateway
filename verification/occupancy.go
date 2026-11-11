@@ -20,15 +20,6 @@ type CensusFinding struct {
 	FilesBand         string `json:"files_band,omitempty"`
 	FilesWithHitsBand string `json:"files_with_hits_band,omitempty"`
 	HitCountBand      string `json:"hit_count_band,omitempty"`
-	Count             any    `json:"count,omitempty"`
-}
-type CensusDuplicates struct {
-	ExactRatePPM any    `json:"exact_rate_ppm,omitempty"`
-	NearRatePPM  any    `json:"near_rate_ppm,omitempty"`
-	NearState    string `json:"near_state"`
-	Definition   string `json:"definition"`
-	Population   any    `json:"population"`
-	State        string `json:"state"`
 }
 type CensusInventory struct {
 	Members           any             `json:"members"`
@@ -58,14 +49,14 @@ type CensusInteriors struct {
 	UnreadByReason        CensusPartition `json:"unread_by_reason"`
 }
 type CensusInspected struct {
-	ByContentClass CensusPartition  `json:"by_content_class"`
-	Detectors      []CensusFinding  `json:"detectors"`
-	Licences       []CensusFinding  `json:"licences"`
-	Duplicates     CensusDuplicates `json:"duplicates"`
-	Encodings      CensusPartition  `json:"encodings"`
-	Scripts        CensusPartition  `json:"scripts"`
-	EmptyFiles     CensusFinding    `json:"empty_files"`
-	GarbageFiles   CensusFinding    `json:"garbage_files"`
+	ByContentClass  CensusPartition `json:"by_content_class"`
+	Detectors       []CensusFinding `json:"detectors"`
+	Licences        []CensusFinding `json:"licences"`
+	PlainFiles      int64           `json:"plain_files"`
+	EmptyPlainFiles int64           `json:"empty_plain_files"`
+	ArchiveEntries  any             `json:"archive_entries,omitempty"`
+	Encodings       CensusPartition `json:"encodings"`
+	Scripts         CensusPartition `json:"scripts"`
 }
 type ContentCensus struct {
 	Method          string          `json:"method"`
@@ -125,22 +116,10 @@ func findingState(n int64) string {
 	}
 	return "checked"
 }
-func partCount(part, whole int64) any {
-	if part >= 10 && whole-part >= 10 {
-		return part
-	}
-	return countBand(part)
-}
-func byteCount(n, pop int64, exact bool) any {
-	if pop >= 10 && exact {
-		return n
-	}
-	return sizeBucket(n)
-}
 
 // partition suppresses the entire partition when merging leaves only its total.
 // It never publishes a small complement, including zero-only or singleton cells.
-func partition(counts map[string]int64, pop int64, readState bool) CensusPartition {
+func partition(counts map[string]int64, pop int64) CensusPartition {
 	out := CensusPartition{State: findingState(pop), Population: population(pop)}
 	if pop < 10 {
 		return out
@@ -151,40 +130,25 @@ func partition(counts map[string]int64, pop int64, readState bool) CensusPartiti
 			cells[k] = n
 		}
 	}
-	if readState {
-		// The combined read label is always other. Any small cell forces the fixed
-		// partly -> fully -> unread order, preventing 10+10+1 reconstruction.
-		if lowMap(cells) {
-			n := cells["fully_read"] + cells["partly_read"]
-			delete(cells, "fully_read")
-			delete(cells, "partly_read")
-			cells["other"] = n
-			if cells["unread"] < 10 || n < 10 {
-				cells["other"] += cells["unread"]
-				delete(cells, "unread")
-			}
+	var other int64
+	for k, n := range cells {
+		if n < 10 {
+			other += n
+			delete(cells, k)
 		}
-	} else {
-		var other int64
-		for k, n := range cells {
-			if n < 10 {
-				other += n
-				delete(cells, k)
-			}
-		}
-		if other > 0 {
-			for other < 10 && len(cells) > 0 {
-				key := ""
-				for k, n := range cells {
-					if key == "" || n < cells[key] || n == cells[key] && k < key {
-						key = k
-					}
+	}
+	if other > 0 {
+		for other < 10 && len(cells) > 0 {
+			key := ""
+			for k, n := range cells {
+				if key == "" || n < cells[key] || n == cells[key] && k < key {
+					key = k
 				}
-				other += cells[key]
-				delete(cells, key)
 			}
-			cells["other"] += other
+			other += cells[key]
+			delete(cells, key)
 		}
+		cells["other"] += other
 	}
 	if len(cells) <= 1 {
 		out.State = suppressed
@@ -241,11 +205,15 @@ func (r *censusRaw) add(m Member, x censusMemberResult) {
 	if x.reason != "" {
 		r.reasons[x.reason]++
 	}
-	r.storedRead += x.storedRead
-	r.processed += x.processed
+	if x.state == "fully_read" {
+		r.storedRead += m.Size
+	}
+	if archiveFormat(m) == "" || x.plain {
+		r.processed += x.processed
+		r.inspected.merge(x.findings)
+	}
 	r.readable += x.readable
 	r.unreadable += x.unreadable
-	r.inspected.merge(x.findings)
 	if archiveFormat(m) != "" && x.opened && !x.plain {
 		r.opened++
 		if x.state != "fully_read" {
@@ -258,103 +226,84 @@ func (r *censusRaw) add(m Member, x censusMemberResult) {
 		r.interiorReasons[k] += n
 	}
 }
-func duplicateRate[K comparable](counts map[K]int64, n int64) int64 {
-	var repeated int64
-	for _, v := range counts {
-		if v > 1 {
-			repeated += v - 1
+
+// exactPartition is receipt coverage; public projection applies its own merges.
+func exactPartition(counts map[string]int64, pop int64) CensusPartition {
+	out := CensusPartition{State: "checked", Population: pop}
+	keys := make([]string, 0, len(counts))
+	for k, n := range counts {
+		if n > 0 {
+			keys = append(keys, k)
 		}
 	}
-	if n == 0 {
-		return 0
+	sort.Strings(keys)
+	for _, k := range keys {
+		out.Cells = append(out.Cells, CensusCell{k, counts[k]})
 	}
-	return rateUnits(repeated, n)
+	return out
+}
+func fileCountBand(n, p int64) string {
+	if p == 10 && n >= 1 && n <= 10 {
+		return "1+"
+	}
+	if p == 100 && n >= 10 && n <= 100 {
+		return "10+"
+	}
+	if p == 1000 && n >= 100 && n <= 1000 {
+		return "100+"
+	}
+	return countBand(n)
 }
 func (r *censusRaw) finish() *ContentCensus {
 	c := &ContentCensus{Method: ContentCensusV1, DepthClass: "content_census_complete_v1"}
 	if r.fully != r.members {
 		c.DepthClass = "content_census_sampled_v1"
 	}
-	states := partition(map[string]int64{"fully_read": r.fully, "partly_read": r.partly, "unread": r.unread}, r.members, true)
-	exact := states.State == "checked" && r.fully+r.partly >= 10 && r.unread >= 10
-	c.Inventory = CensusInventory{population(r.members), byteCount(r.stored, r.members, true), partition(r.extensions, r.members, false), partition(r.sizes, r.members, false), partCount(r.archives, r.members)}
-	c.CoverageContent = CensusCoverage{states, population(r.members), byteCount(r.storedRead, r.fully+r.partly, exact), byteCount(r.stored, r.members, exact), byteCount(r.processed, r.fully+r.partly, exact), r.fully != r.members, "hmac_seed_byte_budget_v1", partition(r.reasons, r.members, false), r.unreadable > 0 && r.readable < (r.readable+r.unreadable+9)/10}
-	// Interior totals share contributing archives. Bands and size buckets avoid
-	// inferring a single archive's entries through cross-partition subtraction.
-	interiorState := findingState(r.opened)
-	c.Interiors = CensusInteriors{interiorState, population(r.opened), partCount(r.opened, r.archives), partCount(r.partial, r.opened), countBand(r.entries), sizeBucket(r.entryBytes), partition(r.interiorReasons, r.opened, false)}
-	if r.opened < 10 {
-		c.Interiors.ArchivesOpened = nil
-		c.Interiors.ArchivesPartiallyRead = nil
-		c.Interiors.EntriesRead = nil
-		c.Interiors.EntryProcessedBytes = nil
-		c.Interiors.UnreadByReason = CensusPartition{State: interiorState, Population: population(r.opened)}
+	states := exactPartition(map[string]int64{"fully_read": r.fully, "partly_read": r.partly, "unread": r.unread}, r.members)
+	c.Inventory = CensusInventory{r.members, r.stored, partition(r.extensions, r.members), partition(r.sizes, r.members), r.archives}
+	c.CoverageContent = CensusCoverage{states, r.members, r.storedRead, r.stored, r.processed, r.fully != r.members, "hmac_seed_byte_budget_v1", exactPartition(r.reasons, r.members), r.unreadable > 0 && r.readable < (r.readable+r.unreadable+9)/10}
+	c.Interiors = CensusInteriors{findingState(r.opened), r.opened, r.opened, r.partial, countBand(r.entries), sizeBucket(r.entryBytes), partition(r.interiorReasons, r.opened)}
+	if r.opened < 10 || lowMap(r.interiorReasons) {
+		c.Interiors.UnreadByReason = CensusPartition{State: suppressed, Population: r.opened}
+	} else {
+		c.Interiors.UnreadByReason = exactPartition(r.interiorReasons, r.opened)
 	}
 	a := r.inspected
 	a.init()
-	n := a.files
-	c.Inspected.ByContentClass = partition(a.classes, n, false)
+	n := a.files - a.empty
+	c.Inspected.PlainFiles, c.Inspected.EmptyPlainFiles = a.files, a.empty
+	if r.opened > 0 {
+		c.Inspected.ArchiveEntries = countBand(r.entries)
+	}
+	c.Inspected.ByContentClass = partition(a.classes, n)
+	c.Inspected.Encodings = partition(a.encodings, n)
+	c.Inspected.Scripts = partition(a.scripts, n)
+	cross := !lowMap(a.classes) && !lowMap(a.encodings) && !lowMap(a.scripts)
+	if !cross || r.opened > 0 {
+		c.Inspected.Encodings = CensusPartition{State: suppressed, Population: n}
+		c.Inspected.Scripts = c.Inspected.Encodings
+	}
+	if r.opened > 0 {
+		c.Inspected.ByContentClass = CensusPartition{State: suppressed, Population: n}
+	}
+	state := "checked"
+	if n < 10 {
+		state = suppressed
+	}
 	for i, name := range []string{"email", "phone", "credential_like"} {
-		f := CensusFinding{Class: name, PatternVersion: patternVersions[i], Population: population(n), State: findingState(n)}
+		f := CensusFinding{Class: name, PatternVersion: patternVersions[i], Population: n, State: state}
 		if n >= 10 {
-			f.FilesWithHitsBand = countBand(a.hitFiles[i])
+			f.FilesWithHitsBand = fileCountBand(a.hitFiles[i], n)
 			f.HitCountBand = countBand(a.hits[i])
 		}
 		c.Inspected.Detectors = append(c.Inspected.Detectors, f)
 	}
 	for _, l := range licencePatterns {
-		f := CensusFinding{Family: l.family, Population: population(n), State: findingState(n)}
+		f := CensusFinding{Family: l.family, Population: n, State: state}
 		if n >= 10 {
-			f.FilesBand = countBand(a.licences[l.family])
+			f.FilesBand = fileCountBand(a.licences[l.family], n)
 		}
 		c.Inspected.Licences = append(c.Inspected.Licences, f)
 	}
-	c.Inspected.Duplicates = CensusDuplicates{Definition: "sha256_exact_and_simhash64_5shingle_v1_ge_256_bytes_among_inspected_files", Population: population(n), State: findingState(n)}
-	if n >= 10 {
-		c.Inspected.Duplicates.ExactRatePPM = duplicateRate(a.exact, n)
-		if a.nearFiles >= 10 {
-			c.Inspected.Duplicates.NearRatePPM = duplicateRate(a.near, n)
-		}
-	}
-	c.Inspected.Duplicates.NearState = findingState(a.nearFiles)
-	c.Inspected.Encodings = partition(a.encodings, n, false)
-	var text int64
-	for _, v := range a.scripts {
-		text += v
-	}
-	c.Inspected.Scripts = partition(a.scripts, text, false)
-	c.Inspected.EmptyFiles = CensusFinding{Population: population(n), State: findingState(n)}
-	c.Inspected.GarbageFiles = c.Inspected.EmptyFiles
-	if n >= 10 {
-		c.Inspected.EmptyFiles.Count = countBand(a.empty)
-		c.Inspected.GarbageFiles.Count = countBand(a.garbage)
-	}
-	if r.opened > 0 && r.opened < 10 {
-		suppressInspected(&c.Inspected, a.files)
-	}
 	return c
-}
-func suppressInspected(s *CensusInspected, n int64) {
-	pop := countBand(n)
-	s.ByContentClass = CensusPartition{State: suppressed, Population: pop}
-	s.Encodings = s.ByContentClass
-	s.Scripts = s.ByContentClass
-	for i := range s.Detectors {
-		s.Detectors[i].State = suppressed
-		s.Detectors[i].Population = pop
-		s.Detectors[i].FilesWithHitsBand = ""
-		s.Detectors[i].HitCountBand = ""
-	}
-	for i := range s.Licences {
-		s.Licences[i].State = suppressed
-		s.Licences[i].Population = pop
-		s.Licences[i].FilesBand = ""
-	}
-	s.Duplicates.State = suppressed
-	s.Duplicates.Population = pop
-	s.Duplicates.ExactRatePPM = nil
-	s.Duplicates.NearRatePPM = nil
-	s.Duplicates.NearState = suppressed
-	s.EmptyFiles = CensusFinding{State: suppressed, Population: pop}
-	s.GarbageFiles = s.EmptyFiles
 }

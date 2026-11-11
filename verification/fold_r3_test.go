@@ -225,7 +225,7 @@ func TestZipReorderedRequiredReservationsKeepHeadroom(t *testing.T) {
 	const charge = entrySize + (32 << 10) + zipHashBookkeeping
 	const reserved = (128 << 20) - 3*charge - 384 - 100
 	p.censusMemory.used.Store(reserved)
-	other := inspection{memory: p.censusMemory}
+	other := inspection{}
 	gets := 0
 	s.read = func(_ context.Context, _ rangeCall, data []byte) (io.ReadCloser, error) {
 		gets++
@@ -246,7 +246,7 @@ func TestZipReorderedRequiredReservationsKeepHeadroom(t *testing.T) {
 	if r.err != nil || p.censusMemory.failed.Load() || r.commitment.Tag != "zip_entries" || r.entries != 4 || r.readable != 4*entrySize || gets != 5 {
 		t.Fatal("required reservations refused entry fallback", r, gets)
 	}
-	if p.censusMemory.used.Load() != reserved+384+384 {
+	if p.censusMemory.used.Load() != reserved {
 		t.Fatal("optional buffer leak", p.censusMemory.used.Load())
 	}
 }

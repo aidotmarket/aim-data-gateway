@@ -104,7 +104,7 @@ func TestMixedProbeClosedCensusPreflight(t *testing.T) {
 		members = append(members, member(key, formats[i], len(data[i])))
 	}
 	f.jobWithMembers(t, 1, "probe", members)
-	censusWork(t, f, censusR1ArchiveAllowanceBytes)
+	censusWork(t, f, censusR1BudgetBytes)
 	if err := f.h.Invoke(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -113,14 +113,7 @@ func TestMixedProbeClosedCensusPreflight(t *testing.T) {
 	if probe["source_reachable"] != true {
 		t.Fatal(probe)
 	}
-	want := map[string]any{
-		"known_processed_bytes":          json.Number(fmt.Sprint(len(plain) + 18)),
-		"known_readable_stored_bytes":    json.Number(fmt.Sprint(len(plain) + 11)),
-		"unknown_expansion_containers":   json.Number("1"),
-		"unknown_expansion_stored_bytes": json.Number(fmt.Sprint(len(tar))),
-		"zip_entries":                    json.Number("2"),
-		"archive_get_requests":           json.Number("3"), // zip tail + one readable entry, plus tar.gz.
-	}
+	want := map[string]any{"floor_result": "meets_floor_unknown_expansion", "admission_result": "within_bounds", "archive_requests_band": "1-9"}
 	if !reflect.DeepEqual(probe["census_preflight"], want) {
 		t.Fatalf("got %#v; want %#v", probe["census_preflight"], want)
 	}
@@ -209,8 +202,8 @@ func TestArchivePreflightRefusedAndUnconfirmedCounts(t *testing.T) {
 			}
 			p := scanPolicy(wire.ScanJob{Payload: map[string]any{"scan_mode": core.ContentCensusV1}}, nil)
 			got := preflight(ctx, src, src.Members()[0], p)
-			want := censusPreflight{ZipEntries: tc.entries, ArchiveGetRequests: 1}
-			if got.err != nil || got.censusPreflight != want {
+			want := preflightTotals{ZipEntries: tc.entries, ArchiveGetRequests: 1}
+			if got.err != nil || got.preflightTotals != want {
 				t.Fatalf("got %+v; want %+v", got, want)
 			}
 		})

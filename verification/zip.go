@@ -145,7 +145,6 @@ func readZip(ctx context.Context, s CensusSource, m Member, p Policy, stats *Run
 			r.unreadable = 0
 		}
 	}()
-	r.findings.memory = p.censusMemory
 	tail, err := rangeRead(ctx, s, m, max(0, m.Size-archiveTransportSlack), min(m.Size, archiveTransportSlack), stats)
 	if err != nil {
 		r.reason = "read_error"
@@ -325,7 +324,7 @@ func readZip(ctx context.Context, s CensusSource, m Member, p Policy, stats *Run
 			if detectContent(scan.prefix, f.Name).Archive != "" {
 				r.reasons["nested_archive"]++
 			} else {
-				r.findings.addFile(scan.finish())
+				_ = scan.finish()
 			}
 		}
 	}

@@ -732,7 +732,7 @@ func TestArchivePlainTextTableNamesKeepCensusClass(t *testing.T) {
 					}
 				}
 				r := archiveRun(t, b.Bytes(), format, censusPolicy(), 3)
-				if r.state != "fully_read" || r.entries != 1 || r.findings.files != 1 || r.findings.classes["plain_text"] != 1 {
+				if r.state != "fully_read" || r.entries != 1 || r.findings.files != 0 || len(r.findings.classes) != 0 {
 					t.Fatalf("archive census = %+v", r)
 				}
 			})

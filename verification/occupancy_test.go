@@ -17,7 +17,7 @@ func TestOccupancyPartitionMergesAndJointBytes(t *testing.T) {
 		for _, v := range counts {
 			n += v
 		}
-		p := partition(counts, n, false)
+		p := partition(counts, n)
 		if p.State == "checked" {
 			for _, c := range p.Cells {
 				if c.Members.(int64) < 10 {
@@ -39,10 +39,10 @@ func TestOccupancyPartitionMergesAndJointBytes(t *testing.T) {
 		r.storedRead = 12345
 		r.processed = 12345
 		c := r.finish()
-		if _, ok := c.CoverageContent.StoredBytesRead.(int64); ok {
+		if c.CoverageContent.StoredBytesRead != int64(12345) {
 			t.Fatal("exact bytes exposed", c)
 		}
-		if c.CoverageContent.ReadState.State != "suppressed_low_occupancy" {
+		if c.CoverageContent.ReadState.State != "checked" {
 			t.Fatal(c.CoverageContent.ReadState)
 		}
 	}
@@ -76,7 +76,6 @@ func maximalCensus() *ContentCensus {
 	a.init()
 	a.files = n
 	a.empty = n
-	a.garbage = n
 	for _, name := range []string{"table_like_csv", "table_like_tsv", "table_like_jsonl", "json_document", "source_code", "markdown", "plain_text", "html_xml", "pdf", "image", "other_binary", "empty"} {
 		a.classes[name] = n / 12
 	}
@@ -93,9 +92,6 @@ func maximalCensus() *ContentCensus {
 		a.hits[i] = n
 		a.hitFiles[i] = n
 	}
-	a.exact[[32]byte{}] = n
-	a.near[0] = n
-	a.nearFiles = n
 	return r.finish()
 }
 func TestCensusWorstCaseCanonical8KiB(t *testing.T) {

@@ -329,8 +329,9 @@ func (f *fileInspection) finish() fileFinding {
 	case !utf8.Valid(f.prefix):
 		encoding = "latin1_like"
 	}
-	script := "other"
+	script := "non_text"
 	if encoding != "binary" {
+		script = "other"
 		i := 0
 		for j := range f.scripts {
 			if f.scripts[j] > f.scripts[i] {
@@ -346,10 +347,6 @@ func (f *fileInspection) finish() fileFinding {
 		if n > 0 {
 			sim |= 1 << i
 		}
-	}
-	// unknown is a fallback, rather than double counting a recognised licence.
-	if len(f.licences) > 1 {
-		delete(f.licences, "unknown_licence_text")
 	}
 	return fileFinding{f.size >= 256 && f.tokens >= 5, d.Class, encoding, script, f.size, f.digest(), sim, f.hits, f.licences}
 }
@@ -380,13 +377,9 @@ func copyInspected(ctx context.Context, w io.Writer, r io.Reader) (int64, error)
 }
 
 type inspection struct {
-	nearFiles                             int64
-	memory                                *censusMemory
-	files, bytes, empty, garbage          int64
+	files, empty                          int64
 	classes, encodings, scripts, licences map[string]int64
 	hits, hitFiles                        [3]int64
-	exact                                 map[[32]byte]int64
-	near                                  map[uint64]int64
 }
 
 func (a *inspection) init() {
@@ -397,34 +390,17 @@ func (a *inspection) init() {
 	a.encodings = map[string]int64{}
 	a.scripts = map[string]int64{}
 	a.licences = map[string]int64{}
-	a.exact = map[[32]byte]int64{}
-	a.near = map[uint64]int64{}
 }
 func (a *inspection) addFile(f fileFinding) {
 	a.init()
-	// Include both the local and final merged digest maps in this reservation.
-	if _, ok := a.exact[f.digest]; !ok && !a.memory.reserve(256) {
+	a.files++
+	if f.size == 0 {
+		a.empty++
 		return
 	}
-	if f.nearEligible {
-		if _, ok := a.near[f.simhash]; !ok && !a.memory.reserve(128) {
-			return
-		}
-	}
-
-	a.files++
-	a.bytes += f.size
 	a.classes[f.class]++
 	a.encodings[f.encoding]++
-	if f.encoding != "binary" {
-		a.scripts[f.script]++
-	}
-	if f.class == "empty" {
-		a.empty++
-	}
-	if f.class == "other_binary" {
-		a.garbage++
-	}
+	a.scripts[f.script]++
 	for k, n := range f.hits {
 		a.hits[k] += n
 		if n > 0 {
@@ -434,19 +410,11 @@ func (a *inspection) addFile(f fileFinding) {
 	for k := range f.licences {
 		a.licences[k]++
 	}
-	a.exact[f.digest]++
-	if f.nearEligible {
-		a.nearFiles++
-		a.near[f.simhash]++
-	}
 }
 func (a *inspection) merge(b inspection) {
 	a.init()
 	a.files += b.files
-	a.bytes += b.bytes
 	a.empty += b.empty
-	a.garbage += b.garbage
-	a.nearFiles += b.nearFiles
 	for _, pair := range []struct{ dst, src map[string]int64 }{{a.classes, b.classes}, {a.encodings, b.encodings}, {a.scripts, b.scripts}, {a.licences, b.licences}} {
 		for k, v := range pair.src {
 			pair.dst[k] += v
@@ -455,12 +423,6 @@ func (a *inspection) merge(b inspection) {
 	for k := range a.hits {
 		a.hits[k] += b.hits[k]
 		a.hitFiles[k] += b.hitFiles[k]
-	}
-	for k, v := range b.exact {
-		a.exact[k] += v
-	}
-	for k, v := range b.near {
-		a.near[k] += v
 	}
 }
 

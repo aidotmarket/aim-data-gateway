@@ -58,7 +58,7 @@ func scanPolicy(j wire.ScanJob, c *collectedCommitments) core.Policy {
 			100,
 			1000,
 		},
-		MaxMemoryBytes: 128 << 20,
+		MaxMemoryBytes: core.MaxMemoryBytes,
 		MaxRecordBytes: 16 << 20,
 		MaxScalarBytes: 16 << 20,
 		MaxColumns:     1000,
@@ -140,16 +140,8 @@ func (h Handler) scan(ctx context.Context, s *Secret, j wire.ScanJob, src *Sourc
 				"preview_requested":          j.Preview(),
 			},
 		}
-		if censusJob(j) {
-			for _, m := range src.Members() {
-				if !tableFormat(m.Format) {
-					if result.CensusPreflight == nil {
-						result.CensusPreflight = &censusPreflight{}
-					}
-					document["probe"].(map[string]any)["census_preflight"] = result.CensusPreflight
-					break
-				}
-			}
+		if censusJob(j) && result.CensusPreflight != nil {
+			document["probe"].(map[string]any)["census_preflight"] = result.CensusPreflight
 		}
 		if e != nil {
 			document["probe"].(map[string]any)["refusal_reason"] = errorCode(e)

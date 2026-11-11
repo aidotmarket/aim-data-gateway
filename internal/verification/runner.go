@@ -354,7 +354,7 @@ func (r *Runner) fetchSnapshot(ctx context.Context, j wire.ScanJob) (string, err
 	return string(raw), nil
 }
 func policy(j wire.ScanJob, k *Keys) core.Policy {
-	p := core.Policy{CanonicalizationVersion: "python-json-sort-compact-v1", RowCountAlgorithmVersion: "exact-v1", DistinctAlgorithmVersion: "hll-sha256-v1", HistogramVersion: "fixed-buckets-v1", NumericBucketVersion: "fixed-buckets-v1", MinimumAggregateOccupancy: 10, LengthBounds: []int{0, 1, 4, 8, 16, 32, 64, 128, 256}, NumericBoundaries: []float64{-1000, -100, -10, 0, 10, 100, 1000}, MaxMemoryBytes: 128 << 20, MaxRecordBytes: 16 << 20, MaxScalarBytes: 16 << 20, MaxColumns: 1000, MaxFactBytes: 32768, Deadline: 30 * time.Minute, GatewayID: j.Envelope.Audience, SnapshotHash: j.Text("manifest_hash"), CommitmentKey: k.Commitment}
+	p := core.Policy{CanonicalizationVersion: "python-json-sort-compact-v1", RowCountAlgorithmVersion: "exact-v1", DistinctAlgorithmVersion: "hll-sha256-v1", HistogramVersion: "fixed-buckets-v1", NumericBucketVersion: "fixed-buckets-v1", MinimumAggregateOccupancy: 10, LengthBounds: []int{0, 1, 4, 8, 16, 32, 64, 128, 256}, NumericBoundaries: []float64{-1000, -100, -10, 0, 10, 100, 1000}, MaxMemoryBytes: core.MaxMemoryBytes, MaxRecordBytes: 16 << 20, MaxScalarBytes: 16 << 20, MaxColumns: 1000, MaxFactBytes: 32768, Deadline: 30 * time.Minute, GatewayID: j.Envelope.Audience, SnapshotHash: j.Text("manifest_hash"), CommitmentKey: k.Commitment}
 	seed, _ := hex.DecodeString(j.Text("deterministic_seed"))
 	copy(p.Seed[:], seed)
 	return p
