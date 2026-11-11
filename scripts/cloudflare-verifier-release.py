@@ -28,7 +28,7 @@ DISTRIBUTIONS = {
     "oauth-install-r1": {"version": "0.1.2", "source": BINARY_SOURCE,
                          "binary": APPROVED_BINARY, "image": APPROVED_IMAGE, "go": "1.27.2"},
     "oauth-install-r2": {"version": "0.2.0", "source": "HEAD",
-                         "binary": None, "image": None, "go": "1.27.3"},
+                         "binary": None, "image": None, "go": "1.27.4"},
 }
 
 

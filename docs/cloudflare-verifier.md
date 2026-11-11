@@ -34,7 +34,7 @@ The backend installer/callback must read both values from the selected catalog;
 catalog activation and rollback are separate backend operations.
 
 For a local candidate, first commit the source: both independent binary builds
-extract fresh archives of HEAD, so uncommitted edits are excluded. Use Go 1.27.3
+extract fresh archives of HEAD, so uncommitted edits are excluded. Use Go 1.27.4
 first on PATH, Docker Buildx and the locked npm dependencies:
 
 ```sh
