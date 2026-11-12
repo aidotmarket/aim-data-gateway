@@ -140,7 +140,6 @@ func (w *optionalInspection) Write(b []byte) (int, error) {
 
 func readTarGzip(ctx context.Context, s CensusSource, m Member, p Policy, stats *RunStats) censusMemberResult {
 	r := archiveResult(m)
-	r.findings.memory = p.censusMemory
 	// Take the disk slot before opening a provider stream, including candidates
 	// whose content has not yet been confirmed as tar.
 	slotHeld := false
@@ -252,7 +251,7 @@ func readTarGzip(ctx context.Context, s CensusSource, m Member, p Policy, stats 
 		if detectContent(pending.prefix, pending.name).Archive != "" {
 			r.reasons["nested_archive"]++
 		} else {
-			r.findings.addFile(pending.finish())
+			_ = pending.finish()
 		}
 		pending = nil
 	}

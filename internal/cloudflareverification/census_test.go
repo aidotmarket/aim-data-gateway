@@ -396,7 +396,7 @@ func TestCensusFreePreflightAndWire(t *testing.T) {
 		t.Fatal(result, err)
 	}
 	f := result.CensusPreflight
-	if f.KnownProcessedBytes != 3+(200<<10) || f.KnownReadableStoredBytes != 3+(200<<10) || f.UnknownExpansionContainers != 1 || f.UnknownExpansionStoredBytes != int64(len(tarData)) || f.ZipEntries != 1 || f.ArchiveGetRequests != 3 {
+	if f.FloorResult != "meets_floor" || f.AdmissionResult != "within_bounds" || f.ArchiveRequestsBand != "1-9" {
 		t.Fatal(f)
 	}
 	if len(b.requests) != 2 {
@@ -423,12 +423,12 @@ func TestCensusFreePreflightAndWire(t *testing.T) {
 	doc := mapTest(t, docRaw)
 	probeDoc := doc["probe"].(map[string]any)
 	aggregate := probeDoc["census_preflight"].(map[string]any)
-	if len(aggregate) != 6 || probeDoc["source_reachable"] != true {
+	if len(aggregate) != 3 || probeDoc["source_reachable"] != true {
 		t.Fatal(probeDoc)
 	}
 	for _, x := range aggregate {
-		if _, ok := x.(json.Number); !ok {
-			t.Fatal("not integer", x)
+		if _, ok := x.(string); !ok {
+			t.Fatal("not enum", x)
 		}
 	}
 }

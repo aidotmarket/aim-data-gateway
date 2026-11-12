@@ -118,7 +118,7 @@ func TestCensusSignedC1VectorCrossParserAndReceipt(t *testing.T) {
 				if p["source_reachable"] != true || len(f.s3.requests) != 1 {
 					t.Fatal(p, f.s3.requests)
 				}
-				if p["census_preflight"].(map[string]any)["known_processed_bytes"] != json.Number(fmt.Sprint(len(plain)+33)) {
+				if p["census_preflight"].(map[string]any)["archive_requests_band"] != "1-9" {
 					t.Fatal(p)
 				}
 			} else {

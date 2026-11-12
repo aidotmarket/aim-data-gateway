@@ -52,7 +52,7 @@ func (p Policy) checked() (Policy, error) {
 		return p, ErrUnsupported
 	}
 	if p.MaxMemoryBytes == 0 {
-		p.MaxMemoryBytes = 128 << 20
+		p.MaxMemoryBytes = MaxMemoryBytes
 	}
 	if p.MaxRecordBytes == 0 {
 		p.MaxRecordBytes = 16 << 20
@@ -72,7 +72,7 @@ func (p Policy) checked() (Policy, error) {
 	if p.MaxFactBytes < 1 || p.MaxFactBytes > 32768 {
 		return p, ErrSummaryBudget
 	}
-	if p.MaxMemoryBytes < 1 || p.MaxMemoryBytes > 128<<20 || p.MaxRecordBytes < 1 || p.MaxRecordBytes > 16<<20 || p.MaxScalarBytes < 1 || p.MaxScalarBytes > 16<<20 || p.MaxColumns < 1 || p.MaxColumns > 1000 || p.Deadline < 0 || p.Deadline > 30*time.Minute {
+	if p.MaxMemoryBytes < 1 || p.MaxMemoryBytes > MaxMemoryBytes || p.MaxRecordBytes < 1 || p.MaxRecordBytes > 16<<20 || p.MaxScalarBytes < 1 || p.MaxScalarBytes > 16<<20 || p.MaxColumns < 1 || p.MaxColumns > 1000 || p.Deadline < 0 || p.Deadline > 30*time.Minute {
 		return p, ErrResourceLimit
 	}
 	return p, p.checkCensusPolicy()

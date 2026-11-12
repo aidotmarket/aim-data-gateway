@@ -29,7 +29,9 @@ type probeResult struct {
 }
 
 // censusPreflight is the closed, aggregate-only free-check wire contract.
-type censusPreflight struct {
+type censusPreflight = core.CensusPreflight
+
+type preflightTotals struct {
 	KnownProcessedBytes         int64 `json:"known_processed_bytes"`
 	KnownReadableStoredBytes    int64 `json:"known_readable_stored_bytes"`
 	UnknownExpansionContainers  int64 `json:"unknown_expansion_containers"`
@@ -38,7 +40,7 @@ type censusPreflight struct {
 	ArchiveGetRequests          int64 `json:"archive_get_requests"`
 }
 type preflightMember struct {
-	censusPreflight
+	preflightTotals
 	err error
 }
 
@@ -69,7 +71,7 @@ func probe(ctx context.Context, src *Source, p core.Policy) (out probeResult, er
 	if len(census) == 0 {
 		return out, ctx.Err()
 	}
-	out.CensusPreflight = &censusPreflight{}
+	totals := preflightTotals{}
 	results := make([]preflightMember, len(census))
 	var wg sync.WaitGroup
 	jobs := make(chan int)
@@ -96,7 +98,7 @@ func probe(ctx context.Context, src *Source, p core.Policy) (out probeResult, er
 			return out, core.ErrResourceLimit
 		}
 		total += census[i].Size
-		sums := []*int64{&out.CensusPreflight.KnownProcessedBytes, &out.CensusPreflight.KnownReadableStoredBytes, &out.CensusPreflight.UnknownExpansionContainers, &out.CensusPreflight.UnknownExpansionStoredBytes, &out.CensusPreflight.ZipEntries, &out.CensusPreflight.ArchiveGetRequests}
+		sums := []*int64{&totals.KnownProcessedBytes, &totals.KnownReadableStoredBytes, &totals.UnknownExpansionContainers, &totals.UnknownExpansionStoredBytes, &totals.ZipEntries, &totals.ArchiveGetRequests}
 		values := []int64{r.KnownProcessedBytes, r.KnownReadableStoredBytes, r.UnknownExpansionContainers, r.UnknownExpansionStoredBytes, r.ZipEntries, r.ArchiveGetRequests}
 		for j, n := range values {
 			if n > math.MaxInt64-*sums[j] {
@@ -105,22 +107,23 @@ func probe(ctx context.Context, src *Source, p core.Policy) (out probeResult, er
 			*sums[j] += n
 		}
 	}
-	if total > 0 && out.CensusPreflight.KnownReadableStoredBytes+out.CensusPreflight.UnknownExpansionStoredBytes < total/10+boolInt(total%10 != 0) {
+	possible := int64(len(census)) + totals.ZipEntries
+	for _, m := range census {
+		if inventory.ArchiveFormat(m.Format) == "tar.gz" {
+			possible += 10000
+		}
+	}
+	out.CensusPreflight = core.NewCensusPreflight(total, totals.KnownReadableStoredBytes, totals.UnknownExpansionStoredBytes, int64(len(census)), possible, totals.ArchiveGetRequests)
+	if out.CensusPreflight.FloorResult == "below_floor" {
 		return out, core.ErrInsufficientReadableContent
 	}
 	out.EstimatedMaxInputTokens += core.CensusAdvisoryTokens
 	return out, ctx.Err()
 }
-func boolInt(v bool) int64 {
-	if v {
-		return 1
-	}
-	return 0
-}
 func preflight(ctx context.Context, src *Source, m core.Member, p core.Policy) preflightMember {
 	kind := inventory.ArchiveFormat(m.Format)
 	if kind == "" {
-		return preflightMember{censusPreflight: censusPreflight{KnownProcessedBytes: m.Size, KnownReadableStoredBytes: m.Size}}
+		return preflightMember{preflightTotals: preflightTotals{KnownProcessedBytes: m.Size, KnownReadableStoredBytes: m.Size}}
 	}
 	n, off := min(m.Size, int64(64<<10)), int64(0)
 	if kind == "zip" {
@@ -128,7 +131,7 @@ func preflight(ctx context.Context, src *Source, m core.Member, p core.Policy) p
 		off = m.Size - n
 	}
 	if n == 0 {
-		return preflightMember{censusPreflight: censusPreflight{ArchiveGetRequests: 1}}
+		return preflightMember{preflightTotals: preflightTotals{ArchiveGetRequests: 1}}
 	}
 	r, err := src.OpenRange(ctx, m.Identity, off, n)
 	if err != nil {
@@ -149,7 +152,7 @@ func preflight(ctx context.Context, src *Source, m core.Member, p core.Policy) p
 		if z.Reason != "" {
 			// Even an unopened/over-cap ZIP contributes its directory count, when
 			// the bounded tail contains an end record, and its planned tail GET.
-			out := preflightMember{censusPreflight: censusPreflight{ArchiveGetRequests: 1}}
+			out := preflightMember{preflightTotals: preflightTotals{ArchiveGetRequests: 1}}
 			for i := len(b) - 22; i >= max(0, len(b)-65557); i-- {
 				if bytes.Equal(b[i:i+4], []byte("PK\x05\x06")) && i+22+int(binary.LittleEndian.Uint16(b[i+20:])) == len(b) {
 					out.ZipEntries = min(int64(binary.LittleEndian.Uint16(b[i+10:])), 10001)
@@ -163,14 +166,14 @@ func preflight(ctx context.Context, src *Source, m core.Member, p core.Policy) p
 	// Only decode enough to validate the first tar header; expansion stays unknown.
 	g, err := gzip.NewReader(bytes.NewReader(b))
 	if err != nil {
-		return preflightMember{censusPreflight: censusPreflight{ArchiveGetRequests: 1}}
+		return preflightMember{preflightTotals: preflightTotals{ArchiveGetRequests: 1}}
 	}
 	defer g.Close()
 	var header [512]byte
 	if _, err = io.ReadFull(g, header[:]); err != nil || !inventory.IsTarHeader(header[:]) {
-		return preflightMember{censusPreflight: censusPreflight{ArchiveGetRequests: 1}}
+		return preflightMember{preflightTotals: preflightTotals{ArchiveGetRequests: 1}}
 	}
-	return preflightMember{censusPreflight: censusPreflight{UnknownExpansionContainers: 1, UnknownExpansionStoredBytes: m.Size, ArchiveGetRequests: 1}}
+	return preflightMember{preflightTotals: preflightTotals{UnknownExpansionContainers: 1, UnknownExpansionStoredBytes: m.Size, ArchiveGetRequests: 1}}
 }
 
 // Mirror C1 planZip using the already validated directory; no member data is read.

@@ -15,6 +15,7 @@ import (
 )
 
 const ContentCensusV1, archiveTransportSlack = "content_census_v1", int64(1 << 20)
+const MaxMemoryBytes = int64(128 << 20)
 const CensusAdvisoryTokens = 2304 // Provisional bytes/3 estimate rounded up to 256; C3 measures provider tokens. Advisory only.
 const CensusR1AWSBudgetBytes, CensusR1CloudflareBudgetBytes, CensusR1ArchiveAllowanceBytes = int64(4_000_000_000), int64(3_000_000_000), int64(64 << 20)
 
@@ -349,7 +350,6 @@ func readCensusMember(ctx context.Context, s CensusSource, m Member, p Policy, s
 		return readTarGzip(ctx, s, m, p, stats)
 	}
 	r := unreadResult(m, "read_error")
-	r.findings.memory = p.censusMemory
 	stats.GETs.Add(1)
 	stats.RequestedBytes.Add(m.Size)
 	stream, err := s.OpenRange(ctx, m.Identity, 0, m.Size)

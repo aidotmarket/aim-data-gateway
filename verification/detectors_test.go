@@ -1,7 +1,6 @@
 package verification
 
 import (
-	"bytes"
 	"fmt"
 	"reflect"
 	"strings"
@@ -22,6 +21,11 @@ func inspectChunks(b []byte, name string, n int) fileFinding {
 func TestDetectorsBoundaryAndShortReadDeterminism(t *testing.T) {
 	data := []byte(strings.Repeat("prefix words ", 200) + "\ncontact test@example.org +1-555-0100 " + fixtureAccessID() + " secret=" + fixtureSecret() + "\nMIT License\n" + strings.Repeat(" words", 200))
 	want := inspectChunks(data, "x.py", len(data))
+	for _, value := range []string{fixtureAccessID(), fixtureSecret()} {
+		if strings.Contains(fmt.Sprintf("%+v", want), value) {
+			t.Fatal("synthetic credential escaped into detector output")
+		}
+	}
 	if want.hits != [3]int64{1, 1, 2} || !want.licences["mit"] {
 		t.Fatalf("planted counts: %+v", want)
 	}
@@ -59,20 +63,8 @@ func TestFrozenLicenceFamilies(t *testing.T) {
 		}
 	}
 }
-func TestDuplicateEncodingAndScripts(t *testing.T) {
-	a := inspectChunks(bytes.Repeat([]byte("one two three four five six "), 20), "x", 3)
-	b := inspectChunks(bytes.Repeat([]byte("one\n two\t three four  five six "), 20), "x", 7)
-	if a.digest == b.digest || a.simhash != b.simhash {
-		t.Fatal("normalisation", a.simhash, b.simhash)
-	}
-	var agg inspection
-	agg.addFile(a)
-	agg.addFile(a)
-	agg.addFile(b)
-	if duplicateRate(agg.exact, agg.files) != 333333 || duplicateRate(agg.near, agg.files) != 666667 {
-		t.Fatal(agg)
-	}
-	for _, tc := range []struct{ s, encoding, script string }{{"hello", "utf8", "latin"}, {"\ufeffhello", "utf8_bom", "latin"}, {"\xff\xfeh\x00i\x00", "utf16", "latin"}, {"Привет", "utf8", "cyrillic"}, {"你好", "utf8", "cjk"}, {"مرحبا", "utf8", "arabic"}, {"\x00\x01", "binary", "other"}} {
+func TestEncodingAndScripts(t *testing.T) {
+	for _, tc := range []struct{ s, encoding, script string }{{"hello", "utf8", "latin"}, {"\ufeffhello", "utf8_bom", "latin"}, {"\xff\xfeh\x00i\x00", "utf16", "latin"}, {"Привет", "utf8", "cyrillic"}, {"你好", "utf8", "cjk"}, {"مرحبا", "utf8", "arabic"}, {"\x00\x01", "binary", "non_text"}} {
 		f := inspectChunks([]byte(tc.s), "x", 1)
 		if f.encoding != tc.encoding || f.script != tc.script {
 			t.Fatal(tc, f)
@@ -98,13 +90,7 @@ func TestRehearsalPlantedTruthShapes(t *testing.T) {
 	if agg.hitFiles != [3]int64{30, 30, 30} || agg.hits != [3]int64{30, 30, 60} {
 		t.Fatal(agg.hitFiles, agg.hits)
 	}
-	var pairs int64
-	for _, n := range agg.exact {
-		pairs += n - 1
-	}
-	if pairs != 16 {
-		t.Fatal(pairs)
-	}
+
 }
 
 // The prefilter is an optimisation only; the frozen regexes decide matches.

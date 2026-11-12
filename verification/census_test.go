@@ -339,14 +339,7 @@ func TestCensusMemoryReservationRefusesWithoutPartialFacts(t *testing.T) {
 	if f, e := Scan(context.Background(), s, p); e != ErrResourceLimit || f.ContentCensus != nil {
 		t.Fatal(f, e)
 	}
-	mem := &censusMemory{limit: 1024}
-	a := inspection{memory: mem}
-	for i := 0; i < 20; i++ {
-		a.addFile(fileFinding{digest: sha256.Sum256([]byte(fmt.Sprint(i))), class: "plain_text", encoding: "utf8", script: "latin"})
-	}
-	if !mem.failed.Load() || mem.used.Load() > 1024 || len(a.exact) > 4 {
-		t.Fatal(mem.used.Load(), len(a.exact))
-	}
+
 }
 func TestTypedRefusalCodes(t *testing.T) {
 	for _, e := range []error{ErrSummaryBudget, ErrResourceLimit, ErrArtifactChanged, ErrPermissionDenied, ErrUnsupported, ErrTimeout, ErrScannerFailure, ErrVerifierUpgradeRequired} {

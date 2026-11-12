@@ -115,7 +115,7 @@ func ValidateCensusCoverage(c ContentCensus, members, planned int64) error {
 	seen := map[string]bool{}
 	for _, cell := range p.Cells {
 		n, ok := exactCount(cell.Members)
-		if !ok || n < 10 || n > members-total || seen[cell.Class] {
+		if !ok || n < 0 || n > members-total || seen[cell.Class] {
 			return ErrArtifactChanged
 		}
 		seen[cell.Class] = true

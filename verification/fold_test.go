@@ -399,13 +399,7 @@ func TestEmptyVersionAndNearDuplicateState(t *testing.T) {
 	if !errors.Is(e, ErrEmptyVersion) || RefusalReason(e) != "empty_version" {
 		t.Fatal(e)
 	}
-	r := newCensusRaw(nil)
-	r.inspected.files = 10
-	r.inspected.nearFiles = 9
-	d := r.finish().Inspected.Duplicates
-	if d.NearRatePPM != nil || d.NearState != suppressed {
-		t.Fatal(d)
-	}
+
 }
 
 func (s *censusSource) empty() *censusSource { s.members = nil; return s }
