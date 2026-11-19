@@ -1,0 +1,8 @@
+# UNADVERTISED / UNVERIFIED V2, V3. No quick tunnel or credential value here.
+# Replace these non-secret example names only in a local copy.
+tunnel: 00000000-0000-0000-0000-000000000000
+credentials-file: /run/credentials/tunnel.json
+ingress:
+  - hostname: downloads.example.invalid
+    service: http://172.30.196.2:8080
+  - service: http_status:404

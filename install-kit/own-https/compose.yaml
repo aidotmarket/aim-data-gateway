@@ -1,0 +1,22 @@
+{
+  "services": {
+    "https-door": {
+      "image": "${TLS_PROXY_IMAGE:?A signed helper image pin is required}",
+      "user": "65532:65532",
+      "read_only": true,
+      "cap_drop": ["ALL"],
+      "security_opt": ["no-new-privileges:true"],
+      "dns": ["127.0.0.1"],
+      "sysctls": {"net.ipv4.ip_forward": "0"},
+      "command": ["caddy", "run", "--config", "/etc/caddy/Caddyfile", "--adapter", "caddyfile"],
+      "ports": ["443:8443"],
+      "volumes": [
+        "./own-https/Caddyfile:/etc/caddy/Caddyfile:ro",
+        "${TLS_CERTIFICATE:?Choose the public certificate}:/certs/server.pem:ro",
+        "${TLS_PRIVATE_KEY:?Choose the protected private key}:/certs/server.key:ro"
+      ],
+      "tmpfs": ["/config:rw,noexec,nosuid,size=8m,uid=65532,gid=65532", "/data:rw,noexec,nosuid,size=8m,uid=65532,gid=65532"],
+      "networks": {"gateway": {"ipv4_address": "172.30.196.4"}}
+    }
+  }
+}
