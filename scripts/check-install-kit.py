@@ -367,12 +367,7 @@ finally:
 
 def preflight(args):
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    attempted = set()
-    class Outcomes(dict):
-        def __setitem__(self, code, value):
-            attempted.add(code)
-            super().__setitem__(code, value)
-    outcomes = Outcomes(dict.fromkeys(CHECKS, "unknown"))
+    outcomes = dict.fromkeys(CHECKS, "unknown")
     messages = []
     helpers = {"https-door": "not_checked", "named-tunnel": "unselected"}
     def result(code, outcome, message):
@@ -483,7 +478,7 @@ def preflight(args):
         "Use your own secure web address. Third-party connection services can see file bytes and must permit this delivery. Ask IT to review the guide before choosing one.",
     ])
     report = {"schema_version": 1, "kit_version": KIT_VERSION, "platform": args.platform,
-              "generated_at": now, "helpers": helpers, "checks": [{"code": code, "outcome": outcome, "checked_at": now if code in attempted else None} for code, outcome in outcomes.items()]}
+              "generated_at": now, "helpers": helpers, "checks": [{"code": code, "outcome": outcome, "checked_at": now if outcome != "unknown" else None} for code, outcome in outcomes.items()]}
     if args.report:
         print(json.dumps(report, separators=(",", ":")))
     else:

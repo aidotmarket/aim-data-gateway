@@ -178,6 +178,8 @@ class PreflightContracts(unittest.TestCase):
             self.assertIn(call.args[0][1], ("info", "compose"))
         for row in report["checks"]:
             self.assertEqual(set(row), {"code", "outcome", "checked_at"})
+            if row["outcome"] == "unknown":
+                self.assertIsNone(row["checked_at"])
             if row["code"] in ("egress", "integrity", "state_write", "source_uid", "tls_inspection"):
                 self.assertEqual(row["outcome"], "unknown")
 

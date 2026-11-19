@@ -317,7 +317,7 @@ The UID-source read/traverse and state-write diagnostics now exist as separate
 explicit actions; they remain unknown in default read-only preparation. Live
 UID permissions and sentinel cleanup on each supported host remain open C0/C8
 acceptance work under §8. Signature/file verification sets `integrity`; inspection of the selected running gateway image and its local RepoDigests sets `image_digest`.
-Unattempted Linux checks and unknown native Windows checks have null timestamps;
+Unknown checks have null timestamps;
 `generated_at` records report creation, not evidence of those checks running.
 Caddy adaptation with the future signed TLS helper, initial issuance/renewal,
 and Windows PowerShell 5.1 plus current PowerShell execution remain open receipts.
