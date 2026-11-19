@@ -1,5 +1,6 @@
 # UNADVERTISED / UNVERIFIED V2, V3. No quick tunnel or credential value here.
-# Replace these non-secret example names only in a local copy.
+# Fixed placeholder only. No executable tunnel entry point is shipped.
+# A future signed, parameterized release must supply the non-secret route inputs.
 tunnel: 00000000-0000-0000-0000-000000000000
 credentials-file: /run/credentials/tunnel.json
 ingress:

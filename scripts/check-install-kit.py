@@ -58,82 +58,156 @@ def template(path):
     return document
 
 
+# Closed source contracts share only invariant hardening, not mutable input files.
+COMMON = {"user": "65532:65532", "read_only": True, "cap_drop": ["ALL"],
+          "security_opt": ["no-new-privileges:true"], "restart": "unless-stopped"}
+INGRESS = {"driver": "bridge", "driver_opts": {"com.docker.network.bridge.enable_ip_masquerade": "false"},
+           "ipam": {"config": [{"subnet": "172.30.198.0/29"}]}}
+
+
+def helper(image, command, volumes, networks, **settings):
+    return dict(COMMON, image=image, command=command, volumes=volumes, networks=networks,
+                sysctls={"net.ipv4.ip_forward": "0"}, **settings)
+
+
+GATEWAY = dict(COMMON, image=GATEWAY_IMAGE, dns=["127.0.0.1"],
+    environment={"AIM_GATEWAY_IMAGE_DIGEST": GATEWAY_DIGEST},
+    volumes=["${GATEWAY_CONFIG:?Choose the local gateway settings}:/config/gateway.toml:ro",
+             "${EXPORT_FOLDER:?Choose a dedicated export folder}:/sources/data:ro", "aim-gateway-state:/state"],
+    networks={"gateway": {"ipv4_address": "172.30.196.2"}},
+    healthcheck={"test": ["CMD", "/aim-gateway", "healthcheck"], "interval": "30s", "timeout": "5s", "retries": 3})
+CONTROL_PROXY = helper("${SQUID_IMAGE:?A signed helper image pin is required}",
+    ["squid", "-N", "-f", "/etc/squid/squid.conf"], ["./squid.conf:/etc/squid/squid.conf:ro"],
+    {"gateway": {"ipv4_address": "172.30.196.3"}, "control-outbound": {}},
+    tmpfs=["/tmp:rw,noexec,nosuid,size=16m,uid=65532,gid=65532"])
+MANUAL_DOOR = helper("${TLS_PROXY_IMAGE:?A signed helper image pin is required}",
+    ["caddy", "run", "--config", "/etc/caddy/Caddyfile", "--adapter", "caddyfile"],
+    ["./own-https/Caddyfile:/etc/caddy/Caddyfile:ro",
+     "${TLS_CERTIFICATE:?Choose the public certificate}:/certs/server.pem:ro",
+     "${TLS_PRIVATE_KEY:?Choose the protected private key}:/certs/server.key:ro"],
+    {"gateway": {"ipv4_address": "172.30.196.4"}, "door-ingress": {}},
+    dns=["127.0.0.1"], ports=["443:8443"],
+    tmpfs=["/config:rw,noexec,nosuid,size=8m,uid=65532,gid=65532", "/data:rw,noexec,nosuid,size=8m,uid=65532,gid=65532"])
+ACME_DOOR = dict(MANUAL_DOOR,
+    volumes=["./own-https/Caddyfile.acme:/etc/caddy/Caddyfile:ro", "acme-certificates:/data"],
+    networks={"gateway": {"ipv4_address": "172.30.196.4"}, "acme": {"ipv4_address": "172.30.197.2"}, "door-ingress": {}},
+    tmpfs=["/config:rw,noexec,nosuid,size=8m,uid=65532,gid=65532"],
+    environment={"HTTPS_PROXY": "http://172.30.197.3:3128", "HTTP_PROXY": "http://172.30.197.3:3128",
+                 "NO_PROXY": "172.30.196.2", "DOOR_HOSTNAME": "${DOOR_HOSTNAME:?Select a stable DNS-only hostname}"})
+CA_PROXY = dict(CONTROL_PROXY, dns=["1.1.1.1"],
+    volumes=["./own-https/acme-squid.conf:/etc/squid/squid.conf:ro"],
+    networks={"acme": {"ipv4_address": "172.30.197.3"}, "ca-outbound": {}})
+TUNNEL = helper("${CLOUDFLARED_IMAGE:?A signed helper image pin is required}",
+    ["tunnel", "--no-autoupdate", "--config", "/etc/cloudflared/config.yaml", "run"],
+    ["./cloudflare-named/config.yaml:/etc/cloudflared/config.yaml:ro",
+     "${TUNNEL_CREDENTIAL_FILE:?Choose the protected local credential file}:/run/credentials/tunnel.json:ro"],
+    {"gateway": {"ipv4_address": "172.30.196.5"}, "tunnel-outbound": {}}, profiles=["unadvertised-cloudflare-named"])
+EXPECTED_COMPOSE = {
+    "install-kit/compose.yaml": {"name": "aim-install-kit",
+        "x-kit-services": {"aim-gateway": GATEWAY, "connect-proxy": CONTROL_PROXY},
+        "networks": {"gateway": {"internal": True, "ipam": {"config": [{"subnet": "172.30.196.0/28"}]}}, "control-outbound": {}},
+        "volumes": {"aim-gateway-state": {"external": True, "name": "${STATE_VOLUME:?Select the exact existing paired volume name}"}}},
+    "install-kit/own-https/compose.yaml": {"x-kit-services": {"https-door": MANUAL_DOOR},
+        "networks": {"door-ingress": INGRESS}},
+    "install-kit/own-https/compose.acme.yaml": {"x-kit-services": {"https-door": ACME_DOOR, "acme-proxy": CA_PROXY},
+        "networks": {"acme": {"internal": True, "ipam": {"config": [{"subnet": "172.30.197.0/29"}]}},
+                     "ca-outbound": {}, "door-ingress": INGRESS},
+        "volumes": {"acme-certificates": {"external": True, "name": "${ACME_STATE_VOLUME:?Select the existing UID-65532 certificate volume}"}}},
+    "install-kit/cloudflare-named/compose.yaml": {"x-kit-services": {"named-tunnel": TUNNEL},
+        "networks": {"tunnel-outbound": {}}},
+}
+
+
+def directives(source):
+    return tuple(line.rstrip() for line in source.splitlines() if line.strip() and not line.lstrip().startswith("#"))
+
+
+EXPECTED_CONFIG = {
+    "install-kit/squid.conf": directives('''
+http_port 3128
+pid_filename /tmp/squid.pid
+cache_log /dev/null
+access_log none
+cache_store_log none
+cache deny all
+via off
+forwarded_for delete
+acl gateway_source src 172.30.196.2/32
+acl CONNECT method CONNECT
+acl tls_port port 443
+acl aim_control dstdomain api.ai.market
+http_access allow gateway_source CONNECT tls_port aim_control
+http_access deny all
+'''),
+    "install-kit/own-https/acme-squid.conf": directives('''
+http_port 3128
+pid_filename /tmp/squid.pid
+cache_log /dev/null
+access_log none
+cache_store_log none
+cache deny all
+via off
+forwarded_for delete
+dns_nameservers 1.1.1.1
+acl certificate_source src 172.30.197.2/32
+acl CONNECT method CONNECT
+acl tls_port port 443
+acl acme_ca dstdomain acme-v02.api.letsencrypt.org
+http_access allow certificate_source CONNECT tls_port acme_ca
+http_access deny all
+'''),
+    "install-kit/own-https/Caddyfile": directives('''
+{
+    admin off
+    auto_https off
+}
+:8443 {
+    tls /certs/server.pem /certs/server.key
+    header Cache-Control "no-store"
+    header Referrer-Policy "no-referrer"
+    reverse_proxy 172.30.196.2:8080
+}
+'''),
+    "install-kit/own-https/Caddyfile.acme": directives('''
+{
+    admin off
+    http_port 8081
+    https_port 8443
+}
+{$DOOR_HOSTNAME} {
+    tls {
+        issuer acme {
+            dir https://acme-v02.api.letsencrypt.org/directory
+            disable_http_challenge
+        }
+    }
+    header Cache-Control "no-store"
+    header Referrer-Policy "no-referrer"
+    reverse_proxy 172.30.196.2:8080
+}
+'''),
+    "install-kit/cloudflare-named/config.yaml": directives('''
+tunnel: 00000000-0000-0000-0000-000000000000
+credentials-file: /run/credentials/tunnel.json
+ingress:
+  - hostname: downloads.example.invalid
+    service: http://172.30.196.2:8080
+  - service: http_status:404
+'''),
+}
+
+
 def check(root=ROOT):
     """Offline source checks. A pass is never a clean-host/network receipt."""
-    base = template(root / "install-kit/compose.yaml")
-    own = template(root / "install-kit/own-https/compose.yaml")
-    tunnel = template(root / "install-kit/cloudflare-named/compose.yaml")
-    require(set(base) == {"name", "services", "networks", "volumes"}, "Restore the original kit network settings, then rerun the check.")
-    require(set(base["services"]) == {"aim-gateway", "connect-proxy"}, "Restore the original kit services, then rerun the check.")
-    gateway = base["services"]["aim-gateway"]
-    require(gateway["image"] == GATEWAY_IMAGE, "The gateway release has changed. Restore the signed v0.2.4 preparation kit, then rerun the check.")
-    require(gateway["environment"] == {"AIM_GATEWAY_IMAGE_DIGEST": GATEWAY_DIGEST}, "The release information does not match. Restore the signed kit, then rerun the check.")
-    require(gateway["networks"] == {"gateway": {"ipv4_address": "172.30.196.2"}}, "The gateway network has changed. Restore the signed kit, then rerun the check.")
-    require(base["networks"] == {"gateway": {"internal": True, "ipam": {"config": [{"subnet": "172.30.196.0/28"}]}}, "control-outbound": {}}, "The network limits have changed. Restore the signed kit, then rerun the check.")
-    require(base["volumes"] == {"aim-gateway-state": {"external": True, "name": "${STATE_VOLUME:?Select the exact existing paired volume name}"}}, "The saved connection storage has changed. Restore the signed kit and retain the existing storage.")
-    require(gateway["volumes"] == ["${GATEWAY_CONFIG:?Choose the local gateway settings}:/config/gateway.toml:ro", "${EXPORT_FOLDER:?Choose a dedicated export folder}:/sources/data:ro", "aim-gateway-state:/state"], "The file access settings have changed. Restore the signed kit, then rerun the check.")
-    services = {**base["services"], **own["services"], **tunnel["services"]}
-    require(set(own) == {"services"} and set(own["services"]) == {"https-door"}
-            and set(tunnel) == {"services", "networks"} and set(tunnel["services"]) == {"named-tunnel"}
-            and tunnel["networks"] == {"tunnel-outbound": {}}, "Extra connection settings were added. Restore the signed kit, then rerun the check.")
-    expected_networks = {
-        "aim-gateway": {"gateway": {"ipv4_address": "172.30.196.2"}},
-        "connect-proxy": {"gateway": {"ipv4_address": "172.30.196.3"}, "control-outbound": {}},
-        "https-door": {"gateway": {"ipv4_address": "172.30.196.4"}},
-        "named-tunnel": {"gateway": {"ipv4_address": "172.30.196.5"}, "tunnel-outbound": {}},
-    }
-    for name, service in services.items():
-        require(service.get("restart") == "unless-stopped", "Restore helper recovery settings before starting containers.")
-        require(set(service) <= {"image", "user", "read_only", "cap_drop", "security_opt", "dns", "environment", "volumes", "networks", "healthcheck", "restart", "sysctls", "command", "tmpfs", "ports", "profiles"}
-                and service["networks"] == expected_networks[name], "Extra container access was added. Restore the signed kit, then rerun the check.")
-        require(service.get("user") == "65532:65532" and service.get("read_only") is True
-                and service.get("cap_drop") == ["ALL"] and service.get("security_opt") == ["no-new-privileges:true"],
-                "A required safety setting has changed. Restore the signed kit without relaxing access, then rerun the check.")
-        require(not set(service) & {"build", "privileged", "network_mode", "pid", "devices", "cap_add", "entrypoint"}, "Extra container access was added. Restore the signed kit, then rerun the check.")
-        if name != "aim-gateway":
-            require("environment" not in service and (name == "https-door" or "ports" not in service), "A helper has extra settings or listeners. Restore the signed kit, then rerun the check.")
-            require(service.get("sysctls") == {"net.ipv4.ip_forward": "0"}, "A helper may route traffic. Restore the signed kit, then rerun the check.")
-            require(service["image"] in {"${SQUID_IMAGE:?A signed helper image pin is required}", "${TLS_PROXY_IMAGE:?A signed helper image pin is required}", "${CLOUDFLARED_IMAGE:?A signed helper image pin is required}"}, "A helper release is missing. Obtain the signed kit before starting containers.")
-            require(all(not any(word in mount for word in ("/sources", "/state", "gateway.toml", "docker.sock")) and mount.endswith(":ro") for mount in service.get("volumes", [])), "A helper has extra file access. Restore the signed kit, then rerun the check.")
-    require(services["connect-proxy"]["command"] == ["squid", "-N", "-f", "/etc/squid/squid.conf"]
-            and services["connect-proxy"]["volumes"] == ["./squid.conf:/etc/squid/squid.conf:ro"]
-            and services["https-door"]["command"] == ["caddy", "run", "--config", "/etc/caddy/Caddyfile", "--adapter", "caddyfile"]
-            and services["named-tunnel"]["command"] == ["tunnel", "--no-autoupdate", "--config", "/etc/cloudflared/config.yaml", "run"],
-            "A helper startup command has changed. Restore the signed kit, then rerun the check.")
+    for relative, expected in EXPECTED_COMPOSE.items():
+        require(json.dumps(load_json(root / relative), sort_keys=True) == json.dumps(expected, sort_keys=True),
+                "Container access or recovery settings changed. Restore the signed kit, then rerun the check.")
+    for relative, expected in EXPECTED_CONFIG.items():
+        require(directives((root / relative).read_text()) == expected,
+                "Connection rules changed. Restore the signed kit, then rerun the check.")
     require(set(path.relative_to(root).as_posix() for path in (root / "install-kit").rglob("*") if path.is_file())
-            == {name for name in FILES if name.startswith("install-kit/")}, "The kit contains unexpected files. Obtain a clean public kit and keep private settings outside it.")
-    require("ports" not in gateway and gateway["dns"] == ["127.0.0.1"], "The gateway is exposed to another network. Restore the signed kit, then rerun the check.")
-    require(own["services"]["https-door"]["networks"] == {"gateway": {"ipv4_address": "172.30.196.4"}}, "The certificate helper has extra network access. Restore the signed kit, then rerun the check.")
-    require(own["services"]["https-door"]["ports"] == ["443:8443"], "The secure web listener has changed. Restore the signed kit, then rerun the check.")
-    require(tunnel["services"]["named-tunnel"]["profiles"] == ["unadvertised-cloudflare-named"] and "--no-autoupdate" in tunnel["services"]["named-tunnel"]["command"], "The optional connection was enabled too early. Restore the signed kit and use your own secure web address.")
-    squid = (root / "install-kit/squid.conf").read_text()
-    rules = [line.strip() for line in squid.splitlines() if line.strip() and not line.startswith("#")]
-    require(rules == ["http_port 3128", "pid_filename /tmp/squid.pid", "cache_log /dev/null", "access_log none", "cache_store_log none", "cache deny all", "via off", "forwarded_for delete", "acl gateway_source src 172.30.196.2/32", "acl CONNECT method CONNECT", "acl tls_port port 443", "acl aim_control dstdomain api.ai.market", "http_access allow gateway_source CONNECT tls_port aim_control", "http_access deny all"], "The outbound limits have changed. Restore the signed kit and ask IT for an inspection exemption if needed.")
-    for filename in ("Caddyfile", "Caddyfile.acme"):
-        source = (root / "install-kit/own-https" / filename).read_text()
-        require("reverse_proxy 172.30.196.2:8080" in source and 'Cache-Control "no-store"' in source and 'Referrer-Policy "no-referrer"' in source and "admin off" in source, "The web forwarding settings have changed. Restore the signed kit, then rerun the check.")
-        require(not any(term in source for term in ("log {", "dns ", "encode ", "redir ", "forward_proxy")), "The web forwarding settings add unsupported behavior. Restore the signed kit, then rerun the check.")
-    require("disable_http_challenge" in (root / "install-kit/own-https/Caddyfile.acme").read_text(), "The certificate check uses an unsupported method. Restore the signed kit and ask IT to review it.")
-    require("UNADVERTISED" in (root / "install-kit/cloudflare-named/config.yaml").read_text()
-            and "UNADVERTISED" in squid, "An unverified option was advertised. Restore the preparation kit and use your own secure web address.")
-    acme = template(root / "install-kit/own-https/compose.acme.yaml")
-    require(set(acme["services"]) == {"https-door", "acme-proxy"}
-            and acme["networks"] == {"acme": {"internal": True, "ipam": {"config": [{"subnet": "172.30.197.0/29"}]}}, "ca-outbound": {}}
-            and acme["volumes"] == {"acme-certificates": {"external": True, "name": "${ACME_STATE_VOLUME:?Select the existing UID-65532 certificate volume}"}},
-            "Restore the persistent, isolated certificate profile.")
-    door = acme["services"]["https-door"]
-    ca_proxy = acme["services"]["acme-proxy"]
-    expected_door = dict(own["services"]["https-door"])
-    expected_door.update(environment={"HTTPS_PROXY": "http://172.30.197.3:3128", "HTTP_PROXY": "http://172.30.197.3:3128", "NO_PROXY": "172.30.196.2", "DOOR_HOSTNAME": "${DOOR_HOSTNAME:?Select a stable DNS-only hostname}"},
-                         volumes=["./own-https/Caddyfile.acme:/etc/caddy/Caddyfile:ro", "acme-certificates:/data"],
-                         tmpfs=["/config:rw,noexec,nosuid,size=8m,uid=65532,gid=65532"],
-                         networks={"gateway": {"ipv4_address": "172.30.196.4"}, "acme": {"ipv4_address": "172.30.197.2"}})
-    expected_proxy = dict(base["services"]["connect-proxy"])
-    expected_proxy.update(volumes=["./own-https/acme-squid.conf:/etc/squid/squid.conf:ro"],
-                          networks={"acme": {"ipv4_address": "172.30.197.3"}, "ca-outbound": {}}, dns=["1.1.1.1"])
-    require(door == expected_door and ca_proxy == expected_proxy, "Restore the certificate helper limits.")
-    ca_rules = [line.strip() for line in (root / "install-kit/own-https/acme-squid.conf").read_text().splitlines() if line.strip() and not line.startswith("#")]
-    require(ca_rules == rules[:8] + ["dns_nameservers 1.1.1.1", "acl certificate_source src 172.30.197.2/32", "acl CONNECT method CONNECT", "acl tls_port port 443", "acl acme_ca dstdomain acme-v02.api.letsencrypt.org", "http_access allow certificate_source CONNECT tls_port acme_ca", "http_access deny all"], "Restore the CA-only proxy rules.")
+            == {name for name in FILES if name.startswith("install-kit/")},
+            "The kit contains unexpected files. Obtain a clean public kit and keep private settings outside it.")
     for relative in FILES:
         path = root / relative
         require(path.is_file() and not path.is_symlink() and path.resolve().is_relative_to(root.resolve()), "Part of the kit is missing or linked elsewhere. Restore the complete signed kit, then rerun the check.")
@@ -202,9 +276,9 @@ def pinned_compose(args, root=None):
     acme = args.certificate_mode == "acme"
     own = template(root / ("install-kit/own-https/compose.acme.yaml" if acme else "install-kit/own-https/compose.yaml"))
     document["services"].update(own["services"])
+    document["networks"].update(own["networks"])
     if acme:
         require(args.door_hostname and re.fullmatch(r"[a-z0-9]+(?:[.-][a-z0-9]+)+", args.door_hostname), "Select a stable DNS-only hostname.")
-        document["networks"].update(own["networks"])
         document["volumes"].update(own["volumes"])
         require(args.acme_state_volume != volume, "Certificate storage must be separate from the paired gateway storage.")
         document["volumes"]["acme-certificates"]["name"] = existing_volume(args.acme_state_volume)
@@ -293,13 +367,19 @@ finally:
 
 def preflight(args):
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    outcomes = dict.fromkeys(CHECKS, "unknown")
+    attempted = set()
+    class Outcomes(dict):
+        def __setitem__(self, code, value):
+            attempted.add(code)
+            super().__setitem__(code, value)
+    outcomes = Outcomes(dict.fromkeys(CHECKS, "unknown"))
     messages = []
+    helpers = {"https-door": "not_checked", "named-tunnel": "unselected"}
     def result(code, outcome, message):
         outcomes[code] = outcome
         messages.append(message)
     target = sys.platform.startswith("linux") and os.uname().machine == "x86_64"
-    result("platform", "pass" if target else "fail", "This check targets Linux on x64. Exact supported versions still need clean installation tests. Ask IT to review the release guide.")
+    result("platform", "pass" if target else "fail", "Linux on x64 was detected. Exact supported versions still need clean installation tests." if target else "Linux on x64 was not detected. Run this check on the serving Linux system.")
     if args.platform == "windows_wsl2":
         outcomes["wsl"] = serving_wsl(args.serving_distro)
         if outcomes["wsl"] != "pass":
@@ -309,8 +389,11 @@ def preflight(args):
     else:
         outcomes["docker_installed"] = "pass"
         info = run(["docker", "info", "--format", "{{.OSType}}"])
-        result("docker_running", "pass" if info.returncode == 0 else "fail", "Docker was checked. If it is stopped, start Docker and rerun this check.")
+        result("docker_running", "pass" if info.returncode == 0 else "fail", "Docker is running." if info.returncode == 0 else "Docker did not respond. Start Docker and rerun this check.")
         outcomes["linux_containers"] = "pass" if info.returncode == 0 and info.stdout.strip() == "linux" else "fail" if info.returncode == 0 else "unknown"
+        messages.append("Linux containers are selected." if outcomes["linux_containers"] == "pass" else
+                        "Docker is using a different container system. Select Linux containers and rerun this check." if outcomes["linux_containers"] == "fail" else
+                        "The container setting could not be read. Start Docker and rerun this check.")
         if run(["docker", "compose", "version", "--short"]).returncode:
             result("docker_installed", "fail", "Docker Compose is missing. Ask IT to install Compose, then rerun this check.")
     check()
@@ -318,7 +401,7 @@ def preflight(args):
     images = None
     if args.manifest or args.bundle or args.release_tag or args.start_probes or args.check_source or args.check_state_write:
         images = verified_release(args.manifest, args.bundle, args.release_tag)
-        outcomes["image_digest"] = "pass"
+        outcomes["integrity"] = "pass"
     if args.check_source or args.check_state_write:
         require(target and images is not None, "File checks need Linux and a verified release.")
         if args.check_source:
@@ -342,6 +425,10 @@ def preflight(args):
         require(inspected.returncode == 0, "The gateway container could not be read. Start the isolated test gateway, then rerun the check.")
         container = json.loads(inspected.stdout)
         require(container["Config"]["Image"] == GATEWAY_IMAGE and container["State"]["Running"], "The selected gateway is not running the expected release. Start the isolated v0.2.4 test gateway, then rerun the check.")
+        local_image = run(["docker", "image", "inspect", "--format", "{{json .RepoDigests}}", container["Image"]])
+        require(local_image.returncode == 0 and GATEWAY_IMAGE in json.loads(local_image.stdout),
+                "The running image does not have the expected local release digest. Stop and restore the signed release.")
+        outcomes["image_digest"] = "pass"
         host = container["HostConfig"]
         require(container["Config"]["User"] == "65532:65532" and host["ReadonlyRootfs"]
                 and host["CapDrop"] == ["ALL"] and not host.get("CapAdd") and not host["Privileged"]
@@ -363,16 +450,30 @@ def preflight(args):
                 and len(mounts) == 3 and all(mount["RW"] == (mount["Destination"] == "/state") for mount in mounts)
                 and next(mount for mount in mounts if mount["Destination"] == "/state")["Type"] == "volume",
                 "The running gateway has unexpected file access. Restore the signed profile and retain its named saved storage before rerunning this check.")
+        door_name = args.door_container
+        require(door_name and re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}", door_name),
+                "Select the running HTTPS door for the network checks.")
+        door_result = run(["docker", "inspect", "--format", "{{json .}}", door_name])
+        require(door_result.returncode == 0, "The selected HTTPS door could not be inspected.")
+        door = json.loads(door_result.stdout)
+        require(door["State"]["Running"] and door["Config"]["Image"] == images["tls_proxy"]
+                and any(attachment["NetworkID"] == attachments[0]["NetworkID"] and attachment["IPAddress"] == "172.30.196.4"
+                        for attachment in door["NetworkSettings"]["Networks"].values()),
+                "The selected HTTPS door is absent, stopped or on the wrong release or network.")
+        helpers["https-door"] = "running"
         name = "aim-c0-probe-" + uuid.uuid4().hex
-        try:
-            probe = run(["docker", "run", "--name", name, "--pull=never", "--network", "container:" + container["Id"],
-                         "--user", "65532:65532", "--read-only", "--cap-drop=ALL", "--security-opt=no-new-privileges:true",
-                         "--mount", "type=bind,src=" + str(ROOT / "install-kit/own-https/network-probe.py") + ",dst=/probe.py,readonly",
-                         images["probe"], "python3", "-B", "/probe.py"])
-        finally:
-            removed = run(["docker", "rm", "--force", name])
-            require(removed.returncode == 0, "The temporary check could not be stopped or removed. Ask IT to inspect the diagnostic containers before continuing setup.")
-        require(probe.returncode == 0 and probe.stdout.strip() == "isolation-negative-probes:pass", "A network safety check failed or could not finish. Stop setup and ask IT to inspect the isolated gateway network. Do not widen access.")
+        for target_id, options, marker in ((container["Id"], [], "isolation-negative-probes:pass"),
+                                            (door["Id"], ["--door"], "door-negative-probes:pass")):
+            try:
+                probe = run(["docker", "run", "--name", name, "--pull=never", "--network", "container:" + target_id,
+                             "--user", "65532:65532", "--read-only", "--cap-drop=ALL", "--security-opt=no-new-privileges:true",
+                             "--mount", "type=bind,src=" + str(ROOT / "install-kit/own-https/network-probe.py") + ",dst=/probe.py,readonly",
+                             images["probe"], "python3", "-B", "/probe.py"] + options)
+            finally:
+                removed = run(["docker", "rm", "--force", name])
+                require(removed.returncode == 0, "The temporary check could not be stopped or removed. Ask IT to inspect the diagnostic containers before continuing setup.")
+            require(probe.returncode == 0 and probe.stdout.strip() == marker,
+                    "A network safety check failed or could not finish. Stop setup and ask IT to inspect the selected namespaces. Do not widen access.")
         outcomes["egress"] = "unknown"  # Requires the gateway's own correlated control operation.
     messages.extend([
         "Local preparation cannot prove downloads work. Ask IT to complete the separate release and outside checks.",
@@ -382,10 +483,11 @@ def preflight(args):
         "Use your own secure web address. Third-party connection services can see file bytes and must permit this delivery. Ask IT to review the guide before choosing one.",
     ])
     report = {"schema_version": 1, "kit_version": KIT_VERSION, "platform": args.platform,
-              "generated_at": now, "checks": [{"code": code, "outcome": outcome, "checked_at": now} for code, outcome in outcomes.items()]}
+              "generated_at": now, "helpers": helpers, "checks": [{"code": code, "outcome": outcome, "checked_at": now if code in attempted else None} for code, outcome in outcomes.items()]}
     if args.report:
         print(json.dumps(report, separators=(",", ":")))
     else:
+        messages.append("Preparation is incomplete. Follow the installation guide with IT. " + ("Diagnostic containers were requested; no readiness claim was made." if args.start_probes or args.check_source or args.check_state_write else "Nothing was installed, started or uploaded."))
         print("\n".join(messages))
     return 1 if "fail" in outcomes.values() else 2  # Unknown never means ready.
 
@@ -404,6 +506,7 @@ def main():
     parser.add_argument("--release-tag")
     parser.add_argument("--start-probes", action="store_true", help="explicitly start a temporary diagnostic container against the selected test gateway")
     parser.add_argument("--gateway-container")
+    parser.add_argument("--door-container")
     parser.add_argument("--certificate-mode", choices=("manual", "acme"), default="manual")
     parser.add_argument("--acme-state-volume")
     parser.add_argument("--door-hostname")
@@ -421,7 +524,7 @@ def main():
             return compose_action(args)
         if args.preflight:
             return preflight(args)
-        require(not any((args.report, args.start_probes, args.manifest, args.bundle, args.release_tag, args.certificate, args.gateway_container, args.check_source, args.check_state_write, args.state_volume, args.source_folder, args.gateway_config, args.private_key, args.serving_distro, args.acme_state_volume, args.door_hostname, args.certificate_mode != "manual")), "Choose the local preparation check before selecting these options. Follow the installation guide and rerun the command.")
+        require(not any((args.report, args.start_probes, args.manifest, args.bundle, args.release_tag, args.certificate, args.gateway_container, args.door_container, args.check_source, args.check_state_write, args.state_volume, args.source_folder, args.gateway_config, args.private_key, args.serving_distro, args.acme_state_volume, args.door_hostname, args.certificate_mode != "manual")), "Choose the local preparation check before selecting these options. Follow the installation guide and rerun the command.")
         check()
         print("C0 static contracts: PASS (platforms, signatures and networks remain unverified)")
         return 0

@@ -37,7 +37,14 @@ sh install-kit/preflight.sh --report
 # sh install-kit/preflight.sh --report --platform windows_wsl2 --serving-distro Ubuntu
 ```
 
-Exit 1 means a failure. Exit 2 means checks remain unknown. Neither is a ready-to-install claim. The machine-readable report contains only bounded check codes, outcomes and UTC timestamps. The native Windows check never changes firmware, WSL, power, startup or licence settings. IT applies any host changes explicitly under company policy. See the [C0 verification and evidence procedure](docs/release-runbook.md#c0-preparation-status).
+On a clean Windows PC, execution policy or the downloaded-file mark may block the
+PowerShell script. Ask IT to review the downloaded kit and its signature first,
+then use `Unblock-File -LiteralPath .\install-kit\preflight.ps1` if approved.
+If company policy permits, IT can use `Set-ExecutionPolicy -Scope Process -ExecutionPolicy RemoteSigned` in that PowerShell session; this changes only the
+session policy. Group Policy may prevent it. Do not bypass company policy.
+A 32-bit PowerShell session on x64 Windows is recognized too.
+
+Exit 1 means a failure. Exit 2 means checks remain unknown. Neither is a ready-to-install claim. The machine-readable report contains bounded check codes, outcomes and UTC timestamps. Linux reports also record helper presence. A null check timestamp means no completed check was recorded. The native Windows check never changes firmware, WSL, power, startup or licence settings. IT applies any host changes explicitly under company policy. See the [C0 verification and evidence procedure](docs/release-runbook.md#c0-preparation-status).
 
 `run` loads `/config/gateway.toml` (or `AIM_GATEWAY_CONFIG`) and uses `/state` (or `AIM_GATEWAY_STATE`). On an empty state volume, released v0.2.4 uses `AIM_PAIRING_CODE` once. C0 does not add the C2 masked `pair` command or wire a new pairing path. Its secret-free profiles are preparation for an already-paired v0.2.4 volume. Do not put bootstrap secrets into the new kit. Later runs load the saved identity and pins, recover the ledger, serve the configured HTTP door, and maintain the outbound control channel. `preview <file-id>` computes the exact local phase 1 and phase 2 payloads without sending them. The design authority is [Gate 1](https://github.com/aidotmarket/runbooks/blob/main/specs/BQ-AIM-DATA-GATEWAY-S1741-GATE1.md) and [Gate 2](https://github.com/aidotmarket/runbooks/blob/main/specs/BQ-AIM-DATA-GATEWAY-S1741-GATE2.md), including Gate 2 Amendment B.
 

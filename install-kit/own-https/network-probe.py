@@ -90,6 +90,17 @@ def allowed_aim_tls():
 
 def main():
     try:
+        if sys.argv[1:] == ["--door"]:
+            # Run in the selected door namespace, not the gateway namespace.
+            resolvers = re.findall(r"(?m)^nameserver\s+([0-9.]+)", open("/etc/resolv.conf", encoding="ascii").read())
+            checks = [denied(lambda: tcp("1.1.1.1", 443))]
+            checks.extend(denied(lambda host=host: dns_answer(host)) for host in set(resolvers + ["1.1.1.1"]))
+            if resolvers and all(value is True for value in checks):
+                print("door-negative-probes:pass")
+                return 0
+            return 1
+        if sys.argv[1:]:
+            return 1
         if not allowed_aim_tls():
             return 1
         resolvers = re.findall(r"(?m)^nameserver\s+([0-9.]+)", open("/etc/resolv.conf", encoding="ascii").read())
@@ -98,8 +109,8 @@ def main():
         checks = [denied(lambda: tcp("1.1.1.1", 443)),
                   denied(lambda: connect("172.30.196.3", 3128, "example.com:443")),
                   denied(lambda: connect("172.30.196.3", 3128, "api.ai.market:80"))]
-        checks.extend(denied(lambda host=host: dns_answer(host)) for host in set(resolvers + ["1.1.1.1", "172.30.196.3", "172.30.196.4", "172.30.196.5"]))
-        for helper in ("172.30.196.4", "172.30.196.5"):
+        checks.extend(denied(lambda host=host: dns_answer(host)) for host in set(resolvers + ["1.1.1.1", "172.30.196.3", "172.30.196.4"]))
+        for helper in ("172.30.196.4",):
             for port in (3128, 8080, 8443):
                 checks.append(denied(lambda host=helper, port=port: connect(host, port, "example.com:443")))
         if all(value is True for value in checks):

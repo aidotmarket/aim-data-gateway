@@ -40,7 +40,8 @@
         },
         "acme": {
           "ipv4_address": "172.30.197.2"
-        }
+        },
+        "door-ingress": {}
       },
       "restart": "unless-stopped",
       "environment": {
@@ -98,7 +99,20 @@
         ]
       }
     },
-    "ca-outbound": {}
+    "ca-outbound": {},
+    "door-ingress": {
+      "driver": "bridge",
+      "driver_opts": {
+        "com.docker.network.bridge.enable_ip_masquerade": "false"
+      },
+      "ipam": {
+        "config": [
+          {
+            "subnet": "172.30.198.0/29"
+          }
+        ]
+      }
+    }
   },
   "volumes": {
     "acme-certificates": {

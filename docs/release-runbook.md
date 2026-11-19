@@ -135,7 +135,7 @@ Compose variable inputs are local paths, never secret values or credentials.
 Use protected local configuration and no shell tracing or terminal recording.
 
 The default own-HTTPS overlay uses manual certificates, only host TCP 443 and
-no outbound network. The TLS private key is a separate protected read-only
+an ingress bridge with IP masquerading disabled. The TLS private key is a separate protected read-only
 mount used only by the reverse proxy. It never enters the gateway, reports or
 source/state mounts. IT must prepare the directory with narrow UID 65532
 read/traverse access. The proxy forwards the signed reachability route,
@@ -143,6 +143,31 @@ read/traverse access. The proxy forwards the signed reachability route,
 Authorization, query and Range. No cache, encoding, access log, login, redirects
 or challenge pages are configured. This routing does not create a synthetic
 handler in v0.2.4. Public DNS must be DNS-only and stable. Do not expose 8080.
+
+Before starting either door profile, IT must deny new outbound flows from its
+ingress bridge while allowing established replies to inbound 443. On a Linux
+Docker host using the iptables backend, identify the actual ingress bridge and
+install a persistent `DOCKER-USER` rule equivalent to
+`iptables -I DOCKER-USER -i <ingress-bridge> -m conntrack --ctstate NEW -j DROP`.
+Apply the equivalent IPv6 policy if IPv6 is enabled. Do not substitute a public
+interface for the bridge. The gateway remains single-homed on its internal
+network; the door can reach it there. This host rule is an explicit IT action,
+not performed by preflight. No-masquerade alone does not deny routed private
+networks. On Docker Desktop, the rule belongs in the Docker network boundary,
+not just the Windows host firewall; that implementation and persistence remain
+V1 acceptance work. Do not start service until enforcement is in place.
+
+Both profiles need external `curl` reachability on host 443 and negative direct
+TCP/DNS tests from the actual door namespace. `--start-probes` requires both
+`--gateway-container` and `--door-container`; it checks that the signed door is
+running on the gateway network, then joins each namespace separately. Reports
+record the door as running and the unavailable tunnel as unselected. An absent
+helper is never a denial receipt; V2 must add explicit connector presence and
+its own namespace tests before enabling that optional profile. Denial probes
+are diagnostic coverage, not a proof of all firewall rules. V1 must also test
+host/daemon restart, ingress and persistent outbound enforcement. The ingress
+subnet `172.30.198.0/29` and ACME subnet `172.30.197.0/29` need the same separate
+Docker-network/host-route conflict review as the gateway subnet.
 
 `compose.acme.yaml` and `Caddyfile.acme` are **UNADVERTISED / UNVERIFIED**
 acceptance configurations. The explicit verified entry point can select this
@@ -154,13 +179,13 @@ The proxy listens only on host 443, disables HTTP-01 and uses TLS-ALPN-01 with
 the fixed Let's Encrypt production directory. Do not attempt issuance through
 a TLS-terminating provider; use the manual/provider certificate there.
 
-The door has restricted DNS and only internal gateway and ACME networks. It
+The door has restricted DNS, internal gateway and ACME networks, and the separate ingress bridge. It
 uses a dedicated CONNECT proxy for ACME HTTPS, allowing only
 `acme-v02.api.letsencrypt.org:443`; that proxy alone resolves through 1.1.1.1. The control proxy accepts only the
 gateway source IP, so the door cannot use it to bypass the CA-only proxy.
 The gateway never joins the ACME network. The separate proxy consumes the same
 verified Squid pin and has no source, gateway-state or private-key mount.
-No unrestricted outbound network is attached to the door. These settings have
+The ingress bridge supplies inbound port publishing. Disabling masquerade is not a complete outbound firewall: routed LANs and Docker Desktop behavior need explicit host enforcement as described above. These settings have
 only offline validation here; live Caddy proxy use and actual denial remain
 unverified. Stop if the CA requires another endpoint; do not widen the rule.
 
@@ -233,7 +258,8 @@ sh install-kit/preflight.sh --report --check-state-write --state-volume legacy_a
   --release-tag v0.0.0-c0
 sh install-kit/preflight.sh --report --start-probes \
   --manifest /local/manifest.json --bundle /local/manifest.sigstore.json \
-  --release-tag v0.0.0-c0 --gateway-container isolated-test-gateway
+  --release-tag v0.0.0-c0 --gateway-container isolated-test-gateway \
+  --door-container isolated-test-door
 ```
 
 The probe shares `--network container:<actual-gateway>` and keeps UID 65532,
@@ -286,3 +312,12 @@ check requires `--platform windows_wsl2 --serving-distro <same-name>`. It matche
 `WSL_DISTRO_NAME` and the actual WSL2 kernel, never the caller's platform label
 alone. An unrelated WSL2 utility distribution cannot establish serving readiness.
 Native PowerShell execution remains unverified on this host.
+
+The UID-source read/traverse and state-write diagnostics now exist as separate
+explicit actions; they remain unknown in default read-only preparation. Live
+UID permissions and sentinel cleanup on each supported host remain open C0/C8
+acceptance work under §8. Signature/file verification sets `integrity`; inspection of the selected running gateway image and its local RepoDigests sets `image_digest`.
+Unattempted Linux checks and unknown native Windows checks have null timestamps;
+`generated_at` records report creation, not evidence of those checks running.
+Caddy adaptation with the future signed TLS helper, initial issuance/renewal,
+and Windows PowerShell 5.1 plus current PowerShell execution remain open receipts.

@@ -54,7 +54,7 @@ class KitContracts(unittest.TestCase):
                 (self.root / "install-kit/compose.yaml").write_text(original)
 
     def test_hardening_network_mount_and_helper_mutations(self):
-        changes = [("user", "0:0"), ("read_only", False), ("cap_drop", []), ("cap_add", ["NET_ADMIN"]),
+        changes = [("user", "0:0"), ("read_only", False), ("read_only", 1), ("cap_drop", []), ("cap_add", ["NET_ADMIN"]),
                    ("security_opt", []), ("privileged", True), ("network_mode", "host"),
                    ("pid", "host"), ("dns", ["1.1.1.1"]), ("ports", ["8080:8080"]),
                    ("networks", {"gateway": {}, "internet": {}}), ("volumes", ["/:/host:ro"])]
@@ -158,7 +158,7 @@ class PreflightContracts(unittest.TestCase):
     def args(self, *extra):
         from argparse import Namespace
         return Namespace(report=True, platform="linux_cloud", certificate=None, manifest=None,
-                         bundle=None, release_tag=None, start_probes=False, gateway_container=None,
+                         bundle=None, release_tag=None, start_probes=False, gateway_container=None, door_container=None,
                          check_source=False, check_state_write=False, source_folder=None, state_volume=None,
                          serving_distro=None, **dict(extra))
 
@@ -168,7 +168,7 @@ class PreflightContracts(unittest.TestCase):
             self.assertEqual(kit.preflight(self.args()), 1)
         report = json.loads(output.getvalue())
         self.assertLess(len(output.getvalue()), 8192)
-        self.assertEqual(set(report), {"schema_version", "kit_version", "platform", "generated_at", "checks"})
+        self.assertEqual(set(report), {"schema_version", "kit_version", "platform", "generated_at", "helpers", "checks"})
         self.assertEqual({row["code"] for row in report["checks"]}, set(kit.CHECKS))
         self.assertEqual(len(report["checks"]), len(kit.CHECKS))
         self.assertNotIn("SECRET", output.getvalue())
@@ -207,7 +207,7 @@ class PreflightContracts(unittest.TestCase):
         self.assertTrue(probe.denied(blocked))
 
     def test_allowed_control_failure_prevents_isolation_pass(self):
-        with patch.object(probe, "allowed_aim_tls", return_value=False), patch.object(probe, "tcp") as tcp:
+        with patch.object(probe.sys, "argv", ["probe.py"]), patch.object(probe, "allowed_aim_tls", return_value=False), patch.object(probe, "tcp") as tcp:
             self.assertEqual(probe.main(), 1)
             tcp.assert_not_called()
 
@@ -215,32 +215,50 @@ class PreflightContracts(unittest.TestCase):
         args = self.args()
         args.start_probes = True
         args.gateway_container = "test-gateway"
-        container = {"Id": "abcdef", "Config": {"Image": kit.GATEWAY_IMAGE, "User": "65532:65532", "Env": ["AIM_GATEWAY_IMAGE_DIGEST=" + kit.GATEWAY_DIGEST]},
+        args.door_container = "test-door"
+        container = {"Id": "abcdef", "Image": "sha256:local-id", "Config": {"Image": kit.GATEWAY_IMAGE, "User": "65532:65532", "Env": ["AIM_GATEWAY_IMAGE_DIGEST=" + kit.GATEWAY_DIGEST]},
                      "State": {"Running": True}, "HostConfig": {"ReadonlyRootfs": True, "CapDrop": ["ALL"], "Privileged": False, "SecurityOpt": ["no-new-privileges:true"], "NetworkMode": "kit", "Dns": ["127.0.0.1"]},
                      "NetworkSettings": {"Networks": {"kit": {"NetworkID": "network-1", "IPAddress": "172.30.196.2"}}},
                      "Mounts": [{"Destination": name, "RW": name == "/state", "Type": "volume" if name == "/state" else "bind"} for name in ("/config/gateway.toml", "/sources/data", "/state")]}
-        for cleanup_ok in (True, False):
+        for cleanup_ok, door_present, image_matches in ((True, True, True), (False, True, True), (True, False, True), (True, True, False)):
             calls = []
             def fake_run(argv):
                 calls.append(argv)
                 if argv[1] == "inspect":
+                    if argv[-1] == "test-door":
+                        if not door_present:
+                            return subprocess.CompletedProcess(argv, 1, "", "")
+                        return subprocess.CompletedProcess(argv, 0, json.dumps({"Id": "door-id", "State": {"Running": True},
+                            "Config": {"Image": "example.invalid/tls@sha256:" + "1" * 64},
+                            "NetworkSettings": {"Networks": {"kit": {"NetworkID": "network-1", "IPAddress": "172.30.196.4"}}}}), "")
                     return subprocess.CompletedProcess(argv, 0, json.dumps(container), "")
+                if argv[1] == "image":
+                    return subprocess.CompletedProcess(argv, 0, json.dumps([kit.GATEWAY_IMAGE] if image_matches else []), "")
                 if argv[1] == "network":
                     return subprocess.CompletedProcess(argv, 0, '[{"Internal":true}]', "")
                 if argv[1] == "run":
-                    return subprocess.CompletedProcess(argv, 0, "isolation-negative-probes:pass\n", "")
+                    return subprocess.CompletedProcess(argv, 0, ("door-negative-probes:pass\n" if "--door" in argv else "isolation-negative-probes:pass\n"), "")
                 if argv[1] == "rm":
                     return subprocess.CompletedProcess(argv, 0 if cleanup_ok else 1, "", "")
                 raise AssertionError("unexpected external action")
             output = io.StringIO()
-            with self.subTest(cleanup_ok=cleanup_ok), patch.object(kit, "check"), patch.object(kit.sys, "platform", "linux"), patch.object(kit.os, "uname", return_value=types.SimpleNamespace(machine="x86_64")), patch.object(kit.shutil, "which", return_value=None), patch.object(kit, "verified_release", return_value={"probe": "example.invalid/probe@sha256:" + "0" * 64}), patch.object(kit, "run", side_effect=fake_run), contextlib.redirect_stdout(output):
-                if cleanup_ok:
+            with self.subTest(cleanup_ok=cleanup_ok), patch.object(kit, "check"), patch.object(kit.sys, "platform", "linux"), patch.object(kit.os, "uname", return_value=types.SimpleNamespace(machine="x86_64")), patch.object(kit.shutil, "which", return_value=None), patch.object(kit, "verified_release", return_value={"probe": "example.invalid/probe@sha256:" + "0" * 64, "tls_proxy": "example.invalid/tls@sha256:" + "1" * 64}), patch.object(kit, "run", side_effect=fake_run), contextlib.redirect_stdout(output):
+                if cleanup_ok and door_present and image_matches:
                     self.assertEqual(kit.preflight(args), 1)  # Docker CLI is deliberately absent in this fixture.
                     report = json.loads(output.getvalue())
                     self.assertEqual(next(row["outcome"] for row in report["checks"] if row["code"] == "egress"), "unknown")
                 else:
                     with self.assertRaises(kit.ContractError):
                         kit.preflight(args)
+            if not door_present or not image_matches:
+                self.assertFalse(any(argv[1] == "run" for argv in calls))
+                self.assertEqual(output.getvalue(), "")
+                continue
+            if cleanup_ok:
+                door_probe = [argv for argv in calls if "--door" in argv]
+                self.assertEqual(len(door_probe), 1)
+                self.assertIn("container:door-id", door_probe[0])
+                self.assertEqual(report["helpers"], {"https-door": "running", "named-tunnel": "unselected"})
             started = next(argv for argv in calls if argv[1] == "run")
             self.assertIn("container:abcdef", started)
             self.assertIn("--pull=never", started)
@@ -332,7 +350,7 @@ class RevisionContracts(unittest.TestCase):
         with patch.object(kit, "verified_release", return_value=self.manifest()["images"]), patch.object(kit, "existing_volume", side_effect=lambda name: name):
             document = kit.pinned_compose(args, self.root)
         self.assertTrue(document["networks"]["acme"]["internal"])
-        self.assertEqual(set(document["services"]["https-door"]["networks"]), {"gateway", "acme"})
+        self.assertEqual(set(document["services"]["https-door"]["networks"]), {"gateway", "acme", "door-ingress"})
         self.assertEqual(set(document["services"]["aim-gateway"]["networks"]), {"gateway"})
         self.assertEqual(document["volumes"]["acme-certificates"], {"external": True, "name": "legacy_certificates"})
         self.assertIn({"type": "volume", "source": "acme-certificates", "target": "/data"}, document["services"]["https-door"]["volumes"])
@@ -405,6 +423,107 @@ if ((Get-ServingWslVersion $one 'Serving') -ne '1') { exit 1 }
 if ((Get-ServingWslVersion $two 'Serving') -ne '2') { exit 2 }
 if ($null -ne (Get-ServingWslVersion $one 'Missing')) { exit 3 }
 if ($null -ne (Get-ServingWslVersion $one '')) { exit 4 }
+"""
+        result = subprocess.run(["rtk", "run", "--", "pwsh", "-NoProfile", "-NonInteractive", "-Command", script], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0)
+
+
+class CcRevisionContracts(unittest.TestCase):
+    setUp = KitContracts.setUp
+    mutate = KitContracts.mutate
+    def test_every_service_refuses_missing_restart_and_added_access(self):
+        for relative in kit.EXPECTED_COMPOSE:
+            original = (self.root / relative).read_text()
+            for service in json.loads(original)["x-kit-services"]:
+                for field, value in (("volumes", ["/:/host:ro"]), ("volumes", ["/var/run:/hostrun:ro"]),
+                                     ("volumes", ["${EXPORT_FOLDER}:/srv:ro"]), ("dns", ["9.9.9.9"]),
+                                     ("command", ["other"]), ("healthcheck", {"test": ["CMD", "true"]}),
+                                     ("tmpfs", ["/host"]), ("restart", None)):
+                    with self.subTest(relative=relative, service=service, field=field, value=value):
+                        def change(document):
+                            selected = document["x-kit-services"][service]
+                            if value is None:
+                                selected.pop(field, None)
+                            else:
+                                selected[field] = value
+                        self.mutate(relative, change)
+                        with self.assertRaises(kit.ContractError):
+                            kit.check(self.root)
+                        (self.root / relative).write_text(original)
+
+    def test_connection_directives_are_closed(self):
+        cases = {
+            "install-kit/own-https/Caddyfile": [lambda s: s.replace("    tls /certs/server.pem /certs/server.key", ""),
+                lambda s: s + "\n:9000 {\n file_server\n}\n",
+                lambda s: s.replace("172.30.196.2:8080", "other:8080")],
+            "install-kit/own-https/Caddyfile.acme": [lambda s: s.replace("disable_http_challenge", "# disable_http_challenge")],
+            "install-kit/cloudflare-named/config.yaml": [lambda s: s.replace("172.30.196.2:8080", "other:8080"),
+                lambda s: s.replace("    service: http://", "service: http://")],
+        }
+        for relative, changes in cases.items():
+            path = self.root / relative
+            original = path.read_text()
+            for change in changes:
+                with self.subTest(relative=relative):
+                    path.write_text(change(original))
+                    with self.assertRaises(kit.ContractError):
+                        kit.check(self.root)
+                    path.write_text(original)
+
+    def test_ingress_is_separate_from_gateway_and_no_masquerade(self):
+        for relative in ("install-kit/own-https/compose.yaml", "install-kit/own-https/compose.acme.yaml"):
+            document = kit.load_json(self.root / relative)
+            self.assertIn("door-ingress", document["x-kit-services"]["https-door"]["networks"])
+            ingress = document["networks"]["door-ingress"]
+            self.assertFalse(ingress.get("internal", False))
+            self.assertEqual(ingress["driver_opts"]["com.docker.network.bridge.enable_ip_masquerade"], "false")
+            original = (self.root / relative).read_text()
+            self.mutate(relative, lambda d: d["networks"]["door-ingress"]["driver_opts"].clear())
+            with self.assertRaises(kit.ContractError):
+                kit.check(self.root)
+            (self.root / relative).write_text(original)
+
+    def test_door_namespace_negative_probe_detects_open_outbound(self):
+        for opened in (True, False):
+            def tcp(*args):
+                if opened:
+                    return types.SimpleNamespace(close=lambda: None)
+                raise TimeoutError()
+            with patch.object(probe.sys, "argv", ["probe.py", "--door"]), patch("builtins.open", unittest.mock.mock_open(read_data="nameserver 127.0.0.1\n")), patch.object(probe, "tcp", side_effect=tcp), patch.object(probe, "dns_answer", side_effect=TimeoutError), contextlib.redirect_stdout(io.StringIO()) as output:
+                self.assertEqual(probe.main(), 1 if opened else 0)
+                self.assertEqual(output.getvalue(), "" if opened else "door-negative-probes:pass\n")
+
+    def test_signature_only_sets_integrity_and_unattempted_times_are_null(self):
+        args = PreflightContracts.args(self)
+        args.manifest = "manifest.json"
+        with patch.object(kit, "check"), patch.object(kit, "verified_release", return_value={}), patch.object(kit.shutil, "which", return_value=None), contextlib.redirect_stdout(io.StringIO()) as output:
+            kit.preflight(args)
+        rows = {row["code"]: row for row in json.loads(output.getvalue())["checks"]}
+        self.assertEqual(rows["integrity"]["outcome"], "pass")
+        self.assertIsNotNone(rows["integrity"]["checked_at"])
+        for code in ("image_digest", "source_uid", "state_write", "egress"):
+            self.assertEqual(rows[code]["outcome"], "unknown")
+            self.assertIsNone(rows[code]["checked_at"])
+
+    @unittest.skipUnless(shutil.which("pwsh"), "PowerShell unavailable; Windows behavior still needs V1 receipts")
+    def test_windows_hypervisor_power_and_native_stderr(self):
+        source = (kit.ROOT / "install-kit/preflight.ps1").read_text()
+        functions = "\n".join(re.search(r"function " + name + r".*?\n}", source, re.S)[0]
+                              for name in ("Test-Virtualization", "Get-CurrentPowerIndices", "Invoke-ReadOnlyNative"))
+        script = functions + r"""
+$ErrorActionPreference = 'Stop'
+$off = @([pscustomobject]@{VirtualizationFirmwareEnabled=$false})
+$on = @([pscustomobject]@{VirtualizationFirmwareEnabled=$true})
+if (-not (Test-Virtualization $true $off)) { exit 1 }
+if (Test-Virtualization $false $off) { exit 2 }
+if (-not (Test-Virtualization $false $on)) { exit 3 }
+$rows = @('Minimum Possible Setting: 0x00000000', 'Maximum Possible Setting: 0xffffffff',
+ 'Possible Settings increment: 0x00000001', 'Current AC Power Setting Index: 0x00000000',
+ 'Current DC Power Setting Index: 0x00000001')
+$indices = @(Get-CurrentPowerIndices $rows)
+if ($indices.Count -ne 2 -or $indices[1].Groups[1].Value -ne '0x00000001') { exit 4 }
+$result = Invoke-ReadOnlyNative (Get-Process -Id $PID).Path @('-NoProfile', '-Command', '[Console]::Error.WriteLine("private"); exit 1')
+if ($result.ExitCode -ne 1 -or $ErrorActionPreference -ne 'Stop') { exit 5 }
 """
         result = subprocess.run(["rtk", "run", "--", "pwsh", "-NoProfile", "-NonInteractive", "-Command", script], capture_output=True, text=True)
         self.assertEqual(result.returncode, 0)

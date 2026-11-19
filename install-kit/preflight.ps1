@@ -16,9 +16,30 @@ trap {
     exit 1
 }
 function Add-Check([string]$Code, [string]$Outcome, [string]$Message) {
-    $checks.Add(@{code=$Code; outcome=$Outcome; checked_at=[DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ')})
+    $checkedAt = $null
+    if ($Outcome -ne 'unknown') { $checkedAt = [DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ') }
+    $checks.Add(@{code=$Code; outcome=$Outcome; checked_at=$checkedAt})
     if ($Outcome -eq 'fail') { $script:hasFailure = $true }
     if (-not $Report -and $Message) { Write-Output $Message }
+}
+function Invoke-ReadOnlyNative([string]$Program, [string[]]$Arguments) {
+    # Windows PowerShell 5.1 promotes redirected stderr under Stop.
+    $savedPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        $output = @(& $Program @Arguments 2>$null)
+        return @{Output=$output; ExitCode=$LASTEXITCODE}
+    } catch {
+        return @{Output=@(); ExitCode=1}
+    } finally { $ErrorActionPreference = $savedPreference }
+}
+function Test-Virtualization([bool]$HypervisorPresent, [object[]]$Processors) {
+    return $HypervisorPresent -or ($Processors.Count -gt 0 -and
+        @($Processors | Where-Object { -not $_.VirtualizationFirmwareEnabled }).Count -eq 0)
+}
+function Get-CurrentPowerIndices([object[]]$Rows) {
+    # Unknown on localized/unrecognized output; do not consume min/max/increment.
+    return [regex]::Matches(($Rows -join "`n"), '(?im)^\s*Current (?:AC|DC) Power Setting Index:\s*(0x[0-9a-f]{8})\s*$')
 }
 function Get-ServingWslVersion([object[]]$Rows, [string]$Name) {
     if (-not $Name) { return $null }
@@ -38,7 +59,7 @@ if (-not $Report) {
 $isTarget = $false
 try {
     $os = Get-CimInstance Win32_OperatingSystem -ErrorAction Stop
-    $isTarget = $os.Caption -match 'Windows 11' -and $env:PROCESSOR_ARCHITECTURE -eq 'AMD64'
+    $isTarget = $os.Caption -match 'Windows 11' -and ($env:PROCESSOR_ARCHITECTURE -eq 'AMD64' -or $env:PROCESSOR_ARCHITEW6432 -eq 'AMD64')
 } catch { $isTarget = $false }
 if ($isTarget) {
     Add-Check 'platform' 'pass' 'This is a target Windows setup. IT must still complete the clean installation checks.'
@@ -46,8 +67,12 @@ if ($isTarget) {
     Add-Check 'platform' 'fail' 'This check could not confirm Windows 11 on this PC. Ask IT to use Windows 11 Home with WSL2 or a Linux server.'
 }
 try {
-    $processors = @(Get-CimInstance Win32_Processor -ErrorAction Stop)
-    if ($processors.Count -gt 0 -and @($processors | Where-Object { -not $_.VirtualizationFirmwareEnabled }).Count -eq 0) {
+    $computer = Get-CimInstance Win32_ComputerSystem -ErrorAction Stop
+    $processors = @()
+    if (-not $computer.HypervisorPresent) {
+        $processors = @(Get-CimInstance Win32_Processor -ErrorAction Stop)
+    }
+    if (Test-Virtualization $computer.HypervisorPresent $processors) {
         Add-Check 'virtualization' 'pass' 'Hardware support is enabled. Continue with the local checks.'
     } else {
         Add-Check 'virtualization' 'fail' 'Hardware support is turned off. Ask IT to enable virtualization in the PC settings, then reboot and rerun this check.'
@@ -59,11 +84,12 @@ if (Get-Command wsl.exe -ErrorAction SilentlyContinue) {
     $savedEncoding = [Console]::OutputEncoding
     try {
         [Console]::OutputEncoding = [System.Text.Encoding]::Unicode
-        $wslOutput = & wsl.exe --list --verbose 2>$null
+        $wslResult = Invoke-ReadOnlyNative 'wsl.exe' @('--list', '--verbose')
+        $wslOutput = $wslResult.Output
         $servingVersion = Get-ServingWslVersion $wslOutput $ServingDistro
         if (-not $ServingDistro -or $null -eq $servingVersion) {
             Add-Check 'wsl' 'unknown' 'Select the serving distribution and run this check again with -ServingDistro.'
-        } elseif ($LASTEXITCODE -eq 0 -and $servingVersion -eq '2') {
+        } elseif ($wslResult.ExitCode -eq 0 -and $servingVersion -eq '2') {
             Add-Check 'wsl' 'pass' 'WSL2 is present. Run the Linux preparation check inside your serving distribution too.'
         } else {
             Add-Check 'wsl' 'fail' 'WSL2 is not ready. Ask IT to install or update WSL2, reboot if requested, then rerun this check.'
@@ -74,8 +100,9 @@ if (Get-Command wsl.exe -ErrorAction SilentlyContinue) {
 }
 if (Get-Command docker -ErrorAction SilentlyContinue) {
     Add-Check 'docker_installed' 'pass' 'Docker is installed. Continue with the local checks.'
-    $engine = & docker info --format '{{.OSType}}' 2>$null
-    if ($LASTEXITCODE -ne 0) {
+    $dockerResult = Invoke-ReadOnlyNative 'docker' @('info', '--format', '{{.OSType}}')
+    $engine = $dockerResult.Output -join ''
+    if ($dockerResult.ExitCode -ne 0) {
         Add-Check 'docker_running' 'fail' 'Docker is installed but is not running. Open Docker Desktop, wait for it to start, then rerun this check.'
         Add-Check 'linux_containers' 'unknown' 'The container setting could not be read. Start Docker, select Linux containers, then rerun this check.'
     } else {
@@ -96,21 +123,25 @@ if (Get-Command docker -ErrorAction SilentlyContinue) {
 $sleepOutcome = 'unknown'
 if (Get-Command powercfg.exe -ErrorAction SilentlyContinue) {
     try {
-        $sleepSettings = & powercfg.exe /query SCHEME_CURRENT SUB_SLEEP STANDBYIDLE 2>$null
-        $sleepRead = $LASTEXITCODE -eq 0
-        $lidSettings = & powercfg.exe /query SCHEME_CURRENT SUB_BUTTONS LIDACTION 2>$null
-        $lidRead = $LASTEXITCODE -eq 0
-        $sleepIndices = [regex]::Matches(($sleepSettings -join "`n"), '0x[0-9a-fA-F]{8}')
-        $lidIndices = [regex]::Matches(($lidSettings -join "`n"), '0x[0-9a-fA-F]{8}')
+        $sleepResult = Invoke-ReadOnlyNative 'powercfg.exe' @('/query', 'SCHEME_CURRENT', 'SUB_SLEEP', 'STANDBYIDLE')
+        $lidResult = Invoke-ReadOnlyNative 'powercfg.exe' @('/query', 'SCHEME_CURRENT', 'SUB_BUTTONS', 'LIDACTION')
+        $sleepRead = $sleepResult.ExitCode -eq 0
+        $lidRead = $lidResult.ExitCode -eq 0
+        $sleepIndices = @(Get-CurrentPowerIndices $sleepResult.Output)
+        $lidIndices = @(Get-CurrentPowerIndices $lidResult.Output)
         if ($sleepRead -and $lidRead -and $sleepIndices.Count -eq 2 -and $lidIndices.Count -eq 2) {
-            if (@($sleepIndices | Where-Object { [Convert]::ToUInt32($_.Value.Substring(2), 16) -gt 0 }).Count -gt 0 -or
-                @($lidIndices | Where-Object { [Convert]::ToUInt32($_.Value.Substring(2), 16) -gt 0 }).Count -gt 0) {
+            if (@($sleepIndices | Where-Object { [Convert]::ToUInt32($_.Groups[1].Value.Substring(2), 16) -gt 0 }).Count -gt 0 -or
+                @($lidIndices | Where-Object { [Convert]::ToUInt32($_.Groups[1].Value.Substring(2), 16) -gt 0 }).Count -gt 0) {
                 $sleepOutcome = 'fail'
             }
         }
     } catch { $sleepOutcome = 'unknown' }
 }
-Add-Check 'sleep_policy' $sleepOutcome 'This PC may sleep or stop downloads when its lid closes. Ask IT to review mains and battery settings, then test sleep and wake under company policy.'
+if ($sleepOutcome -eq 'fail') {
+    Add-Check 'sleep_policy' 'fail' 'Sleep or lid settings can stop downloads. Ask IT to review mains and battery settings, then test sleep and wake under company policy.'
+} else {
+    Add-Check 'sleep_policy' 'unknown' 'Sleep and lid availability is unverified. Ask IT to test mains, battery, sleep and wake under company policy.'
+}
 $signinOutcome = 'unknown'
 try {
     $settingsPath = Join-Path $env:APPDATA 'Docker/settings-store.json'
@@ -121,7 +152,11 @@ try {
         }
     }
 } catch { $signinOutcome = 'unknown' }
-Add-Check 'signin_start' $signinOutcome 'Downloads may wait after a reboot. Ask IT to enable Docker start at sign-in and test reboot, sign-in and sign-out recovery.'
+if ($signinOutcome -eq 'fail') {
+    Add-Check 'signin_start' 'fail' 'Docker start at sign-in is disabled. Ask IT to enable it and test reboot, sign-in and sign-out recovery.'
+} else {
+    Add-Check 'signin_start' 'unknown' 'Restart recovery is unverified. Ask IT to test reboot, sign-in and sign-out recovery.'
+}
 Add-Check 'docker_licence' 'unknown' 'The licence needs a human check. Ask IT to confirm your company can use Docker Desktop before installation.'
 foreach ($code in @('source_uid','state_write','hardening','image_digest','subnet_port','connect_proxy','egress','tls_inspection','upstream_proxy','tunnel','public_dns','firewall','tls_proxy','integrity')) {
     Add-Check $code 'unknown' ''
