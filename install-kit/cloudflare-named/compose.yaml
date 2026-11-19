@@ -1,5 +1,5 @@
 {
-  "services": {
+  "x-kit-services": {
     "named-tunnel": {
       "profiles": ["unadvertised-cloudflare-named"],
       "image": "${CLOUDFLARED_IMAGE:?A signed helper image pin is required}",
@@ -13,7 +13,8 @@
         "./cloudflare-named/config.yaml:/etc/cloudflared/config.yaml:ro",
         "${TUNNEL_CREDENTIAL_FILE:?Choose the protected local credential file}:/run/credentials/tunnel.json:ro"
       ],
-      "networks": {"gateway": {"ipv4_address": "172.30.196.5"}, "tunnel-outbound": {}}
+      "networks": {"gateway": {"ipv4_address": "172.30.196.5"}, "tunnel-outbound": {}},
+      "restart": "unless-stopped"
     }
   },
   "networks": {"tunnel-outbound": {}}

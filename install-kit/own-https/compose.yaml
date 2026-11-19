@@ -1,5 +1,5 @@
 {
-  "services": {
+  "x-kit-services": {
     "https-door": {
       "image": "${TLS_PROXY_IMAGE:?A signed helper image pin is required}",
       "user": "65532:65532",
@@ -16,7 +16,8 @@
         "${TLS_PRIVATE_KEY:?Choose the protected private key}:/certs/server.key:ro"
       ],
       "tmpfs": ["/config:rw,noexec,nosuid,size=8m,uid=65532,gid=65532", "/data:rw,noexec,nosuid,size=8m,uid=65532,gid=65532"],
-      "networks": {"gateway": {"ipv4_address": "172.30.196.4"}}
+      "networks": {"gateway": {"ipv4_address": "172.30.196.4"}},
+      "restart": "unless-stopped"
     }
   }
 }

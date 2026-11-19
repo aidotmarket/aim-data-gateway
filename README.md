@@ -12,7 +12,7 @@ Files stay on your infrastructure. Buyers receive copies. ai.market receives onl
 
 Use your own secure web address by default. Your IT team needs a public web address, a valid certificate and permission to accept secure web connections. If a third-party service handles those connections, it can see file bytes. Its plan must permit this delivery. Ask IT to review the [preparation guide](docs/release-runbook.md#c0-preparation-status) before choosing a service.
 
-The early preparation checks are for Linux servers, Linux cloud machines and Windows 11 Home with WSL2. Exact supported versions still need clean installation tests. This kit does not target Mac. The optional Cloudflare connection and company upstream connection remain unavailable for customer installation until their separate tests pass. Use your own secure web address and ask IT to review the guide.
+The early preparation checks are for Linux servers, Linux cloud machines and Windows 11 Home with WSL2. Exact supported versions still need clean installation tests. This kit does not target Mac.
 
 On Windows, the PC must stay awake with Docker running. After a reboot, downloads may wait until you sign in and Docker starts. Your company may need a paid Docker Desktop licence. IT must confirm the licence and availability plan before installation. See [Docker's licence terms](https://docs.docker.com/subscription-billing/desktop-license/).
 
@@ -32,9 +32,9 @@ Use these local commands to check preparation. Python 3.9 or newer is needed for
 sh install-kit/preflight.sh --report
 # For a cloud VM, add --platform linux_cloud.
 # From PowerShell on Windows:
-# .\install-kit\preflight.ps1 -Report
+# .\install-kit\preflight.ps1 -Report -ServingDistro Ubuntu
 # Then inside WSL2:
-# sh install-kit/preflight.sh --report --platform windows_wsl2
+# sh install-kit/preflight.sh --report --platform windows_wsl2 --serving-distro Ubuntu
 ```
 
 Exit 1 means a failure. Exit 2 means checks remain unknown. Neither is a ready-to-install claim. The machine-readable report contains only bounded check codes, outcomes and UTC timestamps. The native Windows check never changes firmware, WSL, power, startup or licence settings. IT applies any host changes explicitly under company policy. See the [C0 verification and evidence procedure](docs/release-runbook.md#c0-preparation-status).

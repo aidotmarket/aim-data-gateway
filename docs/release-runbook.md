@@ -93,8 +93,9 @@ claimed. Do not enable either path based on a source check.
    checks Windows 11, virtualization, WSL2, Docker and Linux-container mode.
    Then run the Linux check inside the distribution that will serve files.
    Python 3.9+ is required there. No host settings or services are changed.
-2. Review unknown results locally. The current scaffold leaves source UID
-   read/traverse, state write, live hardening, verifier registration, public DNS,
+2. Review unknown results locally. Source read/traverse and state write have
+   separate explicit diagnostic actions below. Default preparation leaves them,
+   live hardening, verifier registration, public DNS,
    ingress, sleep/lid/startup and actual control-channel operation unverified.
    Inspect these separately in V1. Static checks do not turn them green.
 3. Before running any container, obtain the signed release manifest and bundle.
@@ -110,8 +111,22 @@ claimed. Do not enable either path based on a source check.
    existing kit also overlaps its own routes, so investigate a reported conflict
    rather than changing its persistent address automatically.
 
-The three Compose documents use JSON syntax, a valid subset of YAML, for an
-offline standard-library contract checker. The base creates an internal gateway
+The Compose templates use JSON syntax, a valid subset of YAML, for an
+offline standard-library contract checker. Their `x-kit-services` extension
+contains no executable Compose services. Direct `docker compose up` on a raw
+template cannot start a service. Only the verified entry point below constructs
+`services`, with literal image references returned by signature verification.
+Helper image environment overrides must match the signed references exactly;
+tags and different digests fail before any Compose invocation. The optional
+named tunnel has no executable entry point and remains unavailable.
+
+Select `--state-volume` using the exact existing Docker volume name from the
+old installation (for example its legacy project's prefixed name). The entry
+point inspects that name before invoking Compose, and supplies `external:true`
+with the same exact name. The new project name does not change its selection.
+An absent name fails without creating storage. Never use an empty replacement.
+Inspect the original gateway's volume mount and identity before switching;
+Compose cannot attest which existing volume contains the intended identity. The base creates an internal gateway
 network and a separate outbound network for the allow-only Squid proxy. The
 gateway has no host port, external network or recursive DNS. Set the local
 gateway configuration's `egress.connect_proxy` to `172.30.196.3:3128` before use.
@@ -129,15 +144,35 @@ Authorization, query and Range. No cache, encoding, access log, login, redirects
 or challenge pages are configured. This routing does not create a synthetic
 handler in v0.2.4. Public DNS must be DNS-only and stable. Do not expose 8080.
 
-`Caddyfile.acme` is an **UNADVERTISED preparation template**, not a runnable
-certified overlay. It disables HTTP-01, leaving TLS-ALPN-01. No DNS-01 plugin is
-shipped. Initial issuance and renewal have **NOT been demonstrated in C0**.
-This is an unmet section 8 evidence requirement: stop ACME profile promotion.
-Before promotion, supply verified helper pins and a release-specific CA/DNS
-allowlist, enforce it from the reverse-proxy namespace and demonstrate initial
-issuance, renewal and denied non-CA/DNS outbound. Do not attach unrestricted
-outbound to the gateway or replace this requirement with a self-signed cert.
-Use a manual/provider certificate behind a TLS-terminating provider.
+`compose.acme.yaml` and `Caddyfile.acme` are **UNADVERTISED / UNVERIFIED**
+acceptance configurations. The explicit verified entry point can select this
+configuration with `--certificate-mode acme --door-hostname <stable-hostname>
+--acme-state-volume <existing-certificate-volume>` instead of manual certificate
+and key options. IT must prepare that separate persistent volume with UID 65532
+write access; it is external and must already exist. `/data` survives recreation.
+The proxy listens only on host 443, disables HTTP-01 and uses TLS-ALPN-01 with
+the fixed Let's Encrypt production directory. Do not attempt issuance through
+a TLS-terminating provider; use the manual/provider certificate there.
+
+The door has restricted DNS and only internal gateway and ACME networks. It
+uses a dedicated CONNECT proxy for ACME HTTPS, allowing only
+`acme-v02.api.letsencrypt.org:443`; that proxy alone resolves through 1.1.1.1. The control proxy accepts only the
+gateway source IP, so the door cannot use it to bypass the CA-only proxy.
+The gateway never joins the ACME network. The separate proxy consumes the same
+verified Squid pin and has no source, gateway-state or private-key mount.
+No unrestricted outbound network is attached to the door. These settings have
+only offline validation here; live Caddy proxy use and actual denial remain
+unverified. Stop if the CA requires another endpoint; do not widen the rule.
+
+**C0 is incomplete and must not be accepted:** Gate 2 §8 requires initial
+issuance, renewal, expiry-warning and denied-egress receipts. No live issuance
+or renewal was performed, no amendment was obtained, and source tests do not
+satisfy that requirement. On the isolated acceptance host record the verified
+kit/helper versions, initial public chain and expiry, renewal using the same
+persistent state and public hostname, the 14-day warning, and forbidden direct
+TCP, DNS and non-CA CONNECT attempts from the actual door namespace. Capture
+sanitized results outside the repository. Keep the profile unadvertised until
+these receipts exist; a self-signed certificate is not a substitute.
 
 The read-only certificate option uses OpenSSL to flag expiry within 14 days.
 It does not prove the public hostname, chain or routing. A public certificate
@@ -178,8 +213,24 @@ only on a separately authorized isolated acceptance host, never production.
 
 ```sh
 python3 scripts/check-install-kit.py
+# Inspect or start the exact same verified configuration. Local paths stay local.
+python3 scripts/check-install-kit.py --compose-action config \
+  --manifest /local/manifest.json --bundle /local/manifest.sigstore.json \
+  --release-tag v0.0.0-c0 --state-volume legacy_aim-gateway-state \
+  --source-folder /local/export --gateway-config /local/gateway.toml \
+  --certificate /local/public-certificate.pem --private-key /local/server.key
+# Use the identical arguments with --compose-action up for explicit startup.
+# No pull is performed. Inspect config output locally; do not share private paths.
 python3 -m unittest discover -s scripts -p test_install_kit.py
 sh install-kit/preflight.sh --report --certificate /local/public-certificate.pem
+# Explicit read check: mounts only the export read-only, no networking.
+sh install-kit/preflight.sh --report --check-source --source-folder /local/export \
+  --manifest /local/manifest.json --bundle /local/manifest.sigstore.json \
+  --release-tag v0.0.0-c0
+# Explicit write check: creates/fsyncs/removes an exclusive random sentinel only.
+sh install-kit/preflight.sh --report --check-state-write --state-volume legacy_aim-gateway-state \
+  --manifest /local/manifest.json --bundle /local/manifest.sigstore.json \
+  --release-tag v0.0.0-c0
 sh install-kit/preflight.sh --report --start-probes \
   --manifest /local/manifest.json --bundle /local/manifest.sigstore.json \
   --release-tag v0.0.0-c0 --gateway-container isolated-test-gateway
@@ -187,9 +238,14 @@ sh install-kit/preflight.sh --report --start-probes \
 
 The probe shares `--network container:<actual-gateway>` and keeps UID 65532,
 read-only root, dropped capabilities and no-new-privileges. It mounts only its
-own diagnostic script. It requires AIM CONNECT plus normal TLS hostname/chain
+own diagnostic script. It requires diagnostic-process AIM CONNECT plus normal TLS hostname/chain
 verification, then denies public DNS, direct TCP, arbitrary CONNECT, wrong-port
 CONNECT, DNS recursion and forward-proxy attempts through the door helpers.
+CONNECT reads a complete status line bounded to 4096 bytes and a total deadline.
+Every 2xx is open (a failed negative check); only explicit 403/405/407 denials
+prove denial. Malformed, partial, disconnected and other ambiguous replies are
+inconclusive. Aggregate `egress` stays unknown even when all negative checks
+pass, because diagnostic TLS does not prove the gateway's own control operation.
 Fixed results contain no addresses, paths, secrets or logs. Missing helper
 images fail without a pull. Cleanup attempts removal even on timeout. This is
 finite negative coverage, not proof of all routing, live pinned control,
@@ -221,3 +277,12 @@ to a compatible signed release. Stop containers for uninstall, retain volumes
 unless the seller deliberately deletes their identity after understanding the
 consequence. Never use `down -v` as a repair. There is no agent, remote shell,
 background updater, desktop app, per-seller secret artifact or signer chunk.
+
+All selected serving helpers use `restart: unless-stopped`, matching the gateway.
+Offline checks enforce that policy; daemon restart and deliberate-stop retention
+still need live V1 receipts for both the control connection and same public door.
+Native Windows WSL selection requires `-ServingDistro <exact-name>`; the Linux
+check requires `--platform windows_wsl2 --serving-distro <same-name>`. It matches
+`WSL_DISTRO_NAME` and the actual WSL2 kernel, never the caller's platform label
+alone. An unrelated WSL2 utility distribution cannot establish serving readiness.
+Native PowerShell execution remains unverified on this host.

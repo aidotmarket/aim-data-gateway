@@ -1,6 +1,6 @@
 # PREPARATION ONLY / UNADVERTISED until issuance, renewal and egress receipts.
-# IT supplies a stable hostname and signed release ACME endpoint configuration.
-# Run only on a network whose firewall permits that CA and its DNS resolver.
+# Use compose.acme.yaml through the verified entry point only.
+# Persistent external /data; CA CONNECT through acme-proxy, no direct egress.
 # Never attach this profile's outbound network to the gateway.
 {
     admin off
@@ -9,8 +9,8 @@
 }
 {$DOOR_HOSTNAME} {
     tls {
-        ca {$ACME_DIRECTORY}
         issuer acme {
+            dir https://acme-v02.api.letsencrypt.org/directory
             disable_http_challenge
         }
     }

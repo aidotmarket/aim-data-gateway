@@ -9,6 +9,7 @@ import socket
 import ssl
 import struct
 import sys
+import time
 
 TIMEOUT = 1
 
@@ -27,11 +28,37 @@ def dns_answer(host):
     return len(reply) >= 12 and reply[:2] == query[:2] and reply[3] & 15 == 0 and struct.unpack("!H", reply[6:8])[0] > 0
 
 
+def status_line(sock):
+    response = bytearray()
+    deadline = time.monotonic() + TIMEOUT
+    while len(response) < 4096:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return None
+        sock.settimeout(remaining)
+        block = sock.recv(1)
+        if not block:
+            return None
+        response.extend(block)
+        if block == b"\n":
+            match = re.fullmatch(rb"HTTP/1\.[01][ \t]+([0-9]{3})(?:[ \t]+[^\r\n]*)?\r?\n", response)
+            if not match or not 100 <= int(match[1]) <= 599:
+                return None
+            return int(match[1])
+    return None
+
+
 def connect(host, port, destination):
-    with tcp(host, port) as sock:
-        sock.sendall(("CONNECT " + destination + " HTTP/1.1\r\nHost: " + destination + "\r\n\r\n").encode("ascii"))
-        response = sock.recv(1024)
-        return response.startswith((b"HTTP/1.1 200 ", b"HTTP/1.0 200 "))
+    try:
+        with tcp(host, port) as sock:
+            sock.sendall(("CONNECT " + destination + " HTTP/1.1\r\nHost: " + destination + "\r\n\r\n").encode("ascii"))
+            status = status_line(sock)
+            if status is None:
+                return None
+            # Only an explicit policy denial proves the negative test.
+            return True if 200 <= status < 300 else False if status in (403, 405, 407) else None
+    except OSError:
+        return None
 
 
 def denied(action):
@@ -40,7 +67,7 @@ def denied(action):
         if hasattr(result, "close"):
             result.close()
             return False
-        return not result
+        return None if result is None else not result
     except (OSError, ValueError):
         return True
 
@@ -54,7 +81,7 @@ def allowed_aim_tls():
             if not block:
                 return False
             response.extend(block)
-        if not response.startswith((b"HTTP/1.1 200 ", b"HTTP/1.0 200 ")):
+        if not re.match(rb"HTTP/1\.[01] 2[0-9]{2} ", response):
             return False
         # System trust and hostname checks stay enabled. No inspection bypass.
         with ssl.create_default_context().wrap_socket(sock, server_hostname="api.ai.market"):
@@ -75,7 +102,7 @@ def main():
         for helper in ("172.30.196.4", "172.30.196.5"):
             for port in (3128, 8080, 8443):
                 checks.append(denied(lambda host=helper, port=port: connect(host, port, "example.com:443")))
-        if all(checks):
+        if all(value is True for value in checks):
             print("isolation-negative-probes:pass")
             return 0
     except (OSError, ValueError):

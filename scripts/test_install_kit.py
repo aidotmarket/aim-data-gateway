@@ -6,6 +6,7 @@ import importlib.util
 import io
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -47,7 +48,7 @@ class KitContracts(unittest.TestCase):
                              ("environment", {}), ("environment", {"AIM_PAIRING_CODE": "PRIVATE-MARKER"})):
             with self.subTest(field=field, value=value):
                 original = (self.root / "install-kit/compose.yaml").read_text()
-                self.mutate("install-kit/compose.yaml", lambda d: d["services"]["aim-gateway"].__setitem__(field, value))
+                self.mutate("install-kit/compose.yaml", lambda d: d["x-kit-services"]["aim-gateway"].__setitem__(field, value))
                 with self.assertRaises(kit.ContractError):
                     kit.check(self.root)
                 (self.root / "install-kit/compose.yaml").write_text(original)
@@ -60,7 +61,7 @@ class KitContracts(unittest.TestCase):
         for field, value in changes:
             with self.subTest(field=field):
                 original = (self.root / "install-kit/compose.yaml").read_text()
-                self.mutate("install-kit/compose.yaml", lambda d: d["services"]["aim-gateway"].__setitem__(field, value))
+                self.mutate("install-kit/compose.yaml", lambda d: d["x-kit-services"]["aim-gateway"].__setitem__(field, value))
                 with self.assertRaises(kit.ContractError):
                     kit.check(self.root)
                 (self.root / "install-kit/compose.yaml").write_text(original)
@@ -71,13 +72,13 @@ class KitContracts(unittest.TestCase):
                                  ("image", "helper:latest"), ("networks", {"gateway": {}, "default": {}})):
                 with self.subTest(service=service, field=field):
                     original = (self.root / relative).read_text()
-                    self.mutate(relative, lambda d: d["services"][service].__setitem__(field, value))
+                    self.mutate(relative, lambda d: d["x-kit-services"][service].__setitem__(field, value))
                     with self.assertRaises(kit.ContractError):
                         kit.check(self.root)
                     (self.root / relative).write_text(original)
 
     def test_optional_profile_cannot_be_advertised(self):
-        self.mutate("install-kit/cloudflare-named/compose.yaml", lambda d: d["services"]["named-tunnel"].__setitem__("profiles", []))
+        self.mutate("install-kit/cloudflare-named/compose.yaml", lambda d: d["x-kit-services"]["named-tunnel"].__setitem__("profiles", []))
         with self.assertRaises(kit.ContractError):
             kit.check(self.root)
 
@@ -139,6 +140,13 @@ class KitContracts(unittest.TestCase):
         with self.assertRaises(kit.ContractError):
             kit.verified_release(None, None, None, self.root)
 
+    def test_signed_helper_tags_are_rejected_for_every_role(self):
+        for key in ("squid", "tls_proxy", "cloudflared", "probe"):
+            manifest = self.manifest()
+            manifest["images"][key] = "helper:latest"
+            with self.subTest(role=key), self.assertRaises(kit.ContractError):
+                self.verify(manifest)
+
     def test_duplicate_fields_rejected(self):
         path = self.root / "duplicate.json"
         path.write_text('{"images":{},"images":{}}')
@@ -150,7 +158,9 @@ class PreflightContracts(unittest.TestCase):
     def args(self, *extra):
         from argparse import Namespace
         return Namespace(report=True, platform="linux_cloud", certificate=None, manifest=None,
-                         bundle=None, release_tag=None, start_probes=False, gateway_container=None, **dict(extra))
+                         bundle=None, release_tag=None, start_probes=False, gateway_container=None,
+                         check_source=False, check_state_write=False, source_folder=None, state_volume=None,
+                         serving_distro=None, **dict(extra))
 
     def test_readonly_report_is_bounded_and_sanitized(self):
         output = io.StringIO()
@@ -226,6 +236,8 @@ class PreflightContracts(unittest.TestCase):
             with self.subTest(cleanup_ok=cleanup_ok), patch.object(kit, "check"), patch.object(kit.sys, "platform", "linux"), patch.object(kit.os, "uname", return_value=types.SimpleNamespace(machine="x86_64")), patch.object(kit.shutil, "which", return_value=None), patch.object(kit, "verified_release", return_value={"probe": "example.invalid/probe@sha256:" + "0" * 64}), patch.object(kit, "run", side_effect=fake_run), contextlib.redirect_stdout(output):
                 if cleanup_ok:
                     self.assertEqual(kit.preflight(args), 1)  # Docker CLI is deliberately absent in this fixture.
+                    report = json.loads(output.getvalue())
+                    self.assertEqual(next(row["outcome"] for row in report["checks"] if row["code"] == "egress"), "unknown")
                 else:
                     with self.assertRaises(kit.ContractError):
                         kit.preflight(args)
@@ -236,6 +248,196 @@ class PreflightContracts(unittest.TestCase):
             self.assertEqual(calls[-1][1:3], ["rm", "--force"])
             if not cleanup_ok:
                 self.assertEqual(output.getvalue(), "")
+
+
+class RevisionContracts(unittest.TestCase):
+    setUp = KitContracts.setUp
+    manifest = KitContracts.manifest
+    def compose_args(self):
+        return types.SimpleNamespace(manifest="manifest.json", bundle="bundle.json", release_tag="v1.2.3",
+            state_volume="legacy-company_aim-gateway-state", source_folder=str(self.root),
+            gateway_config=str(self.root / "README.md"), certificate=str(self.root / "README.md"),
+            private_key=str(self.root / "README.md"), certificate_mode="manual", compose_action="up")
+
+    def test_raw_templates_have_no_executable_services(self):
+        for relative in ("compose.yaml", "own-https/compose.yaml", "own-https/compose.acme.yaml", "cloudflare-named/compose.yaml"):
+            self.assertNotIn("services", kit.load_json(self.root / "install-kit" / relative))
+
+    def test_startup_rejects_missing_manifest_tag_and_other_digest_before_compose(self):
+        for variable in ("SQUID_IMAGE", "TLS_PROXY_IMAGE", "CLOUDFLARED_IMAGE"):
+            for override in (None, "helper:latest", "example.invalid/helper@sha256:" + "b" * 64):
+                args = self.compose_args()
+                if override is None:
+                    args.manifest = None
+                images = self.manifest()["images"]
+                # Use the real missing-input check, with all Docker/Cosign calls recorded.
+                original_verify = kit.verified_release
+                def verify(*arguments):
+                    if arguments[0] is None:
+                        return original_verify(None, None, None, self.root)
+                    return images
+                with self.subTest(variable=variable, override=override), patch.object(kit, "verified_release", side_effect=verify), patch.dict(os.environ, {} if override is None else {variable: override}), patch.object(kit, "run") as run:
+                    with patch.object(kit, "ROOT", self.root), self.assertRaises(kit.ContractError):
+                        kit.compose_action(args)
+                    run.assert_not_called()
+
+    def test_legacy_external_volume_and_verified_pins_ignore_project_name(self):
+        args = self.compose_args()
+        images = self.manifest()["images"]
+        def inspect(argv):
+            self.assertEqual(argv[:3], ["docker", "volume", "inspect"])
+            return subprocess.CompletedProcess(argv, 0, args.state_volume, "")
+        with patch.object(kit, "verified_release", return_value=images), patch.object(kit, "run", side_effect=inspect):
+            document = kit.pinned_compose(args, self.root)
+        self.assertEqual(document["name"], "aim-install-kit")
+        self.assertEqual(document["volumes"]["aim-gateway-state"], {"external": True, "name": args.state_volume})
+        self.assertEqual(document["services"]["connect-proxy"]["image"], images["squid"])
+        self.assertEqual(document["services"]["https-door"]["image"], images["tls_proxy"])
+        for service in document["services"].values():
+            self.assertEqual(service["restart"], "unless-stopped")
+
+    def test_compose_start_and_inspection_use_same_literal_verified_config(self):
+        documents = []
+        def run(argv, **kwargs):
+            if argv[1] == "volume":
+                return subprocess.CompletedProcess(argv, 0, "legacy-company_aim-gateway-state", "")
+            self.assertEqual(argv[:2], ["docker", "compose"])
+            self.assertIn("-", argv)
+            documents.append(json.loads(kwargs["input"]))
+            if "up" in argv:
+                self.assertEqual(argv[-2:], ["--pull", "never"])
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        args = self.compose_args()
+        with patch.object(kit, "ROOT", self.root), patch.object(kit, "verified_release", return_value=self.manifest()["images"]), patch.object(kit, "run", side_effect=run), contextlib.redirect_stdout(io.StringIO()):
+            kit.compose_action(args)
+            args.compose_action = "config"
+            kit.compose_action(args)
+        self.assertEqual(documents[0], documents[1])
+        self.assertNotIn("${", json.dumps(documents[0]))
+        for service in documents[0]["services"].values():
+            self.assertRegex(service["image"], r"@sha256:[0-9a-f]{64}$")
+
+    def test_missing_external_volume_creates_nothing(self):
+        with patch.object(kit, "verified_release", return_value=self.manifest()["images"]), patch.object(kit, "run", return_value=subprocess.CompletedProcess([], 1, "", "")) as run:
+            with self.assertRaises(kit.ContractError):
+                kit.pinned_compose(self.compose_args(), self.root)
+            self.assertEqual(len(run.call_args_list), 1)
+            self.assertEqual(run.call_args.args[0][:3], ["docker", "volume", "inspect"])
+
+    def test_acme_persistent_state_and_separate_ca_egress(self):
+        args = self.compose_args()
+        args.certificate_mode = "acme"
+        args.acme_state_volume = "legacy_certificates"
+        args.door_hostname = "data.example.org"
+        with patch.object(kit, "verified_release", return_value=self.manifest()["images"]), patch.object(kit, "existing_volume", side_effect=lambda name: name):
+            document = kit.pinned_compose(args, self.root)
+        self.assertTrue(document["networks"]["acme"]["internal"])
+        self.assertEqual(set(document["services"]["https-door"]["networks"]), {"gateway", "acme"})
+        self.assertEqual(set(document["services"]["aim-gateway"]["networks"]), {"gateway"})
+        self.assertEqual(document["volumes"]["acme-certificates"], {"external": True, "name": "legacy_certificates"})
+        self.assertIn({"type": "volume", "source": "acme-certificates", "target": "/data"}, document["services"]["https-door"]["volumes"])
+        self.assertNotIn("/data", str(document["services"]["https-door"]["tmpfs"]))
+        args.acme_state_volume = args.state_volume
+        with patch.object(kit, "verified_release", return_value=self.manifest()["images"]), patch.object(kit, "existing_volume", side_effect=lambda name: name):
+            with self.assertRaises(kit.ContractError):
+                kit.pinned_compose(args, self.root)
+        path = self.root / "install-kit/own-https/acme-squid.conf"
+        path.write_text(path.read_text() + "http_access allow all\n")
+        with self.assertRaises(kit.ContractError):
+            kit.check(self.root)
+
+    def test_uid_source_and_state_checks_are_distinct_and_remove_only_sentinel(self):
+        for read_status, write_status in ((1, 0), (0, 1)):
+            programs = []
+            def run(argv):
+                if argv[1] == "volume":
+                    return subprocess.CompletedProcess(argv, 0, "legacy_state", "")
+                if argv[1] == "rm":
+                    return subprocess.CompletedProcess(argv, 0, "", "")
+                self.assertEqual(argv[1], "run")
+                self.assertIn("none", argv)
+                self.assertIn("65532:65532", argv)
+                self.assertIn("--pull=never", argv)
+                program = argv[-1]
+                programs.append(program)
+                try:
+                    if "os.walk" in program:
+                        fixture = self.root / "read-fixture"
+                        fixture.write_bytes(b"data")
+                        with patch.object(os, "walk", return_value=iter([(str(self.root), [], [fixture.name])])), patch.object(os, "access", return_value=read_status == 0):
+                            exec(compile(program, "<source-permission-fixture>", "exec"), {})
+                    elif write_status:
+                        with patch.object(tempfile, "mkstemp", side_effect=PermissionError):
+                            exec(compile(program, "<state-permission-fixture>", "exec"), {})
+                    else:
+                        sentinel = self.root / "identity"
+                        sentinel.write_bytes(b"unchanged identity")
+                        exec(compile(program.replace("dir='/check'", "dir=" + repr(str(self.root))), "<state-permission-fixture>", "exec"), {})
+                        self.assertEqual(sentinel.read_bytes(), b"unchanged identity")
+                        self.assertFalse(list(self.root.glob('.aim-permission-*')))
+                    status = 0
+                except PermissionError:
+                    status = 1
+                return subprocess.CompletedProcess(argv, status, "", "")
+            with patch.object(kit, "run", side_effect=run):
+                self.assertEqual(kit.filesystem_probe("pinned", source=str(self.root)), "pass" if read_status == 0 else "fail")
+                self.assertEqual(kit.filesystem_probe("pinned", volume="legacy_state"), "pass" if write_status == 0 else "fail")
+            self.assertIn("'rb'", programs[0])
+            self.assertIn("tempfile.mkstemp", programs[1])
+            self.assertNotIn("gateway.db", programs[1])
+            self.assertIn("os.unlink(path)", programs[1])
+
+    def test_serving_wsl_mixed_versions_in_both_directions(self):
+        for serving, utility, expected in (("4.4.0-Microsoft", "microsoft-standard-WSL2", "fail"), ("6.6.0-microsoft-standard-WSL2", "Microsoft", "pass")):
+            with patch.dict(os.environ, {"WSL_DISTRO_NAME": "Serving"}), patch.object(Path, "read_text", return_value=serving):
+                self.assertEqual(kit.serving_wsl("Serving"), expected)
+                self.assertEqual(kit.serving_wsl("Utility"), "unknown")
+                self.assertEqual(kit.serving_wsl(None), "unknown")
+
+    @unittest.skipUnless(shutil.which("pwsh"), "PowerShell is unavailable; native WSL fixture requires Windows/PowerShell")
+    def test_native_serving_wsl_mixed_versions(self):
+        source = (kit.ROOT / "install-kit/preflight.ps1").read_text()
+        function = re.search(r"function Get-ServingWslVersion.*?\n}", source, re.S)[0]
+        script = function + r"""
+$one = @('  NAME STATE VERSION', '* Serving Running 1', '  Utility Stopped 2')
+$two = @('  NAME STATE VERSION', '* Serving Running 2', '  Utility Stopped 1')
+if ((Get-ServingWslVersion $one 'Serving') -ne '1') { exit 1 }
+if ((Get-ServingWslVersion $two 'Serving') -ne '2') { exit 2 }
+if ($null -ne (Get-ServingWslVersion $one 'Missing')) { exit 3 }
+if ($null -ne (Get-ServingWslVersion $one '')) { exit 4 }
+"""
+        result = subprocess.run(["rtk", "run", "--", "pwsh", "-NoProfile", "-NonInteractive", "-Command", script], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0)
+
+
+class ConnectStatusContracts(unittest.TestCase):
+    def response(self, blocks):
+        class Socket:
+            def __init__(self): self.blocks = iter(blocks); self.pending = b""
+            def __enter__(self): return self
+            def __exit__(self, *args): pass
+            def sendall(self, value): pass
+            def settimeout(self, value): pass
+            def recv(self, length):
+                if not self.pending: self.pending = next(self.blocks, b"")
+                value, self.pending = self.pending[:length], self.pending[length:]
+                return value
+        with patch.object(probe, "tcp", return_value=Socket()):
+            return probe.connect("proxy", 3128, "example.com:443")
+
+    def test_all_success_codes_and_segmented_status_fail_negative_probe(self):
+        for code in (200, 204, 299):
+            line = ("HTTP/1.1 %d Connected\r\n" % code).encode()
+            for blocks in ([line], [line[:5], line[5:11], line[11:]]):
+                self.assertIs(self.response(blocks), True)
+        self.assertIs(self.response([b"HTTP/1.0 403 Denied\r\n"]), False)
+
+    def test_malformed_partial_overlong_and_disconnect_are_inconclusive(self):
+        for line in (b"garbage\r\n", b"HTTP/1.1 two Failed\r\n", b"HTTP/1.1 200 OK", b"HTTP/1.1 999 Bad\n", b"x" * 4096, b"", b"HTTP/1.1 503 Unavailable\r\n"):
+            self.assertIsNone(self.response([line]))
+        self.assertIsNone(probe.denied(lambda: None))
+        with patch.object(probe, "tcp", side_effect=ConnectionRefusedError):
+            self.assertIsNone(probe.connect("gateway", 3128, "example.com:443"))
 
 
 if __name__ == "__main__":

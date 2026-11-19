@@ -1,6 +1,6 @@
 # Read-only native Windows preparation. Run the Linux check inside WSL too.
 [CmdletBinding()]
-param([switch]$Report)
+param([switch]$Report, [string]$ServingDistro)
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 $checks = [System.Collections.Generic.List[object]]::new()
@@ -18,7 +18,16 @@ trap {
 function Add-Check([string]$Code, [string]$Outcome, [string]$Message) {
     $checks.Add(@{code=$Code; outcome=$Outcome; checked_at=[DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ')})
     if ($Outcome -eq 'fail') { $script:hasFailure = $true }
-    if (-not $Report) { Write-Output $Message }
+    if (-not $Report -and $Message) { Write-Output $Message }
+}
+function Get-ServingWslVersion([object[]]$Rows, [string]$Name) {
+    if (-not $Name) { return $null }
+    foreach ($row in $Rows) {
+        if ($row -match '^\s*\*?\s*(\S+)\s+\S+\s+([12])\s*$' -and $Matches[1] -ceq $Name) {
+            return $Matches[2]
+        }
+    }
+    return $null
 }
 if (-not $Report) {
     Write-Output 'Files stay on your machine. Buyers receive copies. ai.market receives only approved information about them.'
@@ -51,7 +60,10 @@ if (Get-Command wsl.exe -ErrorAction SilentlyContinue) {
     try {
         [Console]::OutputEncoding = [System.Text.Encoding]::Unicode
         $wslOutput = & wsl.exe --list --verbose 2>$null
-        if ($LASTEXITCODE -eq 0 -and ($wslOutput -join "`n") -match '\s2\s*$|\s2\s*\r?\n') {
+        $servingVersion = Get-ServingWslVersion $wslOutput $ServingDistro
+        if (-not $ServingDistro -or $null -eq $servingVersion) {
+            Add-Check 'wsl' 'unknown' 'Select the serving distribution and run this check again with -ServingDistro.'
+        } elseif ($LASTEXITCODE -eq 0 -and $servingVersion -eq '2') {
             Add-Check 'wsl' 'pass' 'WSL2 is present. Run the Linux preparation check inside your serving distribution too.'
         } else {
             Add-Check 'wsl' 'fail' 'WSL2 is not ready. Ask IT to install or update WSL2, reboot if requested, then rerun this check.'
@@ -112,8 +124,9 @@ try {
 Add-Check 'signin_start' $signinOutcome 'Downloads may wait after a reboot. Ask IT to enable Docker start at sign-in and test reboot, sign-in and sign-out recovery.'
 Add-Check 'docker_licence' 'unknown' 'The licence needs a human check. Ask IT to confirm your company can use Docker Desktop before installation.'
 foreach ($code in @('source_uid','state_write','hardening','image_digest','subnet_port','connect_proxy','egress','tls_inspection','upstream_proxy','tunnel','public_dns','firewall','tls_proxy','integrity')) {
-    Add-Check $code 'unknown' 'The Windows preparation check does not prove file access or network safety. Run the Linux check inside WSL, then ask IT to complete the release checks.'
+    Add-Check $code 'unknown' ''
 }
+if (-not $Report) { Write-Output 'Run the Linux check inside the selected serving distribution, then ask IT to complete file access and network checks.' }
 if ($Report) {
     @{schema_version=1; kit_version='0.0.0-c0'; platform='windows_wsl2'; generated_at=[DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ'); checks=@($checks.ToArray())} | ConvertTo-Json -Depth 5 -Compress
 } else {
