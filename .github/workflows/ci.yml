@@ -38,7 +38,10 @@ jobs:
       - name: Offline release template contract checks
         run: python3 -m unittest discover -s scripts -p test_cloudflare_verifier_release.py
       - run: python3 scripts/check-install-kit.py
-      - run: python3 -m unittest discover -s scripts -p test_install_kit.py
+      - name: Offline install kit contracts (including PowerShell fixtures)
+        run: |
+          command -v pwsh
+          python3 -m unittest discover -v -s scripts -p test_install_kit.py
       - run: python3 scripts/check-vector-digest.py
       - run: python3 scripts/check-compose.py --self-check
       - run: python3 scripts/check-license.py --self-check

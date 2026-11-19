@@ -163,25 +163,46 @@ class PreflightContracts(unittest.TestCase):
                          serving_distro=None, **dict(extra))
 
     def test_readonly_report_is_bounded_and_sanitized(self):
-        output = io.StringIO()
-        with patch.object(kit, "check"), patch.object(kit.shutil, "which", return_value="docker"), patch.object(kit, "run", return_value=subprocess.CompletedProcess([], 1, "PRIVATE-PATH", "SECRET")) as run, contextlib.redirect_stdout(output):
-            self.assertEqual(kit.preflight(self.args()), 1)
-        report = json.loads(output.getvalue())
-        self.assertLess(len(output.getvalue()), 8192)
-        self.assertEqual(set(report), {"schema_version", "kit_version", "platform", "generated_at", "helpers", "checks"})
-        self.assertEqual({row["code"] for row in report["checks"]}, set(kit.CHECKS))
-        self.assertEqual(len(report["checks"]), len(kit.CHECKS))
-        self.assertNotIn("SECRET", output.getvalue())
-        self.assertNotIn("PRIVATE-PATH", output.getvalue())
-        for call in run.call_args_list:
-            self.assertEqual(call.args[0][0], "docker")
-            self.assertIn(call.args[0][1], ("info", "compose"))
-        for row in report["checks"]:
-            self.assertEqual(set(row), {"code", "outcome", "checked_at"})
-            if row["outcome"] == "unknown":
-                self.assertIsNone(row["checked_at"])
-            if row["code"] in ("egress", "integrity", "state_write", "source_uid", "tls_inspection"):
-                self.assertEqual(row["outcome"], "unknown")
+        docker_commands = [
+            ["docker", "info", "--format", "{{.OSType}}"],
+            ["docker", "compose", "version", "--short"],
+        ]
+        linux_commands = [
+            ["ip", "-json", "route", "show", "table", "all"],
+            ["ss", "-H", "-ltn", "sport = :443"],
+        ]
+        for platform in ("linux", "darwin"):
+            commands = docker_commands + (linux_commands if platform == "linux" else [])
+            for returncode in (0, 1):
+                output = io.StringIO()
+                private_outputs = []
+
+                def diagnostic(argv):
+                    marker = "PRIVATE-" + "-".join(argv[:2])
+                    stdout = marker * 8192
+                    stderr = ("SECRET-" + marker) * 8192
+                    private_outputs.extend((marker, "SECRET-" + marker))
+                    # Valid route JSON exercises successful Linux diagnostics too.
+                    if argv[0] == "ip":
+                        stdout = json.dumps([{"dst": "default", "private": stdout}])
+                    return subprocess.CompletedProcess(argv, returncode, stdout, stderr)
+
+                with self.subTest(platform=platform, returncode=returncode), patch.object(kit, "check"), patch.object(kit.sys, "platform", platform), patch.object(kit.os, "uname", return_value=types.SimpleNamespace(machine="x86_64")), patch.object(kit.shutil, "which", side_effect=lambda name: "/fixture/" + name), patch.object(kit, "run", side_effect=diagnostic) as run, contextlib.redirect_stdout(output):
+                    self.assertEqual(kit.preflight(self.args()), 1)
+                self.assertEqual([call.args[0] for call in run.call_args_list], commands)
+                report = json.loads(output.getvalue())
+                self.assertLess(len(output.getvalue()), 8192)
+                self.assertEqual(set(report), {"schema_version", "kit_version", "platform", "generated_at", "helpers", "checks"})
+                self.assertEqual({row["code"] for row in report["checks"]}, set(kit.CHECKS))
+                self.assertEqual(len(report["checks"]), len(kit.CHECKS))
+                for private in private_outputs:
+                    self.assertNotIn(private, output.getvalue())
+                for row in report["checks"]:
+                    self.assertEqual(set(row), {"code", "outcome", "checked_at"})
+                    if row["outcome"] == "unknown":
+                        self.assertIsNone(row["checked_at"])
+                    if row["code"] in ("egress", "integrity", "state_write", "source_uid", "tls_inspection"):
+                        self.assertEqual(row["outcome"], "unknown")
 
     def test_certificate_expiry_within_fourteen_days_is_a_failure(self):
         args = self.args()
