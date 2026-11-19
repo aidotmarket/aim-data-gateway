@@ -28,9 +28,8 @@ def dns_answer(host):
     return len(reply) >= 12 and reply[:2] == query[:2] and reply[3] & 15 == 0 and struct.unpack("!H", reply[6:8])[0] > 0
 
 
-def status_line(sock, clean_close=False):
+def response_line(sock, deadline):
     response = bytearray()
-    deadline = time.monotonic() + TIMEOUT
     while len(response) < 4096:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
@@ -38,14 +37,48 @@ def status_line(sock, clean_close=False):
         sock.settimeout(remaining)
         block = sock.recv(1)
         if not block:
-            # Zero is an internal marker for EOF before any response bytes.
-            return 0 if clean_close and not response else None
+            return b"" if not response else None
         response.extend(block)
         if block == b"\n":
-            match = re.fullmatch(rb"HTTP/1\.[01][ \t]+([0-9]{3})(?:[ \t]+[^\r\n]*)?\r?\n", response)
-            if not match or not 100 <= int(match[1]) <= 599:
+            return bytes(response)
+    return None
+
+
+def status_line(sock, clean_close=False, deadline=None):
+    if deadline is None:
+        deadline = time.monotonic() + TIMEOUT
+    response = response_line(sock, deadline)
+    if response == b"":
+        # Zero is an internal marker for EOF before any response bytes.
+        return 0 if clean_close else None
+    if response is None:
+        return None
+    match = re.fullmatch(rb"HTTP/1\.[01][ \t]+([0-9]{3})(?:[ \t]+[^\r\n]*)?\r?\n", response)
+    if not match or not 100 <= int(match[1]) <= 599:
+        return None
+    return int(match[1])
+
+
+def tls_final_status(sock):
+    deadline = time.monotonic() + TIMEOUT
+    for informational in range(6):
+        status = status_line(sock, clean_close=informational == 0, deadline=deadline)
+        if status is None or not 100 <= status < 200:
+            return status
+        if informational == 5:
+            return None
+        # Consume the informational headers before reading the next status.
+        # Bound both the headers and the number of informational responses.
+        header_bytes = 0
+        while header_bytes < 4096:
+            line = response_line(sock, deadline)
+            if not line:
                 return None
-            return int(match[1])
+            header_bytes += len(line)
+            if line in (b"\r\n", b"\n"):
+                break
+        else:
+            return None
     return None
 
 
@@ -64,7 +97,7 @@ def connect_tls_door(host, port, destination):
                 if not sock.getpeercert(binary_form=True):
                     return None
                 sock.sendall(("CONNECT " + destination + " HTTP/1.1\r\nHost: " + destination + "\r\n\r\n").encode("ascii"))
-                status = status_line(sock, clean_close=True)
+                status = tls_final_status(sock)
                 if status is None:
                     return None
                 return 200 <= status < 300

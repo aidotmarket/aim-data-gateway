@@ -688,11 +688,44 @@ class ConnectStatusContracts(unittest.TestCase):
         with patch.object(probe, "tcp", side_effect=ConnectionRefusedError):
             self.assertIsNone(probe.connect("172.30.196.4", 8443, "example.com:443", inspected_door=True))
 
-    def test_tls_door_clean_close_and_non_2xx_are_denial(self):
-        for code in [None] + [code for code in range(100, 600) if not 200 <= code < 300]:
+    def test_tls_door_clean_close_and_final_non_2xx_are_denial(self):
+        for code in [None] + list(range(300, 600)):
             blocks = [] if code is None else [("HTTP/1.1 %d Reply\r\n" % code).encode()]
             with self.subTest(code=code), self.tls_context(), patch.object(probe, "tcp", return_value=self.socket(blocks)):
                 self.assertIs(probe.connect("172.30.196.4", 8443, "example.com:443", inspected_door=True), False)
+
+    def test_tls_door_informational_responses_require_final_status(self):
+        hints = b"HTTP/1.1 103 Early Hints\r\nLink: </example>\r\n\r\n"
+        continue_response = b"HTTP/1.1 100 Continue\r\n\r\n"
+        cases = [
+            (hints + b"HTTP/1.1 200 Connection Established\r\n", False),
+            (continue_response + b"HTTP/1.1 403 Forbidden\r\n", True),
+            (hints, None),
+            (hints + b"HTTP/1.1 200 Partial", None),
+            (continue_response * 5 + b"HTTP/1.1 200 Connected\r\n", False),
+            (continue_response * 6 + b"HTTP/1.1 403 Forbidden\r\n", None),
+        ]
+        for reply, expected_denial in cases:
+            with self.subTest(reply=reply), self.tls_context(), patch.object(probe, "tcp", return_value=self.socket([reply])):
+                self.assertIs(probe.denied(lambda: probe.connect("172.30.196.4", 8443, "example.com:443", inspected_door=True)), expected_denial)
+
+    def test_tls_door_informational_stream_is_bounded(self):
+        responses = []
+        def stream():
+            while True:
+                responses.append(103)
+                yield b"HTTP/1.1 103 Early Hints\r\n\r\n"
+        # A peer that never stops sending 1xx must be bounded even if time stalls.
+        with self.tls_context(), patch.object(probe, "tcp", return_value=self.socket(stream())), patch.object(probe.time, "monotonic", return_value=0):
+            self.assertIsNone(probe.connect("172.30.196.4", 8443, "example.com:443", inspected_door=True))
+            self.assertEqual(len(responses), 6)
+
+    def test_tls_door_informational_read_shares_original_deadline(self):
+        reply = b"HTTP/1.1 103 Early Hints\r\n\r\nHTTP/1.1 200 Connected\r\n"
+        # Expire the original deadline just as the final status would start.
+        ticks = [0] * (len(b"HTTP/1.1 103 Early Hints\r\n\r\n") + 1) + [probe.TIMEOUT]
+        with self.tls_context(), patch.object(probe, "tcp", return_value=self.socket([reply])), patch.object(probe.time, "monotonic", side_effect=ticks):
+            self.assertIsNone(probe.connect("172.30.196.4", 8443, "example.com:443", inspected_door=True))
 
     def test_tls_door_unclean_close_and_bad_replies_are_inconclusive(self):
         for line in (b"garbage\n", b"HTTP/1.1 200 OK", b"HTTP/1.1 403 Denied", b"x" * 4096):

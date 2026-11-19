@@ -181,8 +181,11 @@ record the door as running and the unavailable tunnel as unselected. An absent
 helper is never a denial receipt. On the already-inspected door, refusal of a
 closed listener on 3128/8080 proves that listener unavailable. Port 8443 must
 complete a TLS handshake and present a server certificate (certificate trust is not required
-for this protocol check). CONNECT is then sent inside TLS: a non-2xx HTTP
+for this protocol check). CONNECT is then sent inside TLS: a final non-2xx HTTP
 response or a clean TLS close before any response bytes proves denial.
+Informational 1xx responses are read through to a final status under the same
+read deadline, with at most five informational responses accepted. A close or
+timeout after a 1xx without a final status, or exceeding that limit, is inconclusive.
 EOF/reset before the handshake, missing certificates, timeouts, unclean TLS
 closes, and malformed or incomplete replies remain inconclusive; every CONNECT
 2xx on any forbidden path fails the negative check. V2 must add explicit
