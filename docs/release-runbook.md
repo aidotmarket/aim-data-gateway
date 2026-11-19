@@ -71,6 +71,8 @@ sections 1, 2, 3.2–3.3, 8–13 and its Gate 1. Source baseline is the G pin.
 The gateway image in the kit is exactly the released v0.2.4 pin in that authority.
 It has no `synthetic_download_v1` capability. Do not count reachability, local
 preparation or the negative probes as a synthetic download pass.
+The source baseline measures 12,052 gateway Go lines against the existing
+12,135 cap. C0 changes zero Go lines and neither cap constant.
 
 Before install or connection choice, show the hosting/copies/metadata,
 provider-traffic/plan and Windows availability/licence notices in the README.

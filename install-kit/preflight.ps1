@@ -5,6 +5,16 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 $checks = [System.Collections.Generic.List[object]]::new()
 $script:hasFailure = $false
+trap {
+    # Native tools may produce a terminating error on some PowerShell versions.
+    # Never expose their raw text, local paths or settings in a shared report.
+    if ($Report) {
+        @{schema_version=1; kit_version='0.0.0-c0'; platform='windows_wsl2'; generated_at=[DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ'); checks=@($checks.ToArray())} | ConvertTo-Json -Depth 5 -Compress
+    } else {
+        Write-Output 'The local check could not finish. Ask IT to check Windows and Docker on this PC, then run the preparation check again.'
+    }
+    exit 1
+}
 function Add-Check([string]$Code, [string]$Outcome, [string]$Message) {
     $checks.Add(@{code=$Code; outcome=$Outcome; checked_at=[DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ')})
     if ($Outcome -eq 'fail') { $script:hasFailure = $true }
