@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import types
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -16,9 +17,10 @@ from unittest.mock import patch
 SPEC = importlib.util.spec_from_file_location("install_kit", Path(__file__).with_name("check-install-kit.py"))
 kit = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(kit)
-PROBE_SPEC = importlib.util.spec_from_file_location("network_probe", kit.ROOT / "install-kit/own-https/network-probe.py")
-probe = importlib.util.module_from_spec(PROBE_SPEC)
-PROBE_SPEC.loader.exec_module(probe)
+PROBE_PATH = kit.ROOT / "install-kit/own-https/network-probe.py"
+probe = types.ModuleType("network_probe")
+# Import the fixture without creating bytecode inside the public install kit.
+exec(compile(PROBE_PATH.read_text(), str(PROBE_PATH), "exec"), probe.__dict__)
 
 
 class KitContracts(unittest.TestCase):
@@ -95,6 +97,11 @@ class KitContracts(unittest.TestCase):
             kit.check(self.root)
         path.unlink()
         path.symlink_to(kit.ROOT / "install-kit/cloudflare-named/config.yaml")
+        with self.assertRaises(kit.ContractError):
+            kit.check(self.root)
+
+    def test_unexpected_local_artifact_cannot_enter_public_kit(self):
+        (self.root / "install-kit/local-settings.json").write_text('{}')
         with self.assertRaises(kit.ContractError):
             kit.check(self.root)
 
@@ -193,6 +200,42 @@ class PreflightContracts(unittest.TestCase):
         with patch.object(probe, "allowed_aim_tls", return_value=False), patch.object(probe, "tcp") as tcp:
             self.assertEqual(probe.main(), 1)
             tcp.assert_not_called()
+
+    def test_probe_shares_actual_namespace_and_always_confirms_cleanup(self):
+        args = self.args()
+        args.start_probes = True
+        args.gateway_container = "test-gateway"
+        container = {"Id": "abcdef", "Config": {"Image": kit.GATEWAY_IMAGE, "User": "65532:65532", "Env": ["AIM_GATEWAY_IMAGE_DIGEST=" + kit.GATEWAY_DIGEST]},
+                     "State": {"Running": True}, "HostConfig": {"ReadonlyRootfs": True, "CapDrop": ["ALL"], "Privileged": False, "SecurityOpt": ["no-new-privileges:true"], "NetworkMode": "kit", "Dns": ["127.0.0.1"]},
+                     "NetworkSettings": {"Networks": {"kit": {"NetworkID": "network-1", "IPAddress": "172.30.196.2"}}},
+                     "Mounts": [{"Destination": name, "RW": name == "/state", "Type": "volume" if name == "/state" else "bind"} for name in ("/config/gateway.toml", "/sources/data", "/state")]}
+        for cleanup_ok in (True, False):
+            calls = []
+            def fake_run(argv):
+                calls.append(argv)
+                if argv[1] == "inspect":
+                    return subprocess.CompletedProcess(argv, 0, json.dumps(container), "")
+                if argv[1] == "network":
+                    return subprocess.CompletedProcess(argv, 0, '[{"Internal":true}]', "")
+                if argv[1] == "run":
+                    return subprocess.CompletedProcess(argv, 0, "isolation-negative-probes:pass\n", "")
+                if argv[1] == "rm":
+                    return subprocess.CompletedProcess(argv, 0 if cleanup_ok else 1, "", "")
+                raise AssertionError("unexpected external action")
+            output = io.StringIO()
+            with self.subTest(cleanup_ok=cleanup_ok), patch.object(kit, "check"), patch.object(kit.sys, "platform", "linux"), patch.object(kit.os, "uname", return_value=types.SimpleNamespace(machine="x86_64")), patch.object(kit.shutil, "which", return_value=None), patch.object(kit, "verified_release", return_value={"probe": "example.invalid/probe@sha256:" + "0" * 64}), patch.object(kit, "run", side_effect=fake_run), contextlib.redirect_stdout(output):
+                if cleanup_ok:
+                    self.assertEqual(kit.preflight(args), 1)  # Docker CLI is deliberately absent in this fixture.
+                else:
+                    with self.assertRaises(kit.ContractError):
+                        kit.preflight(args)
+            started = next(argv for argv in calls if argv[1] == "run")
+            self.assertIn("container:abcdef", started)
+            self.assertIn("--pull=never", started)
+            self.assertEqual(sum("type=bind," in arg for arg in started), 1)
+            self.assertEqual(calls[-1][1:3], ["rm", "--force"])
+            if not cleanup_ok:
+                self.assertEqual(output.getvalue(), "")
 
 
 if __name__ == "__main__":

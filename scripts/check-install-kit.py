@@ -197,6 +197,18 @@ def preflight(args):
         require("AIM_GATEWAY_IMAGE_DIGEST=" + GATEWAY_DIGEST in container["Config"].get("Env", [])
                 and host.get("Dns") == ["127.0.0.1"] and len(container["NetworkSettings"]["Networks"]) == 1,
                 "The running release or network limits do not match. Restore the signed gateway profile, then rerun the check.")
+        require(not any(value.startswith("AIM_PAIRING_CODE=") for value in container["Config"].get("Env", [])),
+                "The running container still has private setup information. Follow the existing release guide to remove it, retain saved storage, then rerun this check.")
+        attachments = list(container["NetworkSettings"]["Networks"].values())
+        network = run(["docker", "network", "inspect", attachments[0]["NetworkID"]])
+        require(network.returncode == 0 and json.loads(network.stdout)[0]["Internal"] is True
+                and attachments[0]["IPAddress"] == "172.30.196.2",
+                "The running gateway is on the wrong network. Restore the isolated signed profile, then rerun the check.")
+        mounts = container.get("Mounts", [])
+        require({mount["Destination"] for mount in mounts} == {"/config/gateway.toml", "/sources/data", "/state"}
+                and len(mounts) == 3 and all(mount["RW"] == (mount["Destination"] == "/state") for mount in mounts)
+                and next(mount for mount in mounts if mount["Destination"] == "/state")["Type"] == "volume",
+                "The running gateway has unexpected file access. Restore the signed profile and retain its named saved storage before rerunning this check.")
         name = "aim-c0-probe-" + uuid.uuid4().hex
         try:
             probe = run(["docker", "run", "--name", name, "--pull=never", "--network", "container:" + container["Id"],
