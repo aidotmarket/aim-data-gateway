@@ -125,8 +125,16 @@ old installation (for example its legacy project's prefixed name). The entry
 point inspects that name before invoking Compose, and supplies `external:true`
 with the same exact name. The new project name does not change its selection.
 An absent name fails without creating storage. Never use an empty replacement.
-Inspect the original gateway's volume mount and identity before switching;
-Compose cannot attest which existing volume contains the intended identity. The base creates an internal gateway
+Inspect the original gateway's volume mount and identity before switching, then
+stop the old gateway and disable its automatic restart before cutover. Keep it
+stopped throughout migration and subsequent kit operation: recovery must never
+open a ledger still served by the old process. Before `up`, the entry point
+inspects containers mounting the selected volume and refuses any other running
+writer. A stopped legacy container is permitted; repeating `up` permits the
+kit's own single gateway. Inspection failure stops startup. This is a snapshot,
+not a cross-project lock: IT must prevent concurrent starts of the old gateway
+or other writers during and after cutover. Compose cannot attest which existing
+volume contains the intended identity. The base creates an internal gateway
 network and a separate outbound network for the allow-only Squid proxy. The
 gateway has no host port, external network or recursive DNS. Set the local
 gateway configuration's `egress.connect_proxy` to `172.30.196.3:3128` before use.
@@ -147,8 +155,16 @@ handler in v0.2.4. Public DNS must be DNS-only and stable. Do not expose 8080.
 Before starting either door profile, IT must deny new outbound flows from its
 ingress bridge while allowing established replies to inbound 443. On a Linux
 Docker host using the iptables backend, identify the actual ingress bridge and
-install a persistent `DOCKER-USER` rule equivalent to
-`iptables -I DOCKER-USER -i <ingress-bridge> -m conntrack --ctstate NEW -j DROP`.
+install persistent rules equivalent to both:
+
+```sh
+iptables -I DOCKER-USER -i <ingress-bridge> -m conntrack --ctstate NEW -j DROP
+iptables -I INPUT -i <ingress-bridge> -m conntrack --ctstate NEW -j DROP
+```
+
+`DOCKER-USER` covers forwarded traffic; `INPUT` covers connections to the Docker
+host itself, including bridge gateway addresses and host services. Install both
+before broader accept rules and retain established replies to inbound 443.
 Apply the equivalent IPv6 policy if IPv6 is enabled. Do not substitute a public
 interface for the bridge. The gateway remains single-homed on its internal
 network; the door can reach it there. This host rule is an explicit IT action,
@@ -162,10 +178,16 @@ TCP/DNS tests from the actual door namespace. `--start-probes` requires both
 `--gateway-container` and `--door-container`; it checks that the signed door is
 running on the gateway network, then joins each namespace separately. Reports
 record the door as running and the unavailable tunnel as unselected. An absent
-helper is never a denial receipt; V2 must add explicit connector presence and
+helper is never a denial receipt. On the already-inspected door, refusal of a
+closed listener on 3128/8080 proves that listener unavailable, and the TLS-only
+8443 listener's explicit HTTP 400 rejects plaintext CONNECT. Timeouts, resets,
+malformed or incomplete replies on an established connection remain
+inconclusive; every 2xx fails the negative check. V2 must add explicit connector presence and
 its own namespace tests before enabling that optional profile. Denial probes
 are diagnostic coverage, not a proof of all firewall rules. V1 must also test
-host/daemon restart, ingress and persistent outbound enforcement. The ingress
+host/daemon restart, ingress and persistent outbound enforcement, including
+denied connections to a controlled host listener through INPUT and to a routed
+destination through DOCKER-USER, while inbound 443 replies still work. The ingress
 subnet `172.30.198.0/29` and ACME subnet `172.30.197.0/29` need the same separate
 Docker-network/host-route conflict review as the gateway subnet.
 

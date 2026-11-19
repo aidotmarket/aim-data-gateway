@@ -321,6 +321,8 @@ class RevisionContracts(unittest.TestCase):
         def run(argv, **kwargs):
             if argv[1] == "volume":
                 return subprocess.CompletedProcess(argv, 0, "legacy-company_aim-gateway-state", "")
+            if argv[1] == "ps":
+                return subprocess.CompletedProcess(argv, 0, "", "")
             self.assertEqual(argv[:2], ["docker", "compose"])
             self.assertIn("-", argv)
             documents.append(json.loads(kwargs["input"]))
@@ -336,6 +338,60 @@ class RevisionContracts(unittest.TestCase):
         self.assertNotIn("${", json.dumps(documents[0]))
         for service in documents[0]["services"].values():
             self.assertRegex(service["image"], r"@sha256:[0-9a-f]{64}$")
+
+    def test_cutover_refuses_running_legacy_writer_and_allows_stopped_or_own(self):
+        args = self.compose_args()
+        for running, own, writable, permitted in ((True, False, True, False),
+                (False, False, True, True), (True, True, True, True), (True, False, False, True)):
+            container = {"State": {"Running": running},
+                "Config": {"Image": kit.GATEWAY_IMAGE, "Labels": {
+                    "com.docker.compose.project": "aim-install-kit" if own else "legacy",
+                    "com.docker.compose.service": "aim-gateway", "com.docker.compose.oneoff": "False"}},
+                "Mounts": [{"Type": "volume", "Name": args.state_volume, "RW": writable, "Destination": "/state"}]}
+            compose_calls = []
+            def run(argv, **kwargs):
+                if argv[1] == "volume":
+                    output = args.state_volume
+                elif argv[1] == "ps":
+                    self.assertIn("volume=" + args.state_volume, argv)
+                    output = "abcdef123456\n"
+                elif argv[1] == "inspect":
+                    output = json.dumps([container])
+                else:
+                    self.assertEqual(argv[:2], ["docker", "compose"])
+                    self.assertEqual(argv[argv.index("--project-name") + 1], "aim-install-kit")
+                    compose_calls.append(argv)
+                    output = ""
+                return subprocess.CompletedProcess(argv, 0, output, "")
+            with self.subTest(running=running, own=own, writable=writable), patch.object(kit, "ROOT", self.root), patch.object(kit, "verified_release", return_value=self.manifest()["images"]), patch.object(kit, "run", side_effect=run), contextlib.redirect_stdout(io.StringIO()):
+                if permitted:
+                    kit.compose_action(args)
+                    kit.compose_action(args)
+                    self.assertEqual(len(compose_calls), 2)
+                else:
+                    with self.assertRaises(kit.ContractError):
+                        kit.compose_action(args)
+                    self.assertEqual(compose_calls, [])
+
+    def test_volume_writer_inspection_fails_closed(self):
+        for results in ((1, ""), (0, "not-an-id"), (0, "abcdef123456")):
+            with self.subTest(results=results), patch.object(kit, "run", return_value=subprocess.CompletedProcess([], results[0], results[1], "")):
+                with self.assertRaises(kit.ContractError):
+                    kit.exclusive_state_writer("legacy_state", "aim-install-kit")
+
+    def test_own_gateway_does_not_hide_another_writer(self):
+        own = {"State": {"Running": True}, "Config": {"Image": kit.GATEWAY_IMAGE,
+            "Labels": {"com.docker.compose.project": "aim-install-kit",
+                       "com.docker.compose.service": "aim-gateway", "com.docker.compose.oneoff": "False"}},
+            "Mounts": [{"Type": "volume", "Name": "legacy_state", "RW": True, "Destination": "/state"}]}
+        other = copy.deepcopy(own)
+        other["Config"]["Labels"]["com.docker.compose.project"] = "legacy"
+        for containers in ([own, other], [own, own]):
+            with self.subTest(containers=containers), patch.object(kit, "run", side_effect=[
+                subprocess.CompletedProcess([], 0, "abcdef123456\nabcdef123457\n", ""),
+                subprocess.CompletedProcess([], 0, json.dumps(containers), "")]):
+                with self.assertRaises(kit.ContractError):
+                    kit.exclusive_state_writer("legacy_state", "aim-install-kit")
 
     def test_missing_external_volume_creates_nothing(self):
         with patch.object(kit, "verified_release", return_value=self.manifest()["images"]), patch.object(kit, "run", return_value=subprocess.CompletedProcess([], 1, "", "")) as run:
@@ -426,7 +482,7 @@ if ((Get-ServingWslVersion $two 'Serving') -ne '2') { exit 2 }
 if ($null -ne (Get-ServingWslVersion $one 'Missing')) { exit 3 }
 if ($null -ne (Get-ServingWslVersion $one '')) { exit 4 }
 """
-        result = subprocess.run(["rtk", "run", "--", "pwsh", "-NoProfile", "-NonInteractive", "-Command", script], capture_output=True, text=True)
+        result = subprocess.run(["pwsh", "-NoProfile", "-NonInteractive", "-Command", script], capture_output=True, text=True)
         self.assertEqual(result.returncode, 0)
 
 
@@ -527,12 +583,12 @@ if ($indices.Count -ne 2 -or $indices[1].Groups[1].Value -ne '0x00000001') { exi
 $result = Invoke-ReadOnlyNative (Get-Process -Id $PID).Path @('-NoProfile', '-Command', '[Console]::Error.WriteLine("private"); exit 1')
 if ($result.ExitCode -ne 1 -or $ErrorActionPreference -ne 'Stop') { exit 5 }
 """
-        result = subprocess.run(["rtk", "run", "--", "pwsh", "-NoProfile", "-NonInteractive", "-Command", script], capture_output=True, text=True)
+        result = subprocess.run(["pwsh", "-NoProfile", "-NonInteractive", "-Command", script], capture_output=True, text=True)
         self.assertEqual(result.returncode, 0)
 
 
 class ConnectStatusContracts(unittest.TestCase):
-    def response(self, blocks):
+    def socket(self, blocks):
         class Socket:
             def __init__(self): self.blocks = iter(blocks); self.pending = b""
             def __enter__(self): return self
@@ -543,8 +599,52 @@ class ConnectStatusContracts(unittest.TestCase):
                 if not self.pending: self.pending = next(self.blocks, b"")
                 value, self.pending = self.pending[:length], self.pending[length:]
                 return value
-        with patch.object(probe, "tcp", return_value=Socket()):
-            return probe.connect("proxy", 3128, "example.com:443")
+        return Socket()
+
+    def response(self, blocks, inspected_door=False):
+        with patch.object(probe, "tcp", return_value=self.socket(blocks)):
+            return probe.connect("proxy", 3128, "example.com:443", inspected_door=inspected_door)
+
+    def test_full_probe_shipped_door_layout_and_forbidden_success(self):
+        # Manual Caddy listens for TLS only on 8443; plaintext gets HTTP 400.
+        self.assertIn(":8443 {", (kit.ROOT / "install-kit/own-https/Caddyfile").read_text())
+        targets = [("172.30.196.3", 3128, b"example.com:443"),
+                   ("172.30.196.3", 3128, b"api.ai.market:80")]
+        targets += [("172.30.196.4", port, b"example.com:443") for port in (3128, 8080, 8443)]
+        for opened, status in [(None, None)] + [(target, code) for target in targets for code in range(200, 300)]:
+            parent = self
+            def tcp(host, port):
+                target = (host, port)
+                if target[0] == "1.1.1.1":
+                    raise TimeoutError()
+                if host == "172.30.196.4" and port != 8443 and (opened is None or target != opened[:2]):
+                    raise ConnectionRefusedError()
+                class Reply:
+                    def __enter__(self): return self
+                    def __exit__(self, *args): pass
+                    def sendall(self, data):
+                        code = status if opened and target == opened[:2] and opened[2] in data else (400 if host == "172.30.196.4" else 403)
+                        self.sock = parent.socket([b"HTTP/", ("1.1 %d Reply\r\n" % code).encode()])
+                    def settimeout(self, value): pass
+                    def recv(self, length): return self.sock.recv(length)
+                return Reply()
+            with self.subTest(opened=opened, status=status), patch.object(probe.sys, "argv", ["probe.py"]), patch.object(probe, "allowed_aim_tls", return_value=True), patch("builtins.open", unittest.mock.mock_open(read_data="nameserver 127.0.0.1\n")), patch.object(probe, "tcp", side_effect=tcp), patch.object(probe, "dns_answer", side_effect=TimeoutError), contextlib.redirect_stdout(io.StringIO()) as output:
+                self.assertEqual(probe.main(), 0 if opened is None else 1)
+                self.assertEqual(output.getvalue(), "isolation-negative-probes:pass\n" if opened is None else "")
+
+    def test_only_door_refusal_or_explicit_protocol_rejection_is_denial(self):
+        with patch.object(probe, "tcp", side_effect=ConnectionRefusedError):
+            self.assertIs(probe.connect("door", 3128, "example.com:443", inspected_door=True), False)
+            self.assertIsNone(probe.connect("proxy", 3128, "example.com:443"))
+        self.assertIs(self.response([b"HTTP/1.0 400 Bad Request\r\n"], inspected_door=True), False)
+        self.assertIsNone(self.response([b"HTTP/1.0 400 Bad Request\r\n"]))
+        for line in (b"", b"garbage\n", b"HTTP/1.1 200 OK", b"HTTP/1.1 503 Error\r\n"):
+            self.assertIsNone(self.response([line], inspected_door=True))
+        with patch.object(probe, "tcp", side_effect=TimeoutError):
+            self.assertIsNone(probe.connect("door", 3128, "example.com:443", inspected_door=True))
+        for failure in (ConnectionRefusedError, ConnectionResetError, TimeoutError):
+            with self.subTest(failure=failure), patch.object(probe, "tcp", return_value=self.socket([])), patch.object(probe, "status_line", side_effect=failure):
+                self.assertIsNone(probe.connect("door", 8443, "example.com:443", inspected_door=True))
 
     def test_all_success_codes_and_segmented_status_fail_negative_probe(self):
         for code in (200, 204, 299):

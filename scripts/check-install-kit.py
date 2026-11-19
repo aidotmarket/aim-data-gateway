@@ -305,11 +305,45 @@ def pinned_compose(args, root=None):
     return document
 
 
+def exclusive_state_writer(volume, project):
+    message = "Stop the old gateway and every other writer of the selected state volume before cutover. Storage ownership could not be confirmed."
+    listed = run(["docker", "ps", "--all", "--quiet", "--filter", "volume=" + volume])
+    require(listed.returncode == 0, message)
+    ids = listed.stdout.split()
+    require(all(re.fullmatch(r"[0-9a-f]{12,64}", value) for value in ids), message)
+    if not ids:
+        return
+    inspected = run(["docker", "inspect", *ids])
+    require(inspected.returncode == 0, message)
+    try:
+        containers = json.loads(inspected.stdout)
+        require(isinstance(containers, list) and len(containers) == len(ids), message)
+        own_writers = 0
+        for container in containers:
+            if not container["State"]["Running"]:
+                continue
+            writers = [mount for mount in container["Mounts"]
+                       if mount.get("Type") == "volume" and mount.get("Name") == volume and mount["RW"]]
+            if not writers:
+                continue
+            labels = container["Config"].get("Labels") or {}
+            require(labels.get("com.docker.compose.project") == project
+                    and labels.get("com.docker.compose.service") == "aim-gateway"
+                    and labels.get("com.docker.compose.oneoff") == "False"
+                    and container["Config"]["Image"] == GATEWAY_IMAGE
+                    and len(writers) == 1 and writers[0]["Destination"] == "/state", message)
+            own_writers += 1
+        require(own_writers <= 1, message)
+    except (ValueError, KeyError, TypeError):
+        raise ContractError(message) from None
+
+
 def compose_action(args):
     document = pinned_compose(args)
     # One exact digest-resolved config is used for inspection and startup.
-    command = ["docker", "compose", "--project-directory", str(ROOT / "install-kit"), "-f", "-", args.compose_action]
+    command = ["docker", "compose", "--project-name", document["name"], "--project-directory", str(ROOT / "install-kit"), "-f", "-", args.compose_action]
     if args.compose_action == "up":
+        exclusive_state_writer(document["volumes"]["aim-gateway-state"]["name"], document["name"])
         command += ["--detach", "--pull", "never"]
     result = run(command, input=json.dumps(document).replace("$", "$$"))
     require(result.returncode == 0, "The verified Compose action failed. Ask IT to inspect the local setup.")

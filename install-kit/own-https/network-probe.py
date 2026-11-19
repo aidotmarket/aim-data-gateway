@@ -48,15 +48,25 @@ def status_line(sock):
     return None
 
 
-def connect(host, port, destination):
+def connect(host, port, destination, inspected_door=False):
+    # Only refusal while opening a listener on the already-inspected door proves
+    # that listener closed. Failures after connecting remain inconclusive.
     try:
-        with tcp(host, port) as sock:
+        connection = tcp(host, port)
+    except ConnectionRefusedError:
+        return False if inspected_door else None
+    except OSError:
+        return None
+    try:
+        with connection as sock:
             sock.sendall(("CONNECT " + destination + " HTTP/1.1\r\nHost: " + destination + "\r\n\r\n").encode("ascii"))
             status = status_line(sock)
             if status is None:
                 return None
-            # Only an explicit policy denial proves the negative test.
-            return True if 200 <= status < 300 else False if status in (403, 405, 407) else None
+            # The inspected TLS-only door rejects plaintext HTTP with 400.
+            # Other established proxy replies still need an explicit policy denial.
+            rejection = status in (403, 405, 407) or (inspected_door and status == 400)
+            return True if 200 <= status < 300 else False if rejection else None
     except OSError:
         return None
 
@@ -112,7 +122,7 @@ def main():
         checks.extend(denied(lambda host=host: dns_answer(host)) for host in set(resolvers + ["1.1.1.1", "172.30.196.3", "172.30.196.4"]))
         for helper in ("172.30.196.4",):
             for port in (3128, 8080, 8443):
-                checks.append(denied(lambda host=helper, port=port: connect(host, port, "example.com:443")))
+                checks.append(denied(lambda host=helper, port=port: connect(host, port, "example.com:443", inspected_door=True)))
         if all(value is True for value in checks):
             print("isolation-negative-probes:pass")
             return 0
