@@ -179,11 +179,14 @@ TCP/DNS tests from the actual door namespace. `--start-probes` requires both
 running on the gateway network, then joins each namespace separately. Reports
 record the door as running and the unavailable tunnel as unselected. An absent
 helper is never a denial receipt. On the already-inspected door, refusal of a
-closed listener on 3128/8080 proves that listener unavailable, and the TLS-only
-8443 listener's explicit HTTP 400 rejects plaintext CONNECT. Timeouts, resets,
-malformed or incomplete replies on an established connection remain
-inconclusive; every 2xx fails the negative check. V2 must add explicit connector presence and
-its own namespace tests before enabling that optional profile. Denial probes
+closed listener on 3128/8080 proves that listener unavailable. Port 8443 must
+complete a TLS handshake and present a server certificate (certificate trust is not required
+for this protocol check). CONNECT is then sent inside TLS: a non-2xx HTTP
+response or a clean TLS close before any response bytes proves denial.
+EOF/reset before the handshake, missing certificates, timeouts, unclean TLS
+closes, and malformed or incomplete replies remain inconclusive; every CONNECT
+2xx on any forbidden path fails the negative check. V2 must add explicit
+connector presence and its own namespace tests before enabling that optional profile. Denial probes
 are diagnostic coverage, not a proof of all firewall rules. V1 must also test
 host/daemon restart, ingress and persistent outbound enforcement, including
 denied connections to a controlled host listener through INPUT and to a routed

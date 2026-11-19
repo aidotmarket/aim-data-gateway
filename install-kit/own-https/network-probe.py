@@ -28,7 +28,7 @@ def dns_answer(host):
     return len(reply) >= 12 and reply[:2] == query[:2] and reply[3] & 15 == 0 and struct.unpack("!H", reply[6:8])[0] > 0
 
 
-def status_line(sock):
+def status_line(sock, clean_close=False):
     response = bytearray()
     deadline = time.monotonic() + TIMEOUT
     while len(response) < 4096:
@@ -38,7 +38,8 @@ def status_line(sock):
         sock.settimeout(remaining)
         block = sock.recv(1)
         if not block:
-            return None
+            # Zero is an internal marker for EOF before any response bytes.
+            return 0 if clean_close and not response else None
         response.extend(block)
         if block == b"\n":
             match = re.fullmatch(rb"HTTP/1\.[01][ \t]+([0-9]{3})(?:[ \t]+[^\r\n]*)?\r?\n", response)
@@ -48,7 +49,32 @@ def status_line(sock):
     return None
 
 
+def connect_tls_door(host, port, destination):
+    # Trust is deliberately not checked here: this tests the listener protocol,
+    # not certificate deployment. A completed handshake AND certificate are
+    # positive evidence of TLS before any CONNECT denial can count.
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    context.check_hostname = False
+    context.verify_mode = ssl.CERT_NONE
+    try:
+        with tcp(host, port) as connection:
+            # Do not turn a truncated TLS stream into an apparently clean EOF.
+            with context.wrap_socket(connection, server_hostname=host,
+                                     suppress_ragged_eofs=False) as sock:
+                if not sock.getpeercert(binary_form=True):
+                    return None
+                sock.sendall(("CONNECT " + destination + " HTTP/1.1\r\nHost: " + destination + "\r\n\r\n").encode("ascii"))
+                status = status_line(sock, clean_close=True)
+                if status is None:
+                    return None
+                return 200 <= status < 300
+    except (OSError, ValueError):
+        return None
+
+
 def connect(host, port, destination, inspected_door=False):
+    if inspected_door and port == 8443:
+        return connect_tls_door(host, port, destination)
     # Only refusal while opening a listener on the already-inspected door proves
     # that listener closed. Failures after connecting remain inconclusive.
     try:
@@ -63,8 +89,7 @@ def connect(host, port, destination, inspected_door=False):
             status = status_line(sock)
             if status is None:
                 return None
-            # The inspected TLS-only door rejects plaintext HTTP with 400.
-            # Other established proxy replies still need an explicit policy denial.
+            # Established plaintext replies still need an explicit rejection.
             rejection = status in (403, 405, 407) or (inspected_door and status == 400)
             return True if 200 <= status < 300 else False if rejection else None
     except OSError:

@@ -605,32 +605,81 @@ class ConnectStatusContracts(unittest.TestCase):
         with patch.object(probe, "tcp", return_value=self.socket(blocks)):
             return probe.connect("proxy", 3128, "example.com:443", inspected_door=inspected_door)
 
+    @contextlib.contextmanager
+    def tls_context(self, failure=None, certificate=b"server certificate"):
+        context = unittest.mock.MagicMock()
+        def wrap(sock, **kwargs):
+            self.assertEqual(kwargs["server_hostname"], "172.30.196.4")
+            self.assertIs(kwargs["suppress_ragged_eofs"], False)
+            if failure:
+                raise failure
+            sock.tls = True  # Successful wrap_socket includes the TLS handshake.
+            sock.getpeercert = unittest.mock.Mock(return_value=certificate)
+            return sock
+        context.wrap_socket.side_effect = wrap
+        with patch.object(probe.ssl, "SSLContext", return_value=context) as factory:
+            yield context
+        factory.assert_called_with(probe.ssl.PROTOCOL_TLS_CLIENT)
+        self.assertIs(context.check_hostname, False)
+        self.assertEqual(context.verify_mode, probe.ssl.CERT_NONE)
+
     def test_full_probe_shipped_door_layout_and_forbidden_success(self):
-        # Manual Caddy listens for TLS only on 8443; plaintext gets HTTP 400.
         self.assertIn(":8443 {", (kit.ROOT / "install-kit/own-https/Caddyfile").read_text())
         targets = [("172.30.196.3", 3128, b"example.com:443"),
                    ("172.30.196.3", 3128, b"api.ai.market:80")]
         targets += [("172.30.196.4", port, b"example.com:443") for port in (3128, 8080, 8443)]
-        for opened, status in [(None, None)] + [(target, code) for target in targets for code in range(200, 300)]:
+        cases = [(None, None, denial, None) for denial in (None, 400, 403, 405)]
+        cases += [(target, code, 403, None) for target in targets for code in range(200, 300)]
+        cases += [(None, None, None, failure) for failure in (probe.ssl.SSLEOFError(), ConnectionResetError())]
+        for opened, status, denial, tls_failure in cases:
             parent = self
             def tcp(host, port):
                 target = (host, port)
-                if target[0] == "1.1.1.1":
+                if host == "1.1.1.1":
                     raise TimeoutError()
                 if host == "172.30.196.4" and port != 8443 and (opened is None or target != opened[:2]):
                     raise ConnectionRefusedError()
                 class Reply:
+                    tls = False
                     def __enter__(self): return self
                     def __exit__(self, *args): pass
                     def sendall(self, data):
-                        code = status if opened and target == opened[:2] and opened[2] in data else (400 if host == "172.30.196.4" else 403)
-                        self.sock = parent.socket([b"HTTP/", ("1.1 %d Reply\r\n" % code).encode()])
+                        if port == 8443:
+                            parent.assertTrue(self.tls, "CONNECT must be sent inside TLS")
+                            self.getpeercert.assert_called_once_with(binary_form=True)
+                        code = status if opened and target == opened[:2] and opened[2] in data else (denial if port == 8443 else 403)
+                        blocks = [] if code is None else [b"HTTP/", ("1.1 %d Reply\r\n" % code).encode()]
+                        self.sock = parent.socket(blocks)
                     def settimeout(self, value): pass
                     def recv(self, length): return self.sock.recv(length)
                 return Reply()
-            with self.subTest(opened=opened, status=status), patch.object(probe.sys, "argv", ["probe.py"]), patch.object(probe, "allowed_aim_tls", return_value=True), patch("builtins.open", unittest.mock.mock_open(read_data="nameserver 127.0.0.1\n")), patch.object(probe, "tcp", side_effect=tcp), patch.object(probe, "dns_answer", side_effect=TimeoutError), contextlib.redirect_stdout(io.StringIO()) as output:
-                self.assertEqual(probe.main(), 0 if opened is None else 1)
-                self.assertEqual(output.getvalue(), "isolation-negative-probes:pass\n" if opened is None else "")
+            with self.subTest(opened=opened, status=status, denial=denial, tls_failure=tls_failure), self.tls_context(failure=tls_failure), patch.object(probe.sys, "argv", ["probe.py"]), patch.object(probe, "allowed_aim_tls", return_value=True), patch("builtins.open", unittest.mock.mock_open(read_data="nameserver 127.0.0.1\n")), patch.object(probe, "tcp", side_effect=tcp), patch.object(probe, "dns_answer", side_effect=TimeoutError), contextlib.redirect_stdout(io.StringIO()) as output:
+                passes = opened is None and tls_failure is None
+                self.assertEqual(probe.main(), 0 if passes else 1)
+                self.assertEqual(output.getvalue(), "isolation-negative-probes:pass\n" if passes else "")
+
+    def test_tls_door_requires_handshake_and_certificate(self):
+        for failure in (probe.ssl.SSLEOFError(), ConnectionResetError(), TimeoutError()):
+            with self.subTest(failure=failure), self.tls_context(failure=failure), patch.object(probe, "tcp", return_value=self.socket([])):
+                self.assertIsNone(probe.connect("172.30.196.4", 8443, "example.com:443", inspected_door=True))
+        with self.tls_context(certificate=None), patch.object(probe, "tcp", return_value=self.socket([])):
+            self.assertIsNone(probe.connect("172.30.196.4", 8443, "example.com:443", inspected_door=True))
+        with patch.object(probe, "tcp", side_effect=ConnectionRefusedError):
+            self.assertIsNone(probe.connect("172.30.196.4", 8443, "example.com:443", inspected_door=True))
+
+    def test_tls_door_clean_close_and_non_2xx_are_denial(self):
+        for code in [None] + [code for code in range(100, 600) if not 200 <= code < 300]:
+            blocks = [] if code is None else [("HTTP/1.1 %d Reply\r\n" % code).encode()]
+            with self.subTest(code=code), self.tls_context(), patch.object(probe, "tcp", return_value=self.socket(blocks)):
+                self.assertIs(probe.connect("172.30.196.4", 8443, "example.com:443", inspected_door=True), False)
+
+    def test_tls_door_unclean_close_and_bad_replies_are_inconclusive(self):
+        for line in (b"garbage\n", b"HTTP/1.1 200 OK", b"HTTP/1.1 403 Denied", b"x" * 4096):
+            with self.subTest(line=line[:30]), self.tls_context(), patch.object(probe, "tcp", return_value=self.socket([line])):
+                self.assertIsNone(probe.connect("172.30.196.4", 8443, "example.com:443", inspected_door=True))
+        for failure in (probe.ssl.SSLEOFError, ConnectionResetError, TimeoutError):
+            with self.subTest(failure=failure), self.tls_context(), patch.object(probe, "tcp", return_value=self.socket([])), patch.object(probe, "status_line", side_effect=failure):
+                self.assertIsNone(probe.connect("172.30.196.4", 8443, "example.com:443", inspected_door=True))
 
     def test_only_door_refusal_or_explicit_protocol_rejection_is_denial(self):
         with patch.object(probe, "tcp", side_effect=ConnectionRefusedError):
@@ -642,9 +691,6 @@ class ConnectStatusContracts(unittest.TestCase):
             self.assertIsNone(self.response([line], inspected_door=True))
         with patch.object(probe, "tcp", side_effect=TimeoutError):
             self.assertIsNone(probe.connect("door", 3128, "example.com:443", inspected_door=True))
-        for failure in (ConnectionRefusedError, ConnectionResetError, TimeoutError):
-            with self.subTest(failure=failure), patch.object(probe, "tcp", return_value=self.socket([])), patch.object(probe, "status_line", side_effect=failure):
-                self.assertIsNone(probe.connect("door", 8443, "example.com:443", inspected_door=True))
 
     def test_all_success_codes_and_segmented_status_fail_negative_probe(self):
         for code in (200, 204, 299):
