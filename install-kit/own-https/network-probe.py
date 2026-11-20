@@ -204,7 +204,9 @@ def dns_exchange(host, query, kernel_only=False):
             try:
                 sock.connect(peer)
             except ConnectionRefusedError:
-                return True
+                # A fresh socket has not sent a query yet, so this cannot
+                # corroborate denial by the configured upstream.
+                return None if kernel_only else True
             except OSError as error:
                 return True if not kernel_only and kernel_no_route(error, host) else None
             try:
