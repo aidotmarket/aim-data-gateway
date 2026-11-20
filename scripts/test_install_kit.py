@@ -1023,6 +1023,42 @@ class NegativeEvidenceContracts(unittest.TestCase):
                                 direct.connect.assert_called_once_with(("127.0.0.1", 53))
                                 direct.send.assert_called_once_with(resolver.send.call_args.args[0])
 
+    def test_upstream_refusal_requires_query_before_both_namespace_markers(self):
+        for phase in ("connect", "send", "recv"):
+            sockets = []
+            def socket(*args):
+                sock = unittest.mock.MagicMock()
+                sock.__enter__.return_value = sock
+                def connect(peer):
+                    if peer[0] == "127.0.0.1" and phase == "connect":
+                        raise ConnectionRefusedError()
+                def send(query):
+                    if sock.connect.call_args.args[0][0] == "127.0.0.1" and phase == "send":
+                        raise ConnectionRefusedError()
+                def recv(size):
+                    if sock.connect.call_args.args[0][0] == "127.0.0.11":
+                        return self.packet(flags=0x8182)
+                    raise ConnectionRefusedError()
+                sock.connect.side_effect = connect
+                sock.send.side_effect = send
+                sock.recv.side_effect = recv
+                sockets.append(sock)
+                return sock
+            with self.subTest(phase=phase), patch.object(probe.socket, "socket", side_effect=socket) as create:
+                self.assertIs(probe.dns_answer("127.0.0.11", "127.0.0.1"),
+                              None if phase == "connect" else True)
+                self.assertEqual(create.call_count, 2)
+                if phase == "connect":
+                    sockets[-1].send.assert_not_called()
+                    sockets[-1].recv.assert_not_called()
+                else:
+                    sockets[-1].send.assert_called_once()
+            for argv, marker in ((PROBE_ARGS, "isolation-negative-probes:pass\n"),
+                                 (PROBE_ARGS + ["--door"], "door-negative-probes:pass\n")):
+                with self.subTest(phase=phase, argv=argv), patch.object(probe.sys, "argv", argv), patch("builtins.open", unittest.mock.mock_open(read_data="nameserver 127.0.0.11\n")), patch.object(probe, "allowed_aim_tls", return_value=True), patch.object(probe, "tcp_denied", return_value=True), patch.object(probe, "connect", return_value=True), patch.object(probe.socket, "socket", side_effect=socket), contextlib.redirect_stdout(io.StringIO()) as output:
+                    self.assertEqual(probe.main(), 1 if phase == "connect" else 0)
+                    self.assertEqual(output.getvalue(), "" if phase == "connect" else marker)
+
     def test_both_markers_follow_fresh_embedded_upstream_evidence(self):
         for argv in (PROBE_ARGS, PROBE_ARGS + ["--door"]):
             for refused in (True, False, True):

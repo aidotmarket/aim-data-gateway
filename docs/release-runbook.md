@@ -207,11 +207,13 @@ The launcher inspects **each namespace owner's** `HostConfig.Dns`, requires exac
 A complete matching SERVFAIL from `127.0.0.11` counts only when a separate
 connected-UDP query from that same namespace to the configured upstream on port
 53 receives kernel ECONNREFUSED (ICMP port unreachable) or EACCES (administrative
-prohibition). A DNS answer from the upstream, silent loss, bare send permission
-error, or host/network routing failure cannot corroborate it. The loopback
-refusal shows the embedded resolver's only configured upstream is closed; it is
-not evidence of host forwarding enforcement. No per-container namespace root
-step, firewall mutation or restart watcher is required.
+prohibition) after attempting to send the query. A connect-time refusal, a DNS
+answer from the upstream, silent loss, bare send permission error, or host/network
+routing failure cannot corroborate it. The loopback refusal establishes closure
+in the probed container namespace only. It does not establish which namespace
+Docker uses to forward to a loopback upstream, or host forwarding enforcement.
+No per-container namespace root step, firewall mutation or restart watcher is
+required.
 
 The evidence path is the same on Linux Engine and Docker Desktop/WSL2: an
 unprivileged helper joins the inspected gateway or door network namespace,
@@ -224,13 +226,23 @@ UDP DNS. Every public/helper UDP target is still probed independently, so the
 embedded-resolver fallback does not replace host-boundary UDP coverage.
 V1 must demonstrate both pass markers on a clean Linux host with only the host
 rules, repeat after gateway/door recreation, and repeat on Windows Docker Desktop.
-Those full-kit/restart receipts remain **UNVERIFIED**; offline fixtures do not
-certify them. Keep helpers at UID 65532 with zero capabilities and no host sockets.
+Use the delivered launcher with `--start-probes`, exercising its inspected
+`--dns-upstream`, `--door-hostname` and `DOOR_HOSTNAME` binding, and capture both
+printed markers. Also test Linux with a host resolver listening on `127.0.0.1:53`
+and the door attached to its real gateway and non-internal `door-ingress`
+networks. Record whether Docker forwards from the host namespace; require the
+door marker to stay absent when that resolver can answer the query, including
+when it returns SERVFAIL. A Caddy-only internal-network harness does not cover
+these cases. Those full-kit/restart and host-resolver receipts remain
+**UNVERIFIED**; offline fixtures do not certify them. Keep helpers at UID 65532
+with zero capabilities and no host sockets.
 
 Both profiles need external `curl` reachability on host 443 and negative direct
 TCP/DNS tests from the actual door namespace. `--start-probes` requires
 `--gateway-container`, `--door-container` and `--door-hostname <stable-hostname>`
-in both manual and ACME modes; it checks that the signed door is
+in both manual and ACME modes. For the manual profile, use a hostname present
+in the certificate's names for `--door-hostname` and `DOOR_HOSTNAME`.
+The launcher checks that the signed door is
 running on the gateway network, then joins each namespace separately. Reports
 record the door as running and the unavailable tunnel as unselected. An absent
 helper is never a denial receipt. On the already-inspected door, refusal of a
