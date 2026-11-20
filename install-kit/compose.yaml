@@ -1,0 +1,42 @@
+{
+  "name": "aim-install-kit",
+  "x-kit-services": {
+    "aim-gateway": {
+      "image": "ghcr.io/aidotmarket/aim-gateway@sha256:11723451cf98e191ad4563067d1191c687768041ceee2ff1147e7cf22ae4cbd6",
+      "user": "65532:65532",
+      "read_only": true,
+      "cap_drop": ["ALL"],
+      "security_opt": ["no-new-privileges:true"],
+      "dns": ["127.0.0.1"],
+      "environment": {
+        "AIM_GATEWAY_IMAGE_DIGEST": "sha256:11723451cf98e191ad4563067d1191c687768041ceee2ff1147e7cf22ae4cbd6"
+      },
+      "volumes": [
+        "${GATEWAY_CONFIG:?Choose the local gateway settings}:/config/gateway.toml:ro",
+        "${EXPORT_FOLDER:?Choose a dedicated export folder}:/sources/data:ro",
+        "aim-gateway-state:/state"
+      ],
+      "networks": {"gateway": {"ipv4_address": "172.30.196.2"}},
+      "healthcheck": {"test": ["CMD", "/aim-gateway", "healthcheck"], "interval": "30s", "timeout": "5s", "retries": 3},
+      "restart": "unless-stopped"
+    },
+    "connect-proxy": {
+      "image": "${SQUID_IMAGE:?A signed helper image pin is required}",
+      "user": "65532:65532",
+      "read_only": true,
+      "cap_drop": ["ALL"],
+      "security_opt": ["no-new-privileges:true"],
+      "sysctls": {"net.ipv4.ip_forward": "0"},
+      "command": ["squid", "-N", "-f", "/etc/squid/squid.conf"],
+      "volumes": ["./squid.conf:/etc/squid/squid.conf:ro"],
+      "tmpfs": ["/tmp:rw,noexec,nosuid,size=16m,uid=65532,gid=65532"],
+      "networks": {"gateway": {"ipv4_address": "172.30.196.3"}, "control-outbound": {}},
+      "restart": "unless-stopped"
+    }
+  },
+  "networks": {
+    "gateway": {"internal": true, "ipam": {"config": [{"subnet": "172.30.196.0/28"}]}},
+    "control-outbound": {}
+  },
+  "volumes": {"aim-gateway-state": {"external": true, "name": "${STATE_VOLUME:?Select the exact existing paired volume name}"}}
+}

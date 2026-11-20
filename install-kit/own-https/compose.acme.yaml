@@ -1,0 +1,123 @@
+{
+  "x-kit-services": {
+    "https-door": {
+      "image": "${TLS_PROXY_IMAGE:?A signed helper image pin is required}",
+      "user": "65532:65532",
+      "read_only": true,
+      "cap_drop": [
+        "ALL"
+      ],
+      "security_opt": [
+        "no-new-privileges:true"
+      ],
+      "dns": [
+        "127.0.0.1"
+      ],
+      "sysctls": {
+        "net.ipv4.ip_forward": "0"
+      },
+      "command": [
+        "caddy",
+        "run",
+        "--config",
+        "/etc/caddy/Caddyfile",
+        "--adapter",
+        "caddyfile"
+      ],
+      "ports": [
+        "443:8443"
+      ],
+      "volumes": [
+        "./own-https/Caddyfile.acme:/etc/caddy/Caddyfile:ro",
+        "acme-certificates:/data"
+      ],
+      "tmpfs": [
+        "/config:rw,noexec,nosuid,size=8m,uid=65532,gid=65532"
+      ],
+      "networks": {
+        "gateway": {
+          "ipv4_address": "172.30.196.4"
+        },
+        "acme": {
+          "ipv4_address": "172.30.197.2"
+        },
+        "door-ingress": {}
+      },
+      "restart": "unless-stopped",
+      "environment": {
+        "HTTPS_PROXY": "http://172.30.197.3:3128",
+        "HTTP_PROXY": "http://172.30.197.3:3128",
+        "NO_PROXY": "172.30.196.2",
+        "DOOR_HOSTNAME": "${DOOR_HOSTNAME:?Select a stable DNS-only hostname}"
+      }
+    },
+    "acme-proxy": {
+      "image": "${SQUID_IMAGE:?A signed helper image pin is required}",
+      "user": "65532:65532",
+      "read_only": true,
+      "cap_drop": [
+        "ALL"
+      ],
+      "security_opt": [
+        "no-new-privileges:true"
+      ],
+      "sysctls": {
+        "net.ipv4.ip_forward": "0"
+      },
+      "command": [
+        "squid",
+        "-N",
+        "-f",
+        "/etc/squid/squid.conf"
+      ],
+      "volumes": [
+        "./own-https/acme-squid.conf:/etc/squid/squid.conf:ro"
+      ],
+      "tmpfs": [
+        "/tmp:rw,noexec,nosuid,size=16m,uid=65532,gid=65532"
+      ],
+      "networks": {
+        "acme": {
+          "ipv4_address": "172.30.197.3"
+        },
+        "ca-outbound": {}
+      },
+      "restart": "unless-stopped",
+      "dns": [
+        "1.1.1.1"
+      ]
+    }
+  },
+  "networks": {
+    "acme": {
+      "internal": true,
+      "ipam": {
+        "config": [
+          {
+            "subnet": "172.30.197.0/29"
+          }
+        ]
+      }
+    },
+    "ca-outbound": {},
+    "door-ingress": {
+      "driver": "bridge",
+      "driver_opts": {
+        "com.docker.network.bridge.enable_ip_masquerade": "false"
+      },
+      "ipam": {
+        "config": [
+          {
+            "subnet": "172.30.198.0/29"
+          }
+        ]
+      }
+    }
+  },
+  "volumes": {
+    "acme-certificates": {
+      "external": true,
+      "name": "${ACME_STATE_VOLUME:?Select the existing UID-65532 certificate volume}"
+    }
+  }
+}

@@ -1,0 +1,26 @@
+# PREPARATION ONLY / UNADVERTISED until issuance, renewal and egress receipts.
+# Use compose.acme.yaml through the verified entry point only.
+# Persistent external /data; CA CONNECT through acme-proxy, no direct egress.
+# Ingress bridge host firewall: REJECT new outbound (TCP reset, other IP unreachable).
+# Never attach this profile's outbound network to the gateway.
+{
+    admin off
+    http_port 8081
+    https_port 8443
+}
+{$DOOR_HOSTNAME} {
+    tls {
+        issuer acme {
+            dir https://acme-v02.api.letsencrypt.org/directory
+            disable_http_challenge
+        }
+    }
+    header Cache-Control "no-store"
+    header Referrer-Policy "no-referrer"
+    reverse_proxy 172.30.196.2:8080
+}
+# Refuse unmatched authorities, including CONNECT to a forbidden host. Without
+# this fallback Caddy's empty route can return 200 despite opening no tunnel.
+:8443 {
+    respond 403
+}

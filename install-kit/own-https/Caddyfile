@@ -1,0 +1,11 @@
+# Default: manual certificate, ingress bridge without masquerade; host firewall must REJECT new outbound flows (TCP reset, other IP unreachable), no port 80, no admin API/log.
+{
+    admin off
+    auto_https off
+}
+:8443 {
+    tls /certs/server.pem /certs/server.key
+    header Cache-Control "no-store"
+    header Referrer-Policy "no-referrer"
+    reverse_proxy 172.30.196.2:8080
+}
