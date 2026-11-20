@@ -222,12 +222,14 @@ class PreflightContracts(unittest.TestCase):
                 kit.preflight(args)
             run.assert_not_called()
 
-    def test_probe_does_not_treat_open_routes_as_denied(self):
-        self.assertFalse(probe.denied(lambda: True))
-        self.assertTrue(probe.denied(lambda: False))
+    def test_probe_preserves_only_explicit_tristate_verdicts(self):
+        self.assertIs(probe.denied(lambda: True), True)
+        self.assertIs(probe.denied(lambda: False), False)
+        for value in (None, 0, 1, b"", [], object()):
+            self.assertIsNone(probe.denied(lambda: value))
         def blocked():
             raise TimeoutError()
-        self.assertTrue(probe.denied(blocked))
+        self.assertIsNone(probe.denied(blocked))
 
     def test_allowed_control_failure_prevents_isolation_pass(self):
         with patch.object(probe.sys, "argv", ["probe.py"]), patch.object(probe, "allowed_aim_tls", return_value=False), patch.object(probe, "tcp") as tcp:
@@ -566,9 +568,9 @@ class CcRevisionContracts(unittest.TestCase):
         for opened in (True, False):
             def tcp(*args):
                 if opened:
-                    return types.SimpleNamespace(close=lambda: None)
-                raise TimeoutError()
-            with patch.object(probe.sys, "argv", ["probe.py", "--door"]), patch("builtins.open", unittest.mock.mock_open(read_data="nameserver 127.0.0.1\n")), patch.object(probe, "tcp", side_effect=tcp), patch.object(probe, "dns_answer", side_effect=TimeoutError), contextlib.redirect_stdout(io.StringIO()) as output:
+                    return unittest.mock.MagicMock()
+                raise ConnectionRefusedError()
+            with patch.object(probe.sys, "argv", ["probe.py", "--door"]), patch("builtins.open", unittest.mock.mock_open(read_data="nameserver 127.0.0.1\n")), patch.object(probe, "tcp", side_effect=tcp), patch.object(probe, "dns_answer", return_value=True), contextlib.redirect_stdout(io.StringIO()) as output:
                 self.assertEqual(probe.main(), 1 if opened else 0)
                 self.assertEqual(output.getvalue(), "" if opened else "door-negative-probes:pass\n")
 
@@ -657,7 +659,7 @@ class ConnectStatusContracts(unittest.TestCase):
             def tcp(host, port):
                 target = (host, port)
                 if host == "1.1.1.1":
-                    raise TimeoutError()
+                    raise ConnectionRefusedError()
                 if host == "172.30.196.4" and port != 8443 and (opened is None or target != opened[:2]):
                     raise ConnectionRefusedError()
                 class Reply:
@@ -674,7 +676,7 @@ class ConnectStatusContracts(unittest.TestCase):
                     def settimeout(self, value): pass
                     def recv(self, length): return self.sock.recv(length)
                 return Reply()
-            with self.subTest(opened=opened, status=status, denial=denial, tls_failure=tls_failure), self.tls_context(failure=tls_failure), patch.object(probe.sys, "argv", ["probe.py"]), patch.object(probe, "allowed_aim_tls", return_value=True), patch("builtins.open", unittest.mock.mock_open(read_data="nameserver 127.0.0.1\n")), patch.object(probe, "tcp", side_effect=tcp), patch.object(probe, "dns_answer", side_effect=TimeoutError), contextlib.redirect_stdout(io.StringIO()) as output:
+            with self.subTest(opened=opened, status=status, denial=denial, tls_failure=tls_failure), self.tls_context(failure=tls_failure), patch.object(probe.sys, "argv", ["probe.py"]), patch.object(probe, "allowed_aim_tls", return_value=True), patch("builtins.open", unittest.mock.mock_open(read_data="nameserver 127.0.0.1\n")), patch.object(probe, "tcp", side_effect=tcp), patch.object(probe, "dns_answer", return_value=True), contextlib.redirect_stdout(io.StringIO()) as output:
                 passes = opened is None and tls_failure is None
                 self.assertEqual(probe.main(), 0 if passes else 1)
                 self.assertEqual(output.getvalue(), "isolation-negative-probes:pass\n" if passes else "")
@@ -692,7 +694,7 @@ class ConnectStatusContracts(unittest.TestCase):
         for code in [None] + list(range(300, 600)):
             blocks = [] if code is None else [("HTTP/1.1 %d Reply\r\n\r\n" % code).encode()]
             with self.subTest(code=code), self.tls_context(), patch.object(probe, "tcp", return_value=self.socket(blocks)):
-                self.assertIs(probe.connect("172.30.196.4", 8443, "example.com:443", inspected_door=True), False)
+                self.assertIs(probe.connect("172.30.196.4", 8443, "example.com:443", inspected_door=True), True)
 
     def test_tls_door_informational_responses_require_final_status(self):
         hints = b"HTTP/1.1 103 Early Hints\r\nLink: </example>\r\n\r\n"
@@ -741,21 +743,58 @@ class ConnectStatusContracts(unittest.TestCase):
     def test_complete_valid_headers_and_informational_plaintext(self):
         hints = b"HTTP/1.1 100 Continue\r\n\r\n"
         headers = b"X-Token!#$%&'*+.^_`|~: \tvalue\xff\r\nEmpty:\r\n\r\n"
-        for code, expected in ((200, True), (403, False)):
+        for code, expected in ((200, False), (403, True)):
             reply = hints + ("HTTP/1.0 %d Reply\r\n" % code).encode() + headers
             self.assertIs(self.response([reply]), expected)
             with self.tls_context(), patch.object(probe, "tcp", return_value=self.socket([reply])):
                 self.assertIs(probe.denied(lambda: probe.connect(
-                    "172.30.196.4", 8443, "example.com:443", inspected_door=True)), not expected)
+                    "172.30.196.4", 8443, "example.com:443", inspected_door=True)), expected)
         with patch.object(probe, "tcp", return_value=self.socket([hints + b"HTTP/1.1 200 OK\r\n\r\n"])), patch.object(probe.ssl, "create_default_context") as context:
             self.assertTrue(probe.allowed_aim_tls())
             context.return_value.wrap_socket.assert_called_once()
+
+    def test_framing_is_validated_on_all_http_paths(self):
+        bad = [
+            b"Content-Length: invalid\r\n",
+            b"Content-Length: 3\r\nContent-Length: 7\r\n",
+            b"Content-Length: 3, 7\r\n", b"Content-Length: -1\r\n",
+            b"Content-Length: +3\r\n", b"Content-Length: 3.0\r\n",
+            b"Content-Length: \r\n", b"Content-Length: 3,\r\n",
+            b"Content-Length: 0\r\nTransfer-Encoding: chunked\r\n",
+            b"Transfer-Encoding: unknown\r\n", b"Transfer-Encoding: gzip, chunked\r\n",
+            b"Transfer-Encoding: chunked, chunked\r\n",
+            b"Transfer-Encoding: chunked\r\nTransfer-Encoding: chunked\r\n",
+            b"Transfer-Encoding: chunked;foo=bar\r\n", b"Transfer-Encoding:\r\n",
+        ]
+        good = [b"", b"Content-Length: 0\r\n", b"Content-Length: 3\r\n",
+                b"Content-Length: 3\r\ncontent-length: 3\r\n",
+                b"Content-Length: 3, 3\r\nContent-Length: 3\r\n",
+                b"Transfer-Encoding: ChUnKeD\r\n"]
+        for code in (200, 403):
+            final = ("HTTP/1.1 %d Reply\r\n" % code).encode()
+            cases = [(final + headers + b"\r\n", None) for headers in bad]
+            cases += [(b"HTTP/1.1 103 Hints\r\n" + headers + b"\r\n" + final + b"\r\n", None)
+                      for headers in bad + good[1:]]
+            cases += [(final + headers + b"\r\n", code == 403) for headers in good]
+            cases += [(b"HTTP/1.0 403 Denied\r\nTransfer-Encoding: chunked\r\n\r\n", None),
+                      (b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n", None)]
+            for reply, expected in cases:
+                for door in (False, True):
+                    with self.subTest(code=code, reply=reply, door=door):
+                        self.assertIs(probe.denied(lambda: self.response([reply], inspected_door=door)), expected)
+                with self.subTest(code=code, reply=reply, tls=True), self.tls_context(), patch.object(probe, "tcp", return_value=self.socket([reply])):
+                    self.assertIs(probe.denied(lambda: probe.connect(
+                        "172.30.196.4", 8443, "example.com:443", inspected_door=True)), expected)
+                if expected is None:
+                    with patch.object(probe, "tcp", return_value=self.socket([reply])), patch.object(probe.ssl, "create_default_context") as context:
+                        self.assertFalse(probe.allowed_aim_tls())
+                        context.assert_not_called()
 
     def test_header_bounds_and_final_header_deadline(self):
         status = b"HTTP/1.1 403 Forbidden\r\n"
         for headers in (b"X: y\r\n" * 64 + b"\r\n",
                         b"X:" + b"x" * 4090 + b"\r\n\r\n"):
-            self.assertIs(self.response([status + headers]), False)
+            self.assertIs(self.response([status + headers]), True)
         # A final status alone cannot decide while its headers stall.
         ticks = [0] * (len(status) + 1) + [probe.TIMEOUT]
         with patch.object(probe.time, "monotonic", side_effect=ticks):
@@ -789,10 +828,10 @@ class ConnectStatusContracts(unittest.TestCase):
 
     def test_only_door_refusal_or_explicit_protocol_rejection_is_denial(self):
         with patch.object(probe, "tcp", side_effect=ConnectionRefusedError):
-            self.assertIs(probe.connect("door", 3128, "example.com:443", inspected_door=True), False)
+            self.assertIs(probe.connect("door", 3128, "example.com:443", inspected_door=True), True)
             self.assertIsNone(probe.connect("proxy", 3128, "example.com:443"))
-        self.assertIs(self.response([b"HTTP/1.0 400 Bad Request\r\n\r\n"], inspected_door=True), False)
-        self.assertIsNone(self.response([b"HTTP/1.0 400 Bad Request\r\n\r\n"]))
+        self.assertIs(self.response([b"HTTP/1.0 400 Bad Request\r\n\r\n"], inspected_door=True), True)
+        self.assertIs(self.response([b"HTTP/1.0 400 Bad Request\r\n\r\n"]), True)
         for line in (b"", b"garbage\n", b"HTTP/1.1 200 OK", b"HTTP/1.1 503 Error\r\n"):
             self.assertIsNone(self.response([line], inspected_door=True))
         with patch.object(probe, "tcp", side_effect=TimeoutError):
@@ -802,8 +841,8 @@ class ConnectStatusContracts(unittest.TestCase):
         for code in (200, 204, 299):
             line = ("HTTP/1.1 %d Connected\r\n\r\n" % code).encode()
             for blocks in ([line], [line[:5], line[5:11], line[11:]]):
-                self.assertIs(self.response(blocks), True)
-        self.assertIs(self.response([b"HTTP/1.0 403 Denied\r\n\r\n"]), False)
+                self.assertIs(self.response(blocks), False)
+        self.assertIs(self.response([b"HTTP/1.0 403 Denied\r\n\r\n"]), True)
 
     def test_malformed_partial_overlong_and_disconnect_are_inconclusive(self):
         for line in (b"garbage\r\n", b"HTTP/1.1 two Failed\r\n", b"HTTP/1.1 200 OK", b"HTTP/1.1 999 Bad\n", b"x" * 4096, b"", b"HTTP/1.1 503 Unavailable\r\n"):
@@ -811,6 +850,123 @@ class ConnectStatusContracts(unittest.TestCase):
         self.assertIsNone(probe.denied(lambda: None))
         with patch.object(probe, "tcp", side_effect=ConnectionRefusedError):
             self.assertIsNone(probe.connect("gateway", 3128, "example.com:443"))
+
+
+class NegativeEvidenceContracts(unittest.TestCase):
+    question = b"\x07example\x03com\x00\x00\x01\x00\x01"
+
+    def packet(self, flags=0x8180, answers=b"", count=0, question=None):
+        return probe.struct.pack("!6H", 0x5319, flags, 1, count, 0, 0) + (self.question if question is None else question) + answers
+
+    def record(self, kind=1, value=b"\x01\x02\x03\x04", owner=b"\xc0\x0c"):
+        return owner + probe.struct.pack("!HHIH", kind, 1, 60, len(value)) + value
+
+    def answer(self, packet):
+        sock = unittest.mock.MagicMock()
+        sock.recv.return_value = packet
+        with patch.object(probe.socket, "socket", return_value=sock):
+            sock.__enter__.return_value = sock
+            result = probe.dns_answer("1.1.1.1")
+        sock.connect.assert_called_once_with(("1.1.1.1", 53))
+        sock.recv.assert_called_once_with(513)
+        return result
+
+    def malformed_packets(self):
+        positive = self.packet(answers=self.record(), count=1)
+        bad_authority = []
+        for kind, value in ((1, b"abc"), (28, b"abc"), (2, b"\xc0\xff"),
+                            (6, b"\xc0\x0c\xc0\x0c"), (15, b"\x00"),
+                            (16, b"\x07bad"), (99, b"opaque")):
+            packet = bytearray(self.packet() + self.record(kind=kind, value=value))
+            packet[8:10] = b"\x00\x01"
+            bad_authority.append(bytes(packet))
+        # Compression pointers must target a previously parsed label boundary,
+        # not a zero byte in the question type/class that resembles a root name.
+        packet = bytearray(self.packet() + self.record(owner=b"\xc0\x19"))
+        packet[8:10] = b"\x00\x01"
+        bad_authority.append(bytes(packet))
+        return bad_authority + [
+            b"x", b"\x00\x00" + self.packet()[2:], self.packet(flags=0x0180),
+            self.packet(flags=0x8380), self.packet(flags=0x8980), self.packet(flags=0x81c0),
+            self.packet(question=self.question.replace(b"example", b"another")),
+            self.packet(question=self.question[:-1] + b"\x02"),
+            self.packet(question=self.question[:-3] + b"\x1c\x00\x01"),
+            self.packet(question=b"\xc0\x0c\x00\x01\x00\x01"),
+            self.packet(question=b"\xff\xff"),
+            self.packet(count=1), positive[:-1], self.packet() + b"junk",
+            self.packet(answers=self.record(value=b"abc"), count=1),
+            self.packet(answers=self.record(kind=5, value=b"\xc0\xff"), count=1),
+            self.packet(flags=0x8183, answers=self.record(), count=1),
+            self.packet(answers=self.record(owner=b"\x05other\x03com\x00"), count=1),
+            self.packet(flags=0x8182),  # SERVFAIL does not confirm policy denial.
+            self.packet() + b"x" * 513,
+        ] + [positive[:end] for end in range(len(positive))]
+
+    def test_dns_malformed_truncated_unrelated_and_unsupported_are_inconclusive(self):
+        for packet in self.malformed_packets():
+            with self.subTest(packet=packet):
+                self.assertIsNone(self.answer(packet))
+
+    def test_dns_matching_negative_and_positive_evidence(self):
+        for flags in (0x8180, 0x8183, 0x8185):
+            with self.subTest(flags=flags):
+                self.assertIs(self.answer(self.packet(flags=flags)), True)
+        positive = self.packet(answers=self.record(), count=1)
+        self.assertIs(self.answer(positive), False)
+        alias = b"\x05alias\x03com\x00"
+        chain = self.record(kind=5, value=alias) + self.record(owner=alias)
+        self.assertIs(self.answer(self.packet(answers=chain, count=2)), False)
+        # A complete negative with a parsed SOA authority record is also valid.
+        soa = self.record(kind=6, value=b"\xc0\x0c\xc0\x0c" + b"\x00" * 20)
+        packet = bytearray(self.packet(flags=0x8183) + soa)
+        packet[8:10] = b"\x00\x01"
+        self.assertIs(self.answer(bytes(packet)), True)
+
+    def test_every_dns_target_requires_positive_denial_before_namespace_pass(self):
+        for argv, hosts, marker in ((["probe.py", "--door"], ["127.0.0.1", "1.1.1.1"], "door-negative-probes:pass\n"),
+                                    (["probe.py"], ["127.0.0.1", "1.1.1.1", "172.30.196.3", "172.30.196.4"], "isolation-negative-probes:pass\n")):
+            for bad_host in hosts:
+                for packet in [self.packet(), b"x", b"\x00\x00" + self.packet()[2:], self.packet(answers=self.record(), count=1)]:
+                    sock = unittest.mock.MagicMock()
+                    sock.__enter__.return_value = sock
+                    sock.recv.side_effect = lambda size: packet if sock.connect.call_args.args[0][0] == bad_host else self.packet()
+                    with self.subTest(argv=argv, host=bad_host, packet=packet), patch.object(probe.sys, "argv", argv), patch("builtins.open", unittest.mock.mock_open(read_data="nameserver 127.0.0.1\n")), patch.object(probe, "allowed_aim_tls", return_value=True), patch.object(probe, "tcp_denied", return_value=True), patch.object(probe, "connect", return_value=True), patch.object(probe.socket, "socket", return_value=sock), contextlib.redirect_stdout(io.StringIO()) as output:
+                        passes = packet == self.packet()
+                        self.assertEqual(probe.main(), 0 if passes else 1)
+                        self.assertEqual(output.getvalue(), marker if passes else "")
+
+    def test_transport_errors_and_non_boolean_results_never_become_denial(self):
+        for failure in (TimeoutError, ConnectionResetError, ConnectionRefusedError, OSError, ValueError):
+            def action(): raise failure()
+            with self.subTest(failure=failure):
+                self.assertIsNone(probe.denied(action))
+                if failure is not ValueError:
+                    with patch.object(probe.socket, "socket", side_effect=failure):
+                        self.assertIsNone(probe.dns_answer("1.1.1.1"))
+        for value in (None, 0, 1, b"", [], object()):
+            self.assertIsNone(probe.denied(lambda: value))
+        self.assertIs(probe.denied(lambda: False), False)
+        self.assertIs(probe.denied(lambda: True), True)
+
+    def test_direct_tcp_evidence_is_explicit_and_connection_is_closed(self):
+        sock = unittest.mock.MagicMock()
+        with patch.object(probe, "tcp", return_value=sock):
+            self.assertIs(probe.denied(lambda: probe.tcp_denied("1.1.1.1", 443)), False)
+        sock.__exit__.assert_called_once()
+        sock.__exit__.side_effect = ConnectionRefusedError
+        with patch.object(probe, "tcp", return_value=sock):
+            self.assertIsNone(probe.denied(lambda: probe.tcp_denied("1.1.1.1", 443)))
+        for failure in (ConnectionRefusedError, TimeoutError, ConnectionResetError, OSError):
+            with self.subTest(failure=failure), patch.object(probe, "tcp", side_effect=failure):
+                self.assertIs(probe.denied(lambda: probe.tcp_denied("1.1.1.1", 443)),
+                              True if failure is ConnectionRefusedError else None)
+
+    def test_direct_tcp_inconclusive_blocks_both_namespace_pass_markers(self):
+        for argv in (["probe.py"], ["probe.py", "--door"]):
+            for value in (False, None):
+                with self.subTest(argv=argv, value=value), patch.object(probe.sys, "argv", argv), patch("builtins.open", unittest.mock.mock_open(read_data="nameserver 127.0.0.1\n")), patch.object(probe, "allowed_aim_tls", return_value=True), patch.object(probe, "tcp_denied", return_value=value), patch.object(probe, "connect", return_value=True), patch.object(probe, "dns_answer", return_value=True), contextlib.redirect_stdout(io.StringIO()) as output:
+                    self.assertEqual(probe.main(), 1)
+                    self.assertEqual(output.getvalue(), "")
 
 
 if __name__ == "__main__":

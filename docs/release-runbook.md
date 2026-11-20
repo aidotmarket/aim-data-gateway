@@ -181,11 +181,21 @@ record the door as running and the unavailable tunnel as unselected. An absent
 helper is never a denial receipt. On the already-inspected door, refusal of a
 closed listener on 3128/8080 proves that listener unavailable. Port 8443 must
 complete a TLS handshake and present a server certificate (certificate trust is not required
-for this protocol check). CONNECT is then sent inside TLS: a final non-2xx HTTP
-response or a clean TLS close before any response bytes proves denial.
+for this protocol check). Attribution assumes that `172.30.196.4` remains the
+address of the door inspected at preflight and that traffic is not redirected
+between inspection and the probe. The 8443 check proves denial only for that
+inspected address under this assumption; it does not authenticate the door's
+identity. Certificate pinning is not part of this protocol check. CONNECT is then
+sent inside TLS: a final non-2xx HTTP response or a clean TLS close before any
+response bytes proves denial.
 Every response must have a strict HTTP/1.0 or HTTP/1.1 status line and a complete
 CRLF-terminated header section with valid token field names and field values,
-limited to 64 fields and 4096 header bytes per response. This validation applies
+limited to 64 fields and 4096 header bytes per response. Framing must also be
+valid: Content-Length values must be non-negative decimal integers with all
+repetitions (including comma lists) identical in value. Conflicting/invalid
+lengths, Content-Length with Transfer-Encoding, and unsupported transfer codings
+are inconclusive. Only a single `chunked` transfer coding on HTTP/1.1 is supported;
+framing fields on 1xx/204 responses are rejected. This validation applies
 to informational and final responses on both plaintext and TLS CONNECT paths,
 including the allowed route. Informational 1xx responses are read through to a
 final status under the same read deadline, with at most five informational
@@ -193,8 +203,19 @@ responses accepted. Protocol switching (101) is inconclusive. A close or timeout
 after a 1xx without a final status, or exceeding that limit, is inconclusive.
 EOF/reset before the handshake, missing certificates, timeouts, unclean TLS
 closes, and malformed or incomplete replies remain inconclusive; every CONNECT
-2xx on any forbidden path fails the negative check. V2 must add explicit
-connector presence and its own namespace tests before enabling that optional profile. Denial probes
+2xx on any forbidden path fails the negative check. All negative probes use
+`True` for denied, `False` for reached, and `None` for inconclusive; every required
+probe must return exactly `True` before either namespace prints a pass marker.
+Direct TCP probes in both namespaces require an explicit connection refusal;
+timeouts, resets, routing errors and other transport failures are inconclusive.
+DNS probes require a complete, matching standard response from the queried peer,
+with the expected transaction ID and question. NOERROR with no answers, NXDOMAIN
+or REFUSED without answers proves DNS denial; a matching positive A answer
+(including a CNAME chain) fails the negative check. Malformed, truncated, unrelated
+or unsupported DNS replies and all DNS transport errors are inconclusive.
+Plaintext CONNECT probes require a complete, valid final non-2xx response (or,
+for inspected door listeners only, an explicit connection refusal).
+V2 must add explicit connector presence and its own namespace tests before enabling that optional profile. Denial probes
 are diagnostic coverage, not a proof of all firewall rules. V1 must also test
 host/daemon restart, ingress and persistent outbound enforcement, including
 denied connections to a controlled host listener through INPUT and to a routed
