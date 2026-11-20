@@ -5,6 +5,7 @@ No seller mounts, control protocol, pairing, download or authorization code.
 Negative probe verdicts: True denied, False reached, None inconclusive.
 Fixed output only. Success does not establish canary correlation or readiness.
 """
+import argparse
 import errno
 import ipaddress
 import re
@@ -24,7 +25,8 @@ def tcp(host, port):
 def no_ipv4_route(host):
     """Corroborate kernel ENETUNREACH with this namespace's read-only routes."""
     try:
-        target = struct.unpack("<I", ipaddress.IPv4Address(host).packed)[0]
+        # /proc/net/route prints the kernel's native-endian IPv4 integer.
+        target = struct.unpack("=I", ipaddress.IPv4Address(host).packed)[0]
         with open("/proc/net/route", encoding="ascii") as source:
             if source.readline().split() != ["Iface", "Destination", "Gateway", "Flags",
                                               "RefCnt", "Use", "Metric", "Mask", "MTU", "Window", "IRTT"]:
@@ -98,7 +100,7 @@ def dns_name(packet, offset, known=None):
         offset += length
 
 
-def dns_result(reply, query):
+def dns_result(reply, query, upstream_closed=False):
     """Classify only a complete matching DNS response; opaque failures are unknown."""
     if len(reply) < 12 or len(reply) > 512 or reply[:2] != query[:2]:
         return None
@@ -107,7 +109,7 @@ def dns_result(reply, query):
     if not flags & 0x8000 or flags & 0x7a40 or questions != 1:
         return None
     rcode = flags & 15
-    if rcode not in (0, 3, 5):
+    if rcode not in (0, 2, 3, 5):
         return None
     try:
         known = set()
@@ -156,12 +158,15 @@ def dns_result(reply, query):
                 return None
             if index < answers:
                 records.append((owner, kind, cls, value))
-            elif index < answers + authority and kind == 6 and cls == 1:
+            elif (index < answers + authority and kind == 6 and cls == 1
+                  and (not owner or expected[-len(owner):] == owner)):
                 authority_soa = True
             offset = end
         if offset != len(reply):
             return None
         if not answers:
+            if rcode == 2:
+                return True if upstream_closed else None
             # A referral/empty NOERROR reply is not a negative answer.
             return True if rcode in (3, 5) or authority_soa else None
         if rcode != 0:
@@ -179,9 +184,12 @@ def dns_result(reply, query):
     return None
 
 
-def dns_answer(host):
-    # A fixed public name with no seller/account information. One bounded query.
-    query = b"\x53\x19\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x07example\x03com\x00\x00\x01\x00\x01"
+def dns_exchange(host, query, kernel_only=False):
+    """Return a datagram, True for kernel denial, or None for unknown failure.
+
+    Upstream corroboration requires refusal/prohibition, never a routing error
+    or a DNS response (even a negative one).
+    """
     try:
         address = ipaddress.ip_address(host)
         family = socket.AF_INET6 if address.version == 6 else socket.AF_INET
@@ -198,13 +206,13 @@ def dns_answer(host):
             except ConnectionRefusedError:
                 return True
             except OSError as error:
-                return True if kernel_no_route(error, host) else None
+                return True if not kernel_only and kernel_no_route(error, host) else None
             try:
                 sock.send(query)
             except ConnectionRefusedError:
                 return True
             except OSError as error:
-                if kernel_no_route(error, host):
+                if not kernel_only and kernel_no_route(error, host):
                     return True
                 # A local OUTPUT REJECT may return EPERM while also queuing
                 # its ICMP error. Require that explicit receipt below; the
@@ -216,15 +224,31 @@ def dns_answer(host):
             except ConnectionRefusedError:
                 return True
             except OSError as error:
-                # After sending on a connected socket, these are explicit ICMP
-                # unreachable/refusal receipts for this peer, not silent loss.
-                if error.errno in (errno.ECONNREFUSED, errno.EACCES,
-                                   errno.EHOSTUNREACH, errno.ENETUNREACH):
+                # Only the documented port refusal/admin prohibition is
+                # attributable; a router's dead uplink is not policy denial.
+                if error.errno in (errno.ECONNREFUSED, errno.EACCES):
                     return True
                 return None
-        return dns_result(reply, query)
+        return None if kernel_only else reply
     except (OSError, ValueError):
         return None
+
+
+def dns_answer(host, upstream=None):
+    # A fixed public name with no seller/account information. One bounded query
+    # per peer, plus corroboration only for a validated embedded SERVFAIL.
+    query = b"\x53\x19\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x07example\x03com\x00\x00\x01\x00\x01"
+    reply = dns_exchange(host, query)
+    if not isinstance(reply, bytes):
+        return reply
+    result = dns_result(reply, query)
+    if (result is None and host == "127.0.0.11" and upstream == "127.0.0.1"
+            and dns_result(reply, query, upstream_closed=True) is True):
+        # The launcher verifies this is the namespace owner's sole configured
+        # upstream. SERVFAIL alone, or an arbitrary resolver's failure, cannot
+        # pass. No namespace mutation or privileged helper is needed.
+        return True if dns_exchange(upstream, query, kernel_only=True) is True else None
+    return result
 
 
 def configured_resolvers():
@@ -337,7 +361,7 @@ def tls_final_status(sock):
     return final_status(sock, clean_close=True)
 
 
-def connect_tls_door(host, port, destination):
+def connect_tls_door(host, port, destination, door_hostname):
     # Trust is deliberately not checked here: this tests the listener protocol,
     # not certificate deployment. A completed handshake AND certificate are
     # positive evidence of TLS before any CONNECT denial can count.
@@ -347,7 +371,7 @@ def connect_tls_door(host, port, destination):
     try:
         with tcp(host, port) as connection:
             # Do not turn a truncated TLS stream into an apparently clean EOF.
-            with context.wrap_socket(connection, server_hostname=host,
+            with context.wrap_socket(connection, server_hostname=door_hostname,
                                      suppress_ragged_eofs=False) as sock:
                 if not sock.getpeercert(binary_form=True):
                     return None
@@ -360,9 +384,11 @@ def connect_tls_door(host, port, destination):
         return None
 
 
-def connect(host, port, destination, inspected_door=False):
+def connect(host, port, destination, inspected_door=False, door_hostname=None):
     if inspected_door and port == 8443:
-        return connect_tls_door(host, port, destination)
+        if not door_hostname:
+            return None
+        return connect_tls_door(host, port, destination, door_hostname)
     # Only refusal while opening a listener on the already-inspected door proves
     # that listener closed. Failures after connecting remain inconclusive.
     try:
@@ -377,8 +403,10 @@ def connect(host, port, destination, inspected_door=False):
             status = final_status(sock)
             if status is None:
                 return None
-            # Established plaintext replies still need an explicit rejection.
-            return not 200 <= status < 300
+            if 200 <= status < 300:
+                return False
+            # A proxy 5xx may mean forwarding was attempted, not forbidden.
+            return True if inspected_door or status in (403, 405, 407) else None
     except OSError:
         return None
 
@@ -405,16 +433,31 @@ def allowed_aim_tls():
 
 def main():
     try:
-        if sys.argv[1:] == ["--door"]:
+        class Parser(argparse.ArgumentParser):
+            def error(self, message):
+                raise ValueError()
+        parser = Parser(add_help=False)
+        parser.add_argument("--door", action="store_true")
+        parser.add_argument("--door-hostname", required=True)
+        parser.add_argument("--dns-upstream", required=True, choices=["127.0.0.1"])
+        args = parser.parse_args()
+        if (len(args.door_hostname) > 253 or not re.fullmatch(
+                r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+",
+                args.door_hostname)):
+            return 1
+        try:
+            ipaddress.ip_address(args.door_hostname)
+            return 1  # IP literals suppress SNI.
+        except ValueError:
+            pass
+        if args.door:
             # Run in the selected door namespace, not the gateway namespace.
             resolvers = configured_resolvers()
             checks = [denied(lambda: tcp_denied("1.1.1.1", 443))]
-            checks.extend(denied(lambda host=host: dns_answer(host)) for host in set(resolvers + ["1.1.1.1"]))
+            checks.extend(denied(lambda host=host: dns_answer(host, args.dns_upstream)) for host in set(resolvers + ["1.1.1.1"]))
             if resolvers and all(value is True for value in checks):
                 print("door-negative-probes:pass")
                 return 0
-            return 1
-        if sys.argv[1:]:
             return 1
         if not allowed_aim_tls():
             return 1
@@ -424,10 +467,10 @@ def main():
         checks = [denied(lambda: tcp_denied("1.1.1.1", 443)),
                   denied(lambda: connect("172.30.196.3", 3128, "example.com:443")),
                   denied(lambda: connect("172.30.196.3", 3128, "api.ai.market:80"))]
-        checks.extend(denied(lambda host=host: dns_answer(host)) for host in set(resolvers + ["1.1.1.1", "172.30.196.3", "172.30.196.4"]))
+        checks.extend(denied(lambda host=host: dns_answer(host, args.dns_upstream)) for host in set(resolvers + ["1.1.1.1", "172.30.196.3", "172.30.196.4"]))
         for helper in ("172.30.196.4",):
             for port in (3128, 8080, 8443):
-                checks.append(denied(lambda host=helper, port=port: connect(host, port, "example.com:443", inspected_door=True)))
+                checks.append(denied(lambda host=helper, port=port: connect(host, port, "example.com:443", inspected_door=True, door_hostname=args.door_hostname)))
         if all(value is True for value in checks):
             print("isolation-negative-probes:pass")
             return 0

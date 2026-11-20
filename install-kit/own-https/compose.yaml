@@ -13,6 +13,9 @@
       "dns": [
         "127.0.0.1"
       ],
+      "environment": {
+        "DOOR_HOSTNAME": "${DOOR_HOSTNAME:?Select a stable DNS-only hostname}"
+      },
       "sysctls": {
         "net.ipv4.ip_forward": "0"
       },

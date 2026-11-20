@@ -176,6 +176,8 @@ before broader accept rules and retain established replies to inbound 443.
 For an nftables backend, use equivalent bridge-scoped input/forward rules with
 `reject with tcp reset` for TCP and `reject with icmp type port-unreachable` /
 `reject with icmpv6 type admin-prohibited` for other IPv4/IPv6 traffic.
+These spellings are documented in the [upstream nftables manual](https://www.netfilter.org/projects/nftables/manpage.html);
+the exact nftables version and rule load/reboot receipts still belong in V1.
 REJECT supplies positive, attributable evidence: TCP connection refusal or an
 ICMP unreachable received by the connected UDP probe. A silent DROP cannot
 satisfy these diagnostics; an uncorrelated timeout remains inconclusive and
@@ -185,50 +187,67 @@ and required DNS resolver, explicitly pinned/configured per release”.
 Do not substitute a public interface for the bridge. The gateway remains single-homed on its internal
 network; the door can reach it there. This host rule is an explicit IT action,
 not performed by preflight. No-masquerade alone does not deny routed private
-networks. On Docker Desktop, the rule belongs in the Docker network boundary,
-not just the Windows host firewall; that implementation and persistence remain
-V1 acceptance work. Do not start service until enforcement is in place.
+networks. On Windows 11 Home/WSL2 with Docker Desktop Linux containers, the same
+bridge-scoped forwarding and host-input REJECT policy belongs in the Linux VM
+that owns Docker's bridges. `DOCKER-USER`/`INPUT` (or the nftables equivalents)
+there enforce the policy; Windows Defender Firewall or rules in an unrelated
+serving WSL distribution do not establish this container boundary. IT must apply
+and persist the policy explicitly, without a host agent. **UNVERIFIED on Windows:**
+this change has no clean Windows host receipt for locating/configuring that
+Docker Desktop VM boundary, supported persistent rule installation, ICMP delivery,
+or policy survival across Docker Desktop/WSL2/host restart. V1 must establish
+those steps and minimum versions before release approval. Do not start service
+until enforcement is in place.
 
-The restricted `dns: [127.0.0.1]` setting can still leave Docker's embedded
-resolver in resolv.conf. Its SERVFAIL or silent upstream failure is not denial
-evidence. On Linux, IT must also persist an explicit UDP/53 rejection in each
-gateway and door network namespace, including loopback/Docker resolver traffic.
-For each inspected container, once its namespace exists and before diagnostics
-or cutover, apply the equivalent of:
+Both profiles set the gateway and door's sole DNS upstream to `127.0.0.1`.
+On user-defined Docker networks, `/etc/resolv.conf` can name Docker's embedded
+resolver, `127.0.0.11`, which returns SERVFAIL when that upstream is closed.
+The launcher inspects **each namespace owner's** `HostConfig.Dns`, requires exactly
+`["127.0.0.1"]`, and passes that inspected upstream into its namespace probe.
+A complete matching SERVFAIL from `127.0.0.11` counts only when a separate
+connected-UDP query from that same namespace to the configured upstream on port
+53 receives kernel ECONNREFUSED (ICMP port unreachable) or EACCES (administrative
+prohibition). A DNS answer from the upstream, silent loss, bare send permission
+error, or host/network routing failure cannot corroborate it. The loopback
+refusal shows the embedded resolver's only configured upstream is closed; it is
+not evidence of host forwarding enforcement. No per-container namespace root
+step, firewall mutation or restart watcher is required.
 
-```sh
-# Obtain the PID locally from docker inspect for the selected gateway/door.
-nsenter --net=/proc/<container-pid>/ns/net iptables -I OUTPUT -p udp -m conntrack --ctdir ORIGINAL --ctorigdstport 53 -j REJECT --reject-with icmp-port-unreachable
-# If IPv6 is enabled:
-nsenter --net=/proc/<container-pid>/ns/net ip6tables -I OUTPUT -p udp -m conntrack --ctdir ORIGINAL --ctorigdstport 53 -j REJECT --reject-with icmp6-adm-prohibited
-```
-
-These are explicit host-admin actions; helpers retain zero capabilities and no
-host sockets or mounts, and preflight only reads evidence. Reapply the rules
-whenever a container network namespace is recreated, using the site's persistent
-host policy. Match the original destination port because Docker may DNAT its
-embedded resolver's port before the OUTPUT filter runs. Gateway AIM DNS
-resolution remains in the allow-only CONNECT proxy;
-the ACME profile resolves through its separate CA proxy. Neither namespace needs
-direct UDP DNS. Docker Desktop needs equivalent enforcement at its Linux network
-boundary before these probes can pass. V1 must verify rule persistence and both
-profiles after recreation; a restricted resolver setting alone is insufficient.
+The evidence path is the same on Linux Engine and Docker Desktop/WSL2: an
+unprivileged helper joins the inspected gateway or door network namespace,
+queries the embedded resolver, and queries that namespace's loopback upstream.
+Closure of loopback port 53 normally supplies its own kernel refusal; the host
+REJECT rules above supply refusal/prohibition for probes that cross the ingress
+bridge. Gateway AIM DNS resolution stays in the allow-only CONNECT proxy;
+ACME resolution stays in its separate CA proxy. Neither namespace needs direct
+UDP DNS. Every public/helper UDP target is still probed independently, so the
+embedded-resolver fallback does not replace host-boundary UDP coverage.
+V1 must demonstrate both pass markers on a clean Linux host with only the host
+rules, repeat after gateway/door recreation, and repeat on Windows Docker Desktop.
+Those full-kit/restart receipts remain **UNVERIFIED**; offline fixtures do not
+certify them. Keep helpers at UID 65532 with zero capabilities and no host sockets.
 
 Both profiles need external `curl` reachability on host 443 and negative direct
-TCP/DNS tests from the actual door namespace. `--start-probes` requires both
-`--gateway-container` and `--door-container`; it checks that the signed door is
+TCP/DNS tests from the actual door namespace. `--start-probes` requires
+`--gateway-container`, `--door-container` and `--door-hostname <stable-hostname>`
+in both manual and ACME modes; it checks that the signed door is
 running on the gateway network, then joins each namespace separately. Reports
 record the door as running and the unavailable tunnel as unselected. An absent
 helper is never a denial receipt. On the already-inspected door, refusal of a
 closed listener on 3128/8080 proves that listener unavailable. Port 8443 must
 complete a TLS handshake and present a server certificate (certificate trust is not required
-for this protocol check). Attribution assumes that `172.30.196.4` remains the
+for this protocol check). It connects to `172.30.196.4:8443` while sending the
+configured door hostname as TLS SNI; an IP literal would omit SNI and can prevent
+Caddy from selecting the hostname-only certificate. The launcher requires the
+inspected door's `DOOR_HOSTNAME` to match the selected hostname. Attribution assumes that `172.30.196.4` remains the
 address of the door inspected at preflight and that traffic is not redirected
 between inspection and the probe. The 8443 check proves denial only for that
 inspected address under this assumption; it does not authenticate the door's
 identity. Certificate pinning is not part of this protocol check. CONNECT is then
 sent inside TLS: a final non-2xx HTTP response or a clean TLS close before any
-response bytes proves denial.
+response bytes proves denial. The ACME listener has an explicit 403 fallback
+for unmatched authorities; otherwise Caddy can return an empty default 200 for
+a forbidden CONNECT host without opening a tunnel, blocking the diagnostic.
 Every response must have a strict HTTP/1.0 or HTTP/1.1 status line and a complete
 CRLF-terminated header section with valid token field names and field values,
 limited to 64 fields and 4096 header bytes per response. Framing must also be
@@ -255,18 +274,24 @@ that exact target. A matching route, unreadable/malformed route table, other
 routing error, timeout, reset or other transport failure remains inconclusive.
 DNS probes require a complete, matching standard response from the queried peer,
 with the expected transaction ID and question. NXDOMAIN or REFUSED without
-answers, or NOERROR/NODATA with an IN SOA in the authority section, proves DNS
-denial. A referral (NS authority without SOA) or an empty NOERROR reply is
+answers, or NOERROR/NODATA with an IN SOA in the authority section whose owner
+equals the query name or an ancestor at a DNS label boundary (including root),
+proves DNS denial. An unrelated zone's SOA is inconclusive. A referral (NS authority without SOA) or an empty NOERROR reply is
 inconclusive. A matching positive A answer
 (including a CNAME chain) fails the negative check. Malformed, truncated, unrelated
 or unsupported DNS replies are inconclusive. An explicit connected-UDP refusal
-or an ICMP unreachable received after sending the query also proves denial.
+or administrative prohibition received after sending the query also proves denial.
+Post-send EHOSTUNREACH/ENETUNREACH are inconclusive: a router with a dead uplink
+can produce them without an isolation rule.
 Corroborated kernel no-route evidence as above also proves denial. Timeouts
 and other transport failures remain inconclusive. Every nameserver
 entry in resolv.conf is tested, including IPv6 and scoped IPv6 addresses, using
 its address family. An invalid or unprobeable entry blocks the namespace pass.
-Plaintext CONNECT probes require a complete, valid final non-2xx response (or,
-for inspected door listeners only, an explicit connection refusal).
+The allow-only Squid proxy requires a complete, valid final 403/405/407 for
+denial; 3xx, 5xx and other non-2xx responses are inconclusive because they can
+reflect attempted forwarding. Inspected door plaintext listeners retain their
+reviewed semantics: an explicit connection refusal or a complete valid final
+non-2xx response proves denial. All CONNECT 2xx responses fail the negative check.
 V2 must add explicit connector presence and its own namespace tests before enabling that optional profile. Denial probes
 are diagnostic coverage, not a proof of all firewall rules. V1 must also test
 host/daemon restart, ingress and persistent outbound enforcement, including
@@ -349,7 +374,8 @@ python3 scripts/check-install-kit.py --compose-action config \
   --manifest /local/manifest.json --bundle /local/manifest.sigstore.json \
   --release-tag v0.0.0-c0 --state-volume legacy_aim-gateway-state \
   --source-folder /local/export --gateway-config /local/gateway.toml \
-  --certificate /local/public-certificate.pem --private-key /local/server.key
+  --certificate /local/public-certificate.pem --private-key /local/server.key \
+  --door-hostname data.example.org
 # Use the identical arguments with --compose-action up for explicit startup.
 # No pull is performed. Inspect config output locally; do not share private paths.
 python3 -m unittest discover -s scripts -p test_install_kit.py
@@ -365,7 +391,7 @@ sh install-kit/preflight.sh --report --check-state-write --state-volume legacy_a
 sh install-kit/preflight.sh --report --start-probes \
   --manifest /local/manifest.json --bundle /local/manifest.sigstore.json \
   --release-tag v0.0.0-c0 --gateway-container isolated-test-gateway \
-  --door-container isolated-test-door
+  --door-container isolated-test-door --door-hostname data.example.org
 ```
 
 The probe shares `--network container:<actual-gateway>` and keeps UID 65532,

@@ -19,3 +19,8 @@
     header Referrer-Policy "no-referrer"
     reverse_proxy 172.30.196.2:8080
 }
+# Refuse unmatched authorities, including CONNECT to a forbidden host. Without
+# this fallback Caddy's empty route can return 200 despite opening no tunnel.
+:8443 {
+    respond 403
+}

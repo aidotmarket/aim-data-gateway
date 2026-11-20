@@ -87,6 +87,7 @@ MANUAL_DOOR = helper("${TLS_PROXY_IMAGE:?A signed helper image pin is required}"
      "${TLS_PRIVATE_KEY:?Choose the protected private key}:/certs/server.key:ro"],
     {"gateway": {"ipv4_address": "172.30.196.4"}, "door-ingress": {}},
     dns=["127.0.0.1"], ports=["443:8443"],
+    environment={"DOOR_HOSTNAME": "${DOOR_HOSTNAME:?Select a stable DNS-only hostname}"},
     tmpfs=["/config:rw,noexec,nosuid,size=8m,uid=65532,gid=65532", "/data:rw,noexec,nosuid,size=8m,uid=65532,gid=65532"])
 ACME_DOOR = dict(MANUAL_DOOR,
     volumes=["./own-https/Caddyfile.acme:/etc/caddy/Caddyfile:ro", "acme-certificates:/data"],
@@ -185,6 +186,9 @@ http_access deny all
     header Referrer-Policy "no-referrer"
     reverse_proxy 172.30.196.2:8080
 }
+:8443 {
+    respond 403
+}
 '''),
     "install-kit/cloudflare-named/config.yaml": directives('''
 tunnel: 00000000-0000-0000-0000-000000000000
@@ -262,6 +266,17 @@ def local_file(value):
     return str(Path(value).resolve())
 
 
+def require_door_hostname(value):
+    valid = value and len(value) <= 253 and re.fullmatch(
+        r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+", value)
+    try:
+        ipaddress.ip_address(value)
+        valid = False  # An IP literal would omit TLS SNI.
+    except ValueError:
+        pass
+    require(valid, "Select a stable DNS-only hostname for the HTTPS door.")
+
+
 def pinned_compose(args, root=None):
     root = root or ROOT
     # Verify before Docker inspection or config generation. No caller image substitutions.
@@ -277,12 +292,12 @@ def pinned_compose(args, root=None):
     own = template(root / ("install-kit/own-https/compose.acme.yaml" if acme else "install-kit/own-https/compose.yaml"))
     document["services"].update(own["services"])
     document["networks"].update(own["networks"])
+    require_door_hostname(args.door_hostname)
+    document["services"]["https-door"]["environment"]["DOOR_HOSTNAME"] = args.door_hostname
     if acme:
-        require(args.door_hostname and re.fullmatch(r"[a-z0-9]+(?:[.-][a-z0-9]+)+", args.door_hostname), "Select a stable DNS-only hostname.")
         document["volumes"].update(own["volumes"])
         require(args.acme_state_volume != volume, "Certificate storage must be separate from the paired gateway storage.")
         document["volumes"]["acme-certificates"]["name"] = existing_volume(args.acme_state_volume)
-        document["services"]["https-door"]["environment"]["DOOR_HOSTNAME"] = args.door_hostname
     document["volumes"]["aim-gateway-state"]["name"] = volume
     document["services"]["aim-gateway"]["volumes"] = [
         {"type": "bind", "source": local_file(args.gateway_config), "target": "/config/gateway.toml", "read_only": True, "bind": {"create_host_path": False}},
@@ -449,6 +464,7 @@ def preflight(args):
             result("subnet_port", "fail" if conflict or listeners.stdout.strip() else "unknown", "The network or web listener may already be in use. Ask IT to compare Docker networks and host routes before starting the kit.")
     if args.start_probes:
         require(target and images is not None, "The network checks need a Linux host and verified release. Run them inside the serving Linux system after release verification.")
+        require_door_hostname(args.door_hostname)
         require(args.gateway_container and re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}", args.gateway_container), "The running gateway was not selected. Ask IT to select the isolated test gateway, then rerun the network check.")
         inspected = run(["docker", "inspect", "--format", "{{json .}}", args.gateway_container])
         require(inspected.returncode == 0, "The gateway container could not be read. Start the isolated test gateway, then rerun the check.")
@@ -489,12 +505,19 @@ def preflight(args):
                 and any(attachment["NetworkID"] == attachments[0]["NetworkID"] and attachment["IPAddress"] == "172.30.196.4"
                         for attachment in door["NetworkSettings"]["Networks"].values()),
                 "The selected HTTPS door is absent, stopped or on the wrong release or network.")
+        require(door["HostConfig"].get("Dns") == ["127.0.0.1"]
+                and "DOOR_HOSTNAME=" + args.door_hostname in door["Config"].get("Env", []),
+                "The door hostname or restricted DNS differs from the selected signed profile.")
         helpers["https-door"] = "running"
         name = "aim-c0-probe-" + uuid.uuid4().hex
-        for target_id, options, marker in ((container["Id"], [], "isolation-negative-probes:pass"),
-                                            (door["Id"], ["--door"], "door-negative-probes:pass")):
+        for owner, options, marker in ((container, [], "isolation-negative-probes:pass"),
+                                      (door, ["--door"], "door-negative-probes:pass")):
+            # DNS corroboration is bound to the inspected namespace owner's
+            # sole upstream, never inferred from the diagnostic image's DNS.
+            options += ["--door-hostname", args.door_hostname,
+                        "--dns-upstream", owner["HostConfig"]["Dns"][0]]
             try:
-                probe = run(["docker", "run", "--name", name, "--pull=never", "--network", "container:" + target_id,
+                probe = run(["docker", "run", "--name", name, "--pull=never", "--network", "container:" + owner["Id"],
                              "--user", "65532:65532", "--read-only", "--cap-drop=ALL", "--security-opt=no-new-privileges:true",
                              "--mount", "type=bind,src=" + str(ROOT / "install-kit/own-https/network-probe.py") + ",dst=/probe.py,readonly",
                              images["probe"], "python3", "-B", "/probe.py"] + options)
