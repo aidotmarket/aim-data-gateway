@@ -1,4 +1,4 @@
-# Default: manual certificate, ingress bridge without masquerade; host firewall must deny new outbound flows, no port 80, no admin API/log.
+# Default: manual certificate, ingress bridge without masquerade; host firewall must REJECT new outbound flows (TCP reset, other IP unreachable), no port 80, no admin API/log.
 {
     admin off
     auto_https off

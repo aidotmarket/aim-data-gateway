@@ -5,6 +5,8 @@ No seller mounts, control protocol, pairing, download or authorization code.
 Negative probe verdicts: True denied, False reached, None inconclusive.
 Fixed output only. Success does not establish canary correlation or readiness.
 """
+import errno
+import ipaddress
 import re
 import socket
 import ssl
@@ -19,6 +21,34 @@ def tcp(host, port):
     return socket.create_connection((host, port), timeout=TIMEOUT)
 
 
+def no_ipv4_route(host):
+    """Corroborate kernel ENETUNREACH with this namespace's read-only routes."""
+    try:
+        target = struct.unpack("<I", ipaddress.IPv4Address(host).packed)[0]
+        with open("/proc/net/route", encoding="ascii") as source:
+            if source.readline().split() != ["Iface", "Destination", "Gateway", "Flags",
+                                              "RefCnt", "Use", "Metric", "Mask", "MTU", "Window", "IRTT"]:
+                return False
+            for line in source:
+                fields = line.split()
+                if len(fields) != 11:
+                    return False
+                destination, flags, mask = (int(fields[index], 16) for index in (1, 3, 7))
+                if not all(0 <= value <= 0xffffffff for value in (destination, flags, mask)):
+                    return False
+                if flags & 1 and target & mask == destination & mask:
+                    return False
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+def kernel_no_route(error, host):
+    # A timeout, EHOSTUNREACH or an unreadable/contradictory route table cannot
+    # pass. This covers the kit's internal network with no default route.
+    return error.errno == errno.ENETUNREACH and no_ipv4_route(host)
+
+
 def tcp_denied(host, port):
     """True = denied, False = reached, None = inconclusive, as for all probes."""
     try:
@@ -26,8 +56,8 @@ def tcp_denied(host, port):
     except ConnectionRefusedError:
         # Only refusal while opening proves this destination/port unavailable.
         return True
-    except OSError:
-        return None
+    except OSError as error:
+        return True if kernel_no_route(error, host) else None
     try:
         with connection:
             return False
@@ -87,6 +117,7 @@ def dns_result(reply, query):
             return None
         offset += 4
         records = []
+        authority_soa = False
         for index in range(answers + authority + additional):
             owner, offset = dns_name(reply, offset, known)
             if offset + 10 > len(reply):
@@ -125,11 +156,14 @@ def dns_result(reply, query):
                 return None
             if index < answers:
                 records.append((owner, kind, cls, value))
+            elif index < answers + authority and kind == 6 and cls == 1:
+                authority_soa = True
             offset = end
         if offset != len(reply):
             return None
         if not answers:
-            return True  # Matching NOERROR/no-answer, NXDOMAIN or REFUSED.
+            # A referral/empty NOERROR reply is not a negative answer.
+            return True if rcode in (3, 5) or authority_soa else None
         if rcode != 0:
             return None  # An error with answer records is contradictory evidence.
         # Require an A answer for the queried name (possibly through CNAMEs).
@@ -149,15 +183,60 @@ def dns_answer(host):
     # A fixed public name with no seller/account information. One bounded query.
     query = b"\x53\x19\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x07example\x03com\x00\x00\x01\x00\x01"
     try:
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+        address = ipaddress.ip_address(host)
+        family = socket.AF_INET6 if address.version == 6 else socket.AF_INET
+        peer = (host, 53)
+        if family == socket.AF_INET6:
+            # Numeric-only resolution preserves a scoped IPv6 address's scope ID.
+            peer = socket.getaddrinfo(host, 53, family, socket.SOCK_DGRAM,
+                                      0, socket.AI_NUMERICHOST)[0][4]
+        with socket.socket(family, socket.SOCK_DGRAM) as sock:
             sock.settimeout(TIMEOUT)
             # Connected UDP also filters datagrams from unrelated source peers.
-            sock.connect((host, 53))
-            sock.send(query)
-            reply = sock.recv(513)
+            try:
+                sock.connect(peer)
+            except ConnectionRefusedError:
+                return True
+            except OSError as error:
+                return True if kernel_no_route(error, host) else None
+            try:
+                sock.send(query)
+            except ConnectionRefusedError:
+                return True
+            except OSError as error:
+                if kernel_no_route(error, host):
+                    return True
+                # A local OUTPUT REJECT may return EPERM while also queuing
+                # its ICMP error. Require that explicit receipt below; the
+                # send permission error alone cannot count as denial.
+                if error.errno not in (errno.EPERM, errno.EACCES):
+                    return None
+            try:
+                reply = sock.recv(513)
+            except ConnectionRefusedError:
+                return True
+            except OSError as error:
+                # After sending on a connected socket, these are explicit ICMP
+                # unreachable/refusal receipts for this peer, not silent loss.
+                if error.errno in (errno.ECONNREFUSED, errno.EACCES,
+                                   errno.EHOSTUNREACH, errno.ENETUNREACH):
+                    return True
+                return None
         return dns_result(reply, query)
-    except OSError:
+    except (OSError, ValueError):
         return None
+
+
+def configured_resolvers():
+    # Keep every nameserver entry, including invalid/missing addresses: an
+    # unsupported entry must become inconclusive rather than disappear.
+    resolvers = []
+    with open("/etc/resolv.conf", encoding="ascii") as source:
+        for line in source:
+            fields = re.split(r"[#;]", line, maxsplit=1)[0].split()
+            if fields and fields[0] == "nameserver":
+                resolvers.append(fields[1] if len(fields) == 2 else "")
+    return resolvers
 
 
 def response_line(sock, deadline):
@@ -328,7 +407,7 @@ def main():
     try:
         if sys.argv[1:] == ["--door"]:
             # Run in the selected door namespace, not the gateway namespace.
-            resolvers = re.findall(r"(?m)^nameserver\s+([0-9.]+)", open("/etc/resolv.conf", encoding="ascii").read())
+            resolvers = configured_resolvers()
             checks = [denied(lambda: tcp_denied("1.1.1.1", 443))]
             checks.extend(denied(lambda host=host: dns_answer(host)) for host in set(resolvers + ["1.1.1.1"]))
             if resolvers and all(value is True for value in checks):
@@ -339,7 +418,7 @@ def main():
             return 1
         if not allowed_aim_tls():
             return 1
-        resolvers = re.findall(r"(?m)^nameserver\s+([0-9.]+)", open("/etc/resolv.conf", encoding="ascii").read())
+        resolvers = configured_resolvers()
         if not resolvers:
             return 1
         checks = [denied(lambda: tcp_denied("1.1.1.1", 443)),

@@ -1,6 +1,7 @@
 # PREPARATION ONLY / UNADVERTISED until issuance, renewal and egress receipts.
 # Use compose.acme.yaml through the verified entry point only.
 # Persistent external /data; CA CONNECT through acme-proxy, no direct egress.
+# Ingress bridge host firewall: REJECT new outbound (TCP reset, other IP unreachable).
 # Never attach this profile's outbound network to the gateway.
 {
     admin off

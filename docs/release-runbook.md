@@ -155,23 +155,64 @@ handler in v0.2.4. Public DNS must be DNS-only and stable. Do not expose 8080.
 Before starting either door profile, IT must deny new outbound flows from its
 ingress bridge while allowing established replies to inbound 443. On a Linux
 Docker host using the iptables backend, identify the actual ingress bridge and
-install persistent rules equivalent to both:
+install persistent REJECT rules equivalent to the following. Insert the general
+rule first so the TCP-specific rule ends up ahead of it in each chain:
 
 ```sh
-iptables -I DOCKER-USER -i <ingress-bridge> -m conntrack --ctstate NEW -j DROP
-iptables -I INPUT -i <ingress-bridge> -m conntrack --ctstate NEW -j DROP
+iptables -I DOCKER-USER -i <ingress-bridge> -m conntrack --ctstate NEW -j REJECT --reject-with icmp-port-unreachable
+iptables -I DOCKER-USER -i <ingress-bridge> -p tcp -m conntrack --ctstate NEW -j REJECT --reject-with tcp-reset
+iptables -I INPUT -i <ingress-bridge> -m conntrack --ctstate NEW -j REJECT --reject-with icmp-port-unreachable
+iptables -I INPUT -i <ingress-bridge> -p tcp -m conntrack --ctstate NEW -j REJECT --reject-with tcp-reset
+# If IPv6 is enabled, apply the same policy there too:
+ip6tables -I DOCKER-USER -i <ingress-bridge> -m conntrack --ctstate NEW -j REJECT --reject-with icmp6-adm-prohibited
+ip6tables -I DOCKER-USER -i <ingress-bridge> -p tcp -m conntrack --ctstate NEW -j REJECT --reject-with tcp-reset
+ip6tables -I INPUT -i <ingress-bridge> -m conntrack --ctstate NEW -j REJECT --reject-with icmp6-adm-prohibited
+ip6tables -I INPUT -i <ingress-bridge> -p tcp -m conntrack --ctstate NEW -j REJECT --reject-with tcp-reset
 ```
 
 `DOCKER-USER` covers forwarded traffic; `INPUT` covers connections to the Docker
 host itself, including bridge gateway addresses and host services. Install both
 before broader accept rules and retain established replies to inbound 443.
-Apply the equivalent IPv6 policy if IPv6 is enabled. Do not substitute a public
-interface for the bridge. The gateway remains single-homed on its internal
+For an nftables backend, use equivalent bridge-scoped input/forward rules with
+`reject with tcp reset` for TCP and `reject with icmp type port-unreachable` /
+`reject with icmpv6 type admin-prohibited` for other IPv4/IPv6 traffic.
+REJECT supplies positive, attributable evidence: TCP connection refusal or an
+ICMP unreachable received by the connected UDP probe. A silent DROP cannot
+satisfy these diagnostics; an uncorrelated timeout remains inconclusive and
+blocks setup. Gate 2 §8 restricts destinations but does not require silent DROP:
+“Reverse-proxy outbound is only the configured ACME directory/service endpoints
+and required DNS resolver, explicitly pinned/configured per release”.
+Do not substitute a public interface for the bridge. The gateway remains single-homed on its internal
 network; the door can reach it there. This host rule is an explicit IT action,
 not performed by preflight. No-masquerade alone does not deny routed private
 networks. On Docker Desktop, the rule belongs in the Docker network boundary,
 not just the Windows host firewall; that implementation and persistence remain
 V1 acceptance work. Do not start service until enforcement is in place.
+
+The restricted `dns: [127.0.0.1]` setting can still leave Docker's embedded
+resolver in resolv.conf. Its SERVFAIL or silent upstream failure is not denial
+evidence. On Linux, IT must also persist an explicit UDP/53 rejection in each
+gateway and door network namespace, including loopback/Docker resolver traffic.
+For each inspected container, once its namespace exists and before diagnostics
+or cutover, apply the equivalent of:
+
+```sh
+# Obtain the PID locally from docker inspect for the selected gateway/door.
+nsenter --net=/proc/<container-pid>/ns/net iptables -I OUTPUT -p udp -m conntrack --ctdir ORIGINAL --ctorigdstport 53 -j REJECT --reject-with icmp-port-unreachable
+# If IPv6 is enabled:
+nsenter --net=/proc/<container-pid>/ns/net ip6tables -I OUTPUT -p udp -m conntrack --ctdir ORIGINAL --ctorigdstport 53 -j REJECT --reject-with icmp6-adm-prohibited
+```
+
+These are explicit host-admin actions; helpers retain zero capabilities and no
+host sockets or mounts, and preflight only reads evidence. Reapply the rules
+whenever a container network namespace is recreated, using the site's persistent
+host policy. Match the original destination port because Docker may DNAT its
+embedded resolver's port before the OUTPUT filter runs. Gateway AIM DNS
+resolution remains in the allow-only CONNECT proxy;
+the ACME profile resolves through its separate CA proxy. Neither namespace needs
+direct UDP DNS. Docker Desktop needs equivalent enforcement at its Linux network
+boundary before these probes can pass. V1 must verify rule persistence and both
+profiles after recreation; a restricted resolver setting alone is insufficient.
 
 Both profiles need external `curl` reachability on host 443 and negative direct
 TCP/DNS tests from the actual door namespace. `--start-probes` requires both
@@ -206,13 +247,24 @@ closes, and malformed or incomplete replies remain inconclusive; every CONNECT
 2xx on any forbidden path fails the negative check. All negative probes use
 `True` for denied, `False` for reached, and `None` for inconclusive; every required
 probe must return exactly `True` before either namespace prints a pass marker.
-Direct TCP probes in both namespaces require an explicit connection refusal;
-timeouts, resets, routing errors and other transport failures are inconclusive.
+Direct TCP probes in both namespaces require an explicit connection refusal.
+The gateway's internal network has no default internet route, so direct TCP
+and DNS can instead produce kernel ENETUNREACH: this counts only when the
+same namespace's read-only `/proc/net/route` also confirms no IPv4 route to
+that exact target. A matching route, unreadable/malformed route table, other
+routing error, timeout, reset or other transport failure remains inconclusive.
 DNS probes require a complete, matching standard response from the queried peer,
-with the expected transaction ID and question. NOERROR with no answers, NXDOMAIN
-or REFUSED without answers proves DNS denial; a matching positive A answer
+with the expected transaction ID and question. NXDOMAIN or REFUSED without
+answers, or NOERROR/NODATA with an IN SOA in the authority section, proves DNS
+denial. A referral (NS authority without SOA) or an empty NOERROR reply is
+inconclusive. A matching positive A answer
 (including a CNAME chain) fails the negative check. Malformed, truncated, unrelated
-or unsupported DNS replies and all DNS transport errors are inconclusive.
+or unsupported DNS replies are inconclusive. An explicit connected-UDP refusal
+or an ICMP unreachable received after sending the query also proves denial.
+Corroborated kernel no-route evidence as above also proves denial. Timeouts
+and other transport failures remain inconclusive. Every nameserver
+entry in resolv.conf is tested, including IPv6 and scoped IPv6 addresses, using
+its address family. An invalid or unprobeable entry blocks the namespace pass.
 Plaintext CONNECT probes require a complete, valid final non-2xx response (or,
 for inspected door listeners only, an explicit connection refusal).
 V2 must add explicit connector presence and its own namespace tests before enabling that optional profile. Denial probes

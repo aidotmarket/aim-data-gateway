@@ -855,8 +855,10 @@ class ConnectStatusContracts(unittest.TestCase):
 class NegativeEvidenceContracts(unittest.TestCase):
     question = b"\x07example\x03com\x00\x00\x01\x00\x01"
 
-    def packet(self, flags=0x8180, answers=b"", count=0, question=None):
-        return probe.struct.pack("!6H", 0x5319, flags, 1, count, 0, 0) + (self.question if question is None else question) + answers
+    def packet(self, flags=0x8180, answers=b"", count=0, question=None,
+               authority=b"", authority_count=0, additional=b"", additional_count=0):
+        return (probe.struct.pack("!6H", 0x5319, flags, 1, count, authority_count, additional_count)
+                + (self.question if question is None else question) + answers + authority + additional)
 
     def record(self, kind=1, value=b"\x01\x02\x03\x04", owner=b"\xc0\x0c"):
         return owner + probe.struct.pack("!HHIH", kind, 1, 60, len(value)) + value
@@ -908,7 +910,7 @@ class NegativeEvidenceContracts(unittest.TestCase):
                 self.assertIsNone(self.answer(packet))
 
     def test_dns_matching_negative_and_positive_evidence(self):
-        for flags in (0x8180, 0x8183, 0x8185):
+        for flags in (0x8183, 0x8185):
             with self.subTest(flags=flags):
                 self.assertIs(self.answer(self.packet(flags=flags)), True)
         positive = self.packet(answers=self.record(), count=1)
@@ -916,24 +918,122 @@ class NegativeEvidenceContracts(unittest.TestCase):
         alias = b"\x05alias\x03com\x00"
         chain = self.record(kind=5, value=alias) + self.record(owner=alias)
         self.assertIs(self.answer(self.packet(answers=chain, count=2)), False)
-        # A complete negative with a parsed SOA authority record is also valid.
+        # NODATA requires a parsed SOA in authority, not just zero answers.
         soa = self.record(kind=6, value=b"\xc0\x0c\xc0\x0c" + b"\x00" * 20)
-        packet = bytearray(self.packet(flags=0x8183) + soa)
-        packet[8:10] = b"\x00\x01"
-        self.assertIs(self.answer(bytes(packet)), True)
+        for flags in (0x8180, 0x8183, 0x8185):
+            self.assertIs(self.answer(self.packet(flags=flags, authority=soa, authority_count=1)), True)
+        self.assertIsNone(self.answer(self.packet()))
+        self.assertIsNone(self.answer(self.packet(additional=soa, additional_count=1)))
+
+    def referral(self):
+        ns = self.record(kind=2, value=b"\x02ns\x03com\x00", owner=b"\x03com\x00")
+        return self.packet(authority=ns, authority_count=1)
+
+    def test_dns_referral_is_inconclusive(self):
+        self.assertIsNone(self.answer(self.referral()))
 
     def test_every_dns_target_requires_positive_denial_before_namespace_pass(self):
         for argv, hosts, marker in ((["probe.py", "--door"], ["127.0.0.1", "1.1.1.1"], "door-negative-probes:pass\n"),
                                     (["probe.py"], ["127.0.0.1", "1.1.1.1", "172.30.196.3", "172.30.196.4"], "isolation-negative-probes:pass\n")):
             for bad_host in hosts:
-                for packet in [self.packet(), b"x", b"\x00\x00" + self.packet()[2:], self.packet(answers=self.record(), count=1)]:
+                negative = self.packet(flags=0x8185)
+                soa = self.record(kind=6, value=b"\xc0\x0c\xc0\x0c" + b"\x00" * 20)
+                for packet in [negative, self.packet(flags=0x8183), self.packet(authority=soa, authority_count=1),
+                               self.packet(), self.referral(), b"x", b"\x00\x00" + negative[2:],
+                               self.packet(answers=self.record(), count=1)]:
                     sock = unittest.mock.MagicMock()
                     sock.__enter__.return_value = sock
-                    sock.recv.side_effect = lambda size: packet if sock.connect.call_args.args[0][0] == bad_host else self.packet()
+                    sock.recv.side_effect = lambda size: packet if sock.connect.call_args.args[0][0] == bad_host else negative
                     with self.subTest(argv=argv, host=bad_host, packet=packet), patch.object(probe.sys, "argv", argv), patch("builtins.open", unittest.mock.mock_open(read_data="nameserver 127.0.0.1\n")), patch.object(probe, "allowed_aim_tls", return_value=True), patch.object(probe, "tcp_denied", return_value=True), patch.object(probe, "connect", return_value=True), patch.object(probe.socket, "socket", return_value=sock), contextlib.redirect_stdout(io.StringIO()) as output:
-                        passes = packet == self.packet()
+                        passes = packet in (negative, self.packet(flags=0x8183),
+                                            self.packet(authority=soa, authority_count=1))
                         self.assertEqual(probe.main(), 0 if passes else 1)
                         self.assertEqual(output.getvalue(), marker if passes else "")
+
+    def test_mixed_resolvers_are_all_tested_and_unknown_suppresses_both_markers(self):
+        for argv in (["probe.py"], ["probe.py", "--door"]):
+            for extra in ("fd00::53", "fe80::53%eth0", "not-an-address", ""):
+                for verdict in (True, None):
+                    resolv = "  nameserver 127.0.0.1 # local\n\tnameserver " + extra + "; other\n"
+                    with self.subTest(argv=argv, extra=extra, verdict=verdict), patch.object(probe.sys, "argv", argv), patch("builtins.open", unittest.mock.mock_open(read_data=resolv)), patch.object(probe, "allowed_aim_tls", return_value=True), patch.object(probe, "tcp_denied", return_value=True), patch.object(probe, "connect", return_value=True), patch.object(probe, "dns_answer", side_effect=lambda host: verdict if host == extra else True) as dns, contextlib.redirect_stdout(io.StringIO()) as output:
+                        self.assertEqual(probe.main(), 0 if verdict is True else 1)
+                        tested = [call.args[0] for call in dns.call_args_list]
+                        self.assertIn("127.0.0.1", tested)
+                        self.assertIn(extra, tested)
+                        self.assertEqual(bool(output.getvalue()), verdict is True)
+
+    def test_dns_address_family_and_scoped_ipv6_peer(self):
+        for host, family, peer in (("127.0.0.1", probe.socket.AF_INET, ("127.0.0.1", 53)),
+                                   ("fd00::53", probe.socket.AF_INET6, ("fd00::53", 53, 0, 0)),
+                                   ("fe80::53%eth0", probe.socket.AF_INET6, ("fe80::53", 53, 0, 7))):
+            sock = unittest.mock.MagicMock()
+            sock.__enter__.return_value = sock
+            sock.recv.return_value = self.packet(flags=0x8185)
+            with self.subTest(host=host), patch.object(probe.socket, "socket", return_value=sock) as create, patch.object(probe.socket, "getaddrinfo", return_value=[(family, probe.socket.SOCK_DGRAM, 17, "", peer)]) as resolve:
+                self.assertIs(probe.dns_answer(host), True)
+                create.assert_called_once_with(family, probe.socket.SOCK_DGRAM)
+                sock.connect.assert_called_once_with(peer)
+                if family == probe.socket.AF_INET6:
+                    resolve.assert_called_once_with(host, 53, family, probe.socket.SOCK_DGRAM, 0, probe.socket.AI_NUMERICHOST)
+                else:
+                    resolve.assert_not_called()
+        with patch.object(probe.socket, "socket") as create:
+            for host in ("", "not-an-address", "127.0.0.1.invalid"):
+                self.assertIsNone(probe.dns_answer(host))
+            create.assert_not_called()
+        with patch.object(probe.socket, "getaddrinfo", side_effect=OSError), patch.object(probe.socket, "socket") as create:
+            self.assertIsNone(probe.dns_answer("fe80::53%absent"))
+            create.assert_not_called()
+
+    def test_reject_receipts_pass_but_silent_drop_blocks_both_namespaces(self):
+        for argv in (["probe.py"], ["probe.py", "--door"]):
+            for failure, expected in ((ConnectionRefusedError(), True),
+                                      (OSError(probe.errno.EACCES, "ICMPv6 prohibited"), True),
+                                      (OSError(probe.errno.EHOSTUNREACH, "ICMP unreachable"), True),
+                                      (TimeoutError(), False), (ConnectionResetError(), False)):
+                sock = unittest.mock.MagicMock()
+                sock.__enter__.return_value = sock
+                sock.recv.side_effect = failure
+                with self.subTest(argv=argv, failure=failure), patch.object(probe.sys, "argv", argv), patch("builtins.open", unittest.mock.mock_open(read_data="nameserver 127.0.0.1\n")), patch.object(probe, "allowed_aim_tls", return_value=True), patch.object(probe, "tcp", side_effect=ConnectionRefusedError), patch.object(probe, "connect", return_value=True), patch.object(probe.socket, "socket", return_value=sock), contextlib.redirect_stdout(io.StringIO()) as output:
+                    self.assertEqual(probe.main(), 0 if expected else 1)
+                    self.assertEqual(bool(output.getvalue()), expected)
+
+    def test_local_dns_reject_send_error_needs_queued_icmp_receipt(self):
+        for send_code in (probe.errno.EPERM, probe.errno.EACCES):
+            for receipt, expected in ((ConnectionRefusedError(), True),
+                                      (OSError(probe.errno.EACCES, "ICMPv6 prohibited"), True),
+                                      (TimeoutError(), None)):
+                sock = unittest.mock.MagicMock()
+                sock.__enter__.return_value = sock
+                sock.send.side_effect = OSError(send_code, "local OUTPUT reject")
+                sock.recv.side_effect = receipt
+                with self.subTest(send_code=send_code, receipt=receipt), patch.object(probe.socket, "socket", return_value=sock):
+                    self.assertIs(probe.dns_answer("127.0.0.11"), expected)
+                    sock.recv.assert_called_once_with(513)
+
+    def test_internal_no_route_requires_kernel_error_and_matching_namespace_routes(self):
+        header = "Iface Destination Gateway Flags RefCnt Use Metric Mask MTU Window IRTT\n"
+        connected = "eth0 00C41EAC 00000000 0001 0 0 0 F0FFFFFF 0 0 0\n"
+        default = "eth0 00000000 01C41EAC 0003 0 0 0 00000000 0 0 0\n"
+        target_route = "eth0 01010101 00000000 0001 0 0 0 FFFFFFFF 0 0 0\n"
+        cases = [(header + connected, True), (header + connected + default, False),
+                 (header + connected + target_route, False), ("garbage\n", False),
+                 (header + "eth0 bad\n", False),
+                 (header + connected.replace("00C41EAC", "FFFFFFFFF"), False)]
+        for routes, expected in cases:
+            for code in (probe.errno.ENETUNREACH, probe.errno.EHOSTUNREACH, probe.errno.ETIMEDOUT):
+                failure = OSError(code, "fixture")
+                verdict = True if expected and code == probe.errno.ENETUNREACH else None
+                sock = unittest.mock.MagicMock()
+                sock.__enter__.return_value = sock
+                sock.send.side_effect = failure
+                with self.subTest(routes=routes, code=code), patch("builtins.open", unittest.mock.mock_open(read_data=routes)) as read, patch.object(probe, "tcp", side_effect=failure), patch.object(probe.socket, "socket", return_value=sock):
+                    self.assertIs(probe.tcp_denied("1.1.1.1", 443), verdict)
+                    self.assertIs(probe.dns_answer("1.1.1.1"), verdict)
+                    if code == probe.errno.ENETUNREACH:
+                        read.assert_called_with("/proc/net/route", encoding="ascii")
+        with patch("builtins.open", side_effect=PermissionError), patch.object(probe, "tcp", side_effect=OSError(probe.errno.ENETUNREACH, "fixture")):
+            self.assertIsNone(probe.tcp_denied("1.1.1.1", 443))
 
     def test_transport_errors_and_non_boolean_results_never_become_denial(self):
         for failure in (TimeoutError, ConnectionResetError, ConnectionRefusedError, OSError, ValueError):
