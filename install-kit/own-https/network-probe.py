@@ -53,33 +53,46 @@ def status_line(sock, clean_close=False, deadline=None):
         return 0 if clean_close else None
     if response is None:
         return None
-    match = re.fullmatch(rb"HTTP/1\.[01][ \t]+([0-9]{3})(?:[ \t]+[^\r\n]*)?\r?\n", response)
+    match = re.fullmatch(rb"HTTP/1\.[01] ([0-9]{3}) [\t\x20-\x7e\x80-\xff]*\r\n", response)
     if not match or not 100 <= int(match[1]) <= 599:
         return None
     return int(match[1])
 
 
-def tls_final_status(sock):
+def final_status(sock, clean_close=False):
     deadline = time.monotonic() + TIMEOUT
     for informational in range(6):
-        status = status_line(sock, clean_close=informational == 0, deadline=deadline)
-        if status is None or not 100 <= status < 200:
+        status = status_line(sock, clean_close=clean_close and informational == 0,
+                             deadline=deadline)
+        if status is None or status == 0:
             return status
-        if informational == 5:
+        # 101 switches protocols; no subsequent HTTP final response is valid.
+        if status == 101 or (status < 200 and informational == 5):
             return None
-        # Consume the informational headers before reading the next status.
-        # Bound both the headers and the number of informational responses.
+        # Validate every response's complete header section before classifying it.
+        # Per-response byte/count bounds and one deadline also bound 1xx chains.
         header_bytes = 0
-        while header_bytes < 4096:
+        for field_count in range(65):  # At most 64 fields, then the terminating CRLF.
             line = response_line(sock, deadline)
             if not line:
                 return None
             header_bytes += len(line)
-            if line in (b"\r\n", b"\n"):
+            if header_bytes > 4096:
+                return None
+            if line == b"\r\n":
                 break
+            if field_count == 64 or not re.fullmatch(
+                    rb"[!#$%&'*+.^_`|~0-9A-Za-z-]+:[\t\x20-\x7e\x80-\xff]*\r\n", line):
+                return None
         else:
             return None
+        if status >= 200:
+            return status
     return None
+
+
+def tls_final_status(sock):
+    return final_status(sock, clean_close=True)
 
 
 def connect_tls_door(host, port, destination):
@@ -119,7 +132,7 @@ def connect(host, port, destination, inspected_door=False):
     try:
         with connection as sock:
             sock.sendall(("CONNECT " + destination + " HTTP/1.1\r\nHost: " + destination + "\r\n\r\n").encode("ascii"))
-            status = status_line(sock)
+            status = final_status(sock)
             if status is None:
                 return None
             # Established plaintext replies still need an explicit rejection.
@@ -143,13 +156,8 @@ def denied(action):
 def allowed_aim_tls():
     with tcp("172.30.196.3", 3128) as sock:
         sock.sendall(b"CONNECT api.ai.market:443 HTTP/1.1\r\nHost: api.ai.market:443\r\n\r\n")
-        response = bytearray()
-        while b"\r\n\r\n" not in response and len(response) < 4096:
-            block = sock.recv(1)
-            if not block:
-                return False
-            response.extend(block)
-        if not re.match(rb"HTTP/1\.[01] 2[0-9]{2} ", response):
+        status = final_status(sock)
+        if status is None or not 200 <= status < 300:
             return False
         # System trust and hostname checks stay enabled. No inspection bypass.
         with ssl.create_default_context().wrap_socket(sock, server_hostname="api.ai.market"):

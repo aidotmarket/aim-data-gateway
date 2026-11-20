@@ -183,9 +183,14 @@ closed listener on 3128/8080 proves that listener unavailable. Port 8443 must
 complete a TLS handshake and present a server certificate (certificate trust is not required
 for this protocol check). CONNECT is then sent inside TLS: a final non-2xx HTTP
 response or a clean TLS close before any response bytes proves denial.
-Informational 1xx responses are read through to a final status under the same
-read deadline, with at most five informational responses accepted. A close or
-timeout after a 1xx without a final status, or exceeding that limit, is inconclusive.
+Every response must have a strict HTTP/1.0 or HTTP/1.1 status line and a complete
+CRLF-terminated header section with valid token field names and field values,
+limited to 64 fields and 4096 header bytes per response. This validation applies
+to informational and final responses on both plaintext and TLS CONNECT paths,
+including the allowed route. Informational 1xx responses are read through to a
+final status under the same read deadline, with at most five informational
+responses accepted. Protocol switching (101) is inconclusive. A close or timeout
+after a 1xx without a final status, or exceeding that limit, is inconclusive.
 EOF/reset before the handshake, missing certificates, timeouts, unclean TLS
 closes, and malformed or incomplete replies remain inconclusive; every CONNECT
 2xx on any forbidden path fails the negative check. V2 must add explicit

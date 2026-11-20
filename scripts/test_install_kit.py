@@ -669,7 +669,7 @@ class ConnectStatusContracts(unittest.TestCase):
                             parent.assertTrue(self.tls, "CONNECT must be sent inside TLS")
                             self.getpeercert.assert_called_once_with(binary_form=True)
                         code = status if opened and target == opened[:2] and opened[2] in data else (denial if port == 8443 else 403)
-                        blocks = [] if code is None else [b"HTTP/", ("1.1 %d Reply\r\n" % code).encode()]
+                        blocks = [] if code is None else [b"HTTP/", ("1.1 %d Reply\r\n\r\n" % code).encode()]
                         self.sock = parent.socket(blocks)
                     def settimeout(self, value): pass
                     def recv(self, length): return self.sock.recv(length)
@@ -690,7 +690,7 @@ class ConnectStatusContracts(unittest.TestCase):
 
     def test_tls_door_clean_close_and_final_non_2xx_are_denial(self):
         for code in [None] + list(range(300, 600)):
-            blocks = [] if code is None else [("HTTP/1.1 %d Reply\r\n" % code).encode()]
+            blocks = [] if code is None else [("HTTP/1.1 %d Reply\r\n\r\n" % code).encode()]
             with self.subTest(code=code), self.tls_context(), patch.object(probe, "tcp", return_value=self.socket(blocks)):
                 self.assertIs(probe.connect("172.30.196.4", 8443, "example.com:443", inspected_door=True), False)
 
@@ -698,16 +698,68 @@ class ConnectStatusContracts(unittest.TestCase):
         hints = b"HTTP/1.1 103 Early Hints\r\nLink: </example>\r\n\r\n"
         continue_response = b"HTTP/1.1 100 Continue\r\n\r\n"
         cases = [
-            (hints + b"HTTP/1.1 200 Connection Established\r\n", False),
-            (continue_response + b"HTTP/1.1 403 Forbidden\r\n", True),
+            (hints + b"HTTP/1.1 200 Connection Established\r\n\r\n", False),
+            (continue_response + b"HTTP/1.1 403 Forbidden\r\n\r\n", True),
             (hints, None),
             (hints + b"HTTP/1.1 200 Partial", None),
-            (continue_response * 5 + b"HTTP/1.1 200 Connected\r\n", False),
-            (continue_response * 6 + b"HTTP/1.1 403 Forbidden\r\n", None),
+            (continue_response * 5 + b"HTTP/1.1 200 Connected\r\n\r\n", False),
+            (continue_response * 6 + b"HTTP/1.1 403 Forbidden\r\n\r\n", None),
         ]
         for reply, expected_denial in cases:
             with self.subTest(reply=reply), self.tls_context(), patch.object(probe, "tcp", return_value=self.socket([reply])):
                 self.assertIs(probe.denied(lambda: probe.connect("172.30.196.4", 8443, "example.com:443", inspected_door=True)), expected_denial)
+
+    def test_all_connect_paths_validate_every_response(self):
+        hints = b"HTTP/1.1 103 Early Hints\r\n"
+        malformed = [
+            b"invalid header\r\n", b"bad name: value\r\n", b": value\r\n",
+            b"Name : value\r\n", b" folded: value\r\n", b"Name: bad\x00value\r\n",
+            b"Name: bad\x7fvalue\r\n", b"Name: value\n", b"\n",
+            b"Name: " + b"x" * 4090 + b"\r\n", b"X: y\r\n" * 65,
+        ]
+        for code in (200, 403):
+            final = ("HTTP/1.1 %d Reply\r\n" % code).encode()
+            replies = [hints + header + b"\r\n" + final + b"\r\n" for header in malformed]
+            replies += [final + header + b"\r\n" for header in malformed]
+            replies += [final, hints + b"\r\n" + final]
+            for status in (b"HTTP/1.1\t403 Bad\r\n", b"HTTP/1.1  403 Bad\r\n",
+                           b"HTTP/1.1 403 Bad\n", b"HTTP/1.1 403 Bad\x00\r\n",
+                           b"HTTP/1.2 403 Bad\r\n", b"HTTP/1.1 099 Bad\r\n",
+                           b"HTTP/1.1 101 Switching Protocols\r\n"):
+                replies += [status + b"\r\n" + final + b"\r\n",
+                            hints + b"\r\n" + status + b"\r\n"]
+            for reply in replies:
+                with self.subTest(code=code, reply=reply[:80]):
+                    self.assertIsNone(self.response([reply]))
+                    with self.tls_context(), patch.object(probe, "tcp", return_value=self.socket([reply])):
+                        self.assertIsNone(probe.denied(lambda: probe.connect(
+                            "172.30.196.4", 8443, "example.com:443", inspected_door=True)))
+                    with patch.object(probe, "tcp", return_value=self.socket([reply])), patch.object(probe.ssl, "create_default_context") as context:
+                        self.assertFalse(probe.allowed_aim_tls())
+                        context.assert_not_called()
+
+    def test_complete_valid_headers_and_informational_plaintext(self):
+        hints = b"HTTP/1.1 100 Continue\r\n\r\n"
+        headers = b"X-Token!#$%&'*+.^_`|~: \tvalue\xff\r\nEmpty:\r\n\r\n"
+        for code, expected in ((200, True), (403, False)):
+            reply = hints + ("HTTP/1.0 %d Reply\r\n" % code).encode() + headers
+            self.assertIs(self.response([reply]), expected)
+            with self.tls_context(), patch.object(probe, "tcp", return_value=self.socket([reply])):
+                self.assertIs(probe.denied(lambda: probe.connect(
+                    "172.30.196.4", 8443, "example.com:443", inspected_door=True)), not expected)
+        with patch.object(probe, "tcp", return_value=self.socket([hints + b"HTTP/1.1 200 OK\r\n\r\n"])), patch.object(probe.ssl, "create_default_context") as context:
+            self.assertTrue(probe.allowed_aim_tls())
+            context.return_value.wrap_socket.assert_called_once()
+
+    def test_header_bounds_and_final_header_deadline(self):
+        status = b"HTTP/1.1 403 Forbidden\r\n"
+        for headers in (b"X: y\r\n" * 64 + b"\r\n",
+                        b"X:" + b"x" * 4090 + b"\r\n\r\n"):
+            self.assertIs(self.response([status + headers]), False)
+        # A final status alone cannot decide while its headers stall.
+        ticks = [0] * (len(status) + 1) + [probe.TIMEOUT]
+        with patch.object(probe.time, "monotonic", side_effect=ticks):
+            self.assertIsNone(self.response([status + b"\r\n"]))
 
     def test_tls_door_informational_stream_is_bounded(self):
         responses = []
@@ -721,7 +773,7 @@ class ConnectStatusContracts(unittest.TestCase):
             self.assertEqual(len(responses), 6)
 
     def test_tls_door_informational_read_shares_original_deadline(self):
-        reply = b"HTTP/1.1 103 Early Hints\r\n\r\nHTTP/1.1 200 Connected\r\n"
+        reply = b"HTTP/1.1 103 Early Hints\r\n\r\nHTTP/1.1 200 Connected\r\n\r\n"
         # Expire the original deadline just as the final status would start.
         ticks = [0] * (len(b"HTTP/1.1 103 Early Hints\r\n\r\n") + 1) + [probe.TIMEOUT]
         with self.tls_context(), patch.object(probe, "tcp", return_value=self.socket([reply])), patch.object(probe.time, "monotonic", side_effect=ticks):
@@ -739,8 +791,8 @@ class ConnectStatusContracts(unittest.TestCase):
         with patch.object(probe, "tcp", side_effect=ConnectionRefusedError):
             self.assertIs(probe.connect("door", 3128, "example.com:443", inspected_door=True), False)
             self.assertIsNone(probe.connect("proxy", 3128, "example.com:443"))
-        self.assertIs(self.response([b"HTTP/1.0 400 Bad Request\r\n"], inspected_door=True), False)
-        self.assertIsNone(self.response([b"HTTP/1.0 400 Bad Request\r\n"]))
+        self.assertIs(self.response([b"HTTP/1.0 400 Bad Request\r\n\r\n"], inspected_door=True), False)
+        self.assertIsNone(self.response([b"HTTP/1.0 400 Bad Request\r\n\r\n"]))
         for line in (b"", b"garbage\n", b"HTTP/1.1 200 OK", b"HTTP/1.1 503 Error\r\n"):
             self.assertIsNone(self.response([line], inspected_door=True))
         with patch.object(probe, "tcp", side_effect=TimeoutError):
@@ -748,10 +800,10 @@ class ConnectStatusContracts(unittest.TestCase):
 
     def test_all_success_codes_and_segmented_status_fail_negative_probe(self):
         for code in (200, 204, 299):
-            line = ("HTTP/1.1 %d Connected\r\n" % code).encode()
+            line = ("HTTP/1.1 %d Connected\r\n\r\n" % code).encode()
             for blocks in ([line], [line[:5], line[5:11], line[11:]]):
                 self.assertIs(self.response(blocks), True)
-        self.assertIs(self.response([b"HTTP/1.0 403 Denied\r\n"]), False)
+        self.assertIs(self.response([b"HTTP/1.0 403 Denied\r\n\r\n"]), False)
 
     def test_malformed_partial_overlong_and_disconnect_are_inconclusive(self):
         for line in (b"garbage\r\n", b"HTTP/1.1 two Failed\r\n", b"HTTP/1.1 200 OK", b"HTTP/1.1 999 Bad\n", b"x" * 4096, b"", b"HTTP/1.1 503 Unavailable\r\n"):
